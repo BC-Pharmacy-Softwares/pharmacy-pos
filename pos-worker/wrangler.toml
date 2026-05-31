@@ -1,0 +1,10 @@
+name = "pill4mepos"
+main = "index.js"
+compatibility_date = "2024-01-01"
+compatibility_flags = ["nodejs_compat"]   # required for SMTP (cloudflare:sockets)
+
+# Secrets — set once via wrangler, never stored in this file:
+#   wrangler secret put WINRX_API_TOKEN   ← token from pharmacydashboard.ca
+#   wrangler secret put POS_KEY           ← any password you choose; paste same value into POS Settings
+#
+# PHARMACY_ID is no longer a secret — the POS sends it in the request body.

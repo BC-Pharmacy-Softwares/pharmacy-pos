@@ -1,0 +1,16 @@
+{
+  "name": "clover-local-pay",
+  "version": "2.0.0",
+  "description": "Clover Network Pay Display bridge (WebSocket — no OAuth needed)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "uuid": "^10.0.0",
+    "ws": "^8.17.1"
+  }
+}
