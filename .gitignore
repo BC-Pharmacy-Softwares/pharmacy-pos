@@ -1,0 +1,26 @@
+# ============================================================
+# Pharmacy POS — .gitignore
+# Safe to publish: each pharmacy fills in their own config.
+# ============================================================
+
+# --- Clover bridge service ---
+clover-local-pay/.env            # contains your Clover device IP & port
+clover-local-pay/.clover-token   # pairing token saved after first connect
+clover-local-pay/node_modules/
+clover-local-pay/*.log
+
+# --- Database exports (may contain patient/transaction data) ---
+pharmacy_pos_export_*.json
+
+# --- Downloaded libraries (re-fetched by setup scripts) ---
+lib/sql-wasm.js
+lib/sql-wasm.wasm
+lib/bcrypt.min.js
+
+# --- OS / editor noise ---
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.vscode/
+.idea/

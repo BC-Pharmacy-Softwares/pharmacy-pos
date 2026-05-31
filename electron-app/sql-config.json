@@ -1,0 +1,10 @@
+{
+  "server":   "PILL4ME-PCY\\SQLEXPRESS",
+  "database": "winrxdata",
+  "user":     "YOUR_SQL_USERNAME",
+  "password": "YOUR_SQL_PASSWORD",
+  "options": {
+    "trustServerCertificate": true,
+    "enableArithAbort": true
+  }
+}

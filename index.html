@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Pharmacy POS</title>
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <link rel="stylesheet" href="css/style.css?v=5" />
+</head>
+<body>
+  <div id="app">
+    <div id="screen-container"></div>
+  </div>
+
+  <!-- Receipt print area (hidden, shown only during print) -->
+  <div id="receipt-print-area" class="print-only"></div>
+
+  <!-- Libraries -->
+  <script src="lib/sql-wasm.js"></script>
+  <script src="lib/bcrypt.min.js"></script>
+  <script>var bcrypt = dcodeIO && dcodeIO.bcrypt ? dcodeIO.bcrypt : window.bcrypt;</script>
+
+  <!-- App modules (loaded as classic scripts for broad compatibility) -->
+  <script src="js/db.js?v=13"></script>
+  <script src="js/config.js?v=3"></script>
+  <script src="js/auth.js?v=4"></script>
+  <script src="js/utils/audit.js?v=3"></script>
+  <script src="js/utils/tax.js?v=5"></script>
+  <script src="js/utils/print.js?v=26"></script>
+  <script src="js/utils/report-print.js?v=1"></script>
+  <script src="js/utils/scheduler.js?v=1"></script>
+  <script src="js/parsers/barcode.js?v=5"></script>
+  <script src="js/parsers/webcat.js?v=3"></script>
+  <script src="js/api/pharmacy-dashboard.js?v=16"></script>
+  <script src="js/api/mckesson.js?v=4"></script>
+  <script src="js/api/clover.js?v=3"></script>
+  <script src="js/api/email.js?v=4"></script>
+  <script src="js/screens/login.js?v=4"></script>
+  <script src="js/screens/pos.js?v=52"></script>
+  <script src="js/screens/patient.js?v=11"></script>
+  <script src="js/screens/transaction.js?v=7"></script>
+  <script src="js/screens/settings.js?v=33"></script>
+  <script src="js/screens/reports.js?v=6"></script>
+  <script src="js/app.js?v=8"></script>
+</body>
+</html>

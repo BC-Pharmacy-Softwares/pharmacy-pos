@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Clover Local Pay — Test Console</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #f0f2f5;
+      color: #1a1a2e;
+      min-height: 100vh;
+      padding: 32px 16px;
+    }
+
+    .container { max-width: 680px; margin: 0 auto; }
+
+    h1 {
+      font-size: 22px;
+      font-weight: 700;
+      margin-bottom: 4px;
+      color: #1a1a2e;
+    }
+    .subtitle {
+      font-size: 13px;
+      color: #666;
+      margin-bottom: 28px;
+    }
+
+    .card {
+      background: #fff;
+      border-radius: 12px;
+      padding: 24px;
+      margin-bottom: 16px;
+      box-shadow: 0 1px 4px rgba(0,0,0,.08);
+    }
+    .card-title {
+      font-size: 13px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .5px;
+      color: #888;
+      margin-bottom: 16px;
+    }
+
+    .field { margin-bottom: 14px; }
+    label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 5px; }
+    input, textarea {
+      width: 100%;
+      padding: 9px 12px;
+      border: 1.5px solid #ddd;
+      border-radius: 7px;
+      font-size: 14px;
+      outline: none;
+      transition: border-color .15s;
+    }
+    input:focus, textarea:focus { border-color: #4a90e2; }
+    .hint { font-size: 11px; color: #aaa; margin-top: 3px; }
+
+    .btn-row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 8px; }
+    button {
+      padding: 10px 20px;
+      border: none;
+      border-radius: 7px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity .15s, transform .1s;
+    }
+    button:active { transform: scale(.97); }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+
+    .btn-primary  { background: #4a90e2; color: #fff; }
+    .btn-success  { background: #27ae60; color: #fff; }
+    .btn-warning  { background: #e67e22; color: #fff; }
+    .btn-danger   { background: #e74c3c; color: #fff; }
+    .btn-outline  { background: transparent; border: 1.5px solid #ccc; color: #333; }
+
+    /* Response panel */
+    #response-panel {
+      background: #1a1a2e;
+      border-radius: 10px;
+      padding: 16px;
+      min-height: 120px;
+      max-height: 380px;
+      overflow-y: auto;
+    }
+    .resp-entry {
+      margin-bottom: 14px;
+      border-left: 3px solid #4a90e2;
+      padding-left: 10px;
+    }
+    .resp-entry.success { border-color: #27ae60; }
+    .resp-entry.error   { border-color: #e74c3c; }
+    .resp-entry.info    { border-color: #f1c40f; }
+
+    .resp-meta {
+      font-size: 11px;
+      color: #888;
+      margin-bottom: 4px;
+      font-family: monospace;
+    }
+    .resp-body {
+      font-family: monospace;
+      font-size: 13px;
+      white-space: pre-wrap;
+      word-break: break-all;
+      color: #e8eaf6;
+    }
+    .resp-body.ok-true  { color: #a8e6cf; }
+    .resp-body.ok-false { color: #ffb3b3; }
+    .resp-placeholder { color: #555; font-size: 13px; font-style: italic; }
+
+    /* Status badge */
+    .status-dot {
+      display: inline-block;
+      width: 9px; height: 9px;
+      border-radius: 50%;
+      margin-right: 6px;
+      background: #ccc;
+    }
+    .status-dot.online  { background: #27ae60; }
+    .status-dot.offline { background: #e74c3c; }
+
+    .device-info {
+      font-size: 12px;
+      color: #888;
+      margin-bottom: 20px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+  </style>
+</head>
+<body>
+<div class="container">
+
+  <h1>&#128179; Clover Local Pay — Test Console</h1>
+  <p class="subtitle">Sends requests to your local Node.js service (port 3001), which forwards them to the Clover terminal.</p>
+
+  <!-- Device status -->
+  <div class="device-info">
+    <span class="status-dot" id="status-dot"></span>
+    <span id="status-text">Not checked yet — click Ping to test device</span>
+  </div>
+
+  <!-- ── Ping ─────────────────────────────────── -->
+  <div class="card">
+    <div class="card-title">Device Connectivity</div>
+    <div class="btn-row">
+      <button class="btn-outline" onclick="doPing()">Ping Device</button>
+    </div>
+  </div>
+
+  <!-- ── Display Order ─────────────────────────── -->
+  <div class="card">
+    <div class="card-title">Display Order on Terminal</div>
+    <p style="font-size:13px;color:#666;margin-bottom:14px;">
+      Shows cart details on the customer-facing Clover screen before payment.
+    </p>
+
+    <div class="field">
+      <label>Order ID</label>
+      <input type="text" id="display-order-id" value="order_001" />
+      <div class="hint">Your internal order reference.</div>
+    </div>
+    <div class="field">
+      <label>Subtotal (display only)</label>
+      <input type="text" id="display-subtotal" value="12.50" placeholder="e.g. 12.50" />
+    </div>
+    <div class="field">
+      <label>Tax (display only)</label>
+      <input type="text" id="display-tax" value="1.00" placeholder="e.g. 1.00" />
+    </div>
+    <div class="field">
+      <label>Total (display only)</label>
+      <input type="text" id="display-total" value="13.50" placeholder="e.g. 13.50" />
+    </div>
+    <div class="field">
+      <label>Line Items (JSON array)</label>
+      <textarea id="display-items" rows="4">[
+  { "name": "Amoxicillin 500mg", "price": "12.50", "quantity": 1 }
+]</textarea>
+      <div class="hint">Array of { name, price, quantity } objects.</div>
+    </div>
+
+    <div class="btn-row">
+      <button class="btn-primary" onclick="doDisplayOrder()">Display Order</button>
+    </div>
+  </div>
+
+  <!-- ── Sale ──────────────────────────────────── -->
+  <div class="card">
+    <div class="card-title">Take Payment</div>
+    <p style="font-size:13px;color:#666;margin-bottom:14px;">
+      Sends a sale request — the customer taps, inserts, or swipes on the terminal.
+      Waits up to ~60 seconds for completion.
+    </p>
+
+    <div class="field">
+      <label>Amount (cents)</label>
+      <input type="number" id="sale-amount" value="1350" min="1" />
+      <div class="hint">Enter in cents. $13.50 = 1350.</div>
+    </div>
+    <div class="field">
+      <label>External Payment ID</label>
+      <input type="text" id="sale-ext-id" value="order_001" />
+      <div class="hint">Your unique order/payment reference. Must be unique per charge.</div>
+    </div>
+    <div class="field">
+      <label>Idempotency Key <span style="font-weight:400;color:#aaa;">(auto-generated if blank)</span></label>
+      <input type="text" id="sale-idem-key" placeholder="Leave blank to auto-generate" />
+      <div class="hint">Prevents double-charging on retries. Leave blank to auto-generate.</div>
+    </div>
+
+    <div class="btn-row">
+      <button class="btn-success" onclick="doSale()">Take Payment</button>
+      <button class="btn-danger"  onclick="doCancel()">Cancel Payment</button>
+    </div>
+  </div>
+
+  <!-- ── Response Output ────────────────────────── -->
+  <div class="card">
+    <div class="card-title">Response Output</div>
+    <div id="response-panel">
+      <div class="resp-placeholder">Responses will appear here.</div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+  // ── Config ─────────────────────────────────────────────────────────────
+  // The base URL of your local Node.js service (not the Clover device directly).
+  const API_BASE = 'http://localhost:3001';
+
+  // ── Helpers ────────────────────────────────────────────────────────────
+
+  function log(label, data, type = 'info') {
+    const panel = document.getElementById('response-panel');
+    // Remove placeholder text on first log
+    const placeholder = panel.querySelector('.resp-placeholder');
+    if (placeholder) placeholder.remove();
+
+    const json = JSON.stringify(data, null, 2);
+    const isOk = data?.ok === true ? 'ok-true' : data?.ok === false ? 'ok-false' : '';
+
+    const entry = document.createElement('div');
+    entry.className = `resp-entry ${type}`;
+    entry.innerHTML = `
+      <div class="resp-meta">${new Date().toLocaleTimeString()} — ${label}</div>
+      <div class="resp-body ${isOk}">${json}</div>`;
+
+    panel.prepend(entry);
+  }
+
+  function setButtons(disabled) {
+    document.querySelectorAll('button').forEach(b => b.disabled = disabled);
+  }
+
+  async function apiCall(method, path, body) {
+    const opts = {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+    };
+    if (body) opts.body = JSON.stringify(body);
+
+    const resp = await fetch(`${API_BASE}${path}`, opts);
+    const data = await resp.json();
+    return data;
+  }
+
+  // ── Ping ────────────────────────────────────────────────────────────────
+
+  async function doPing() {
+    const dot  = document.getElementById('status-dot');
+    const text = document.getElementById('status-text');
+    text.textContent = 'Checking...';
+    dot.className = 'status-dot';
+
+    try {
+      const data = await apiCall('GET', '/clover/ping');
+      if (data.ok) {
+        dot.className  = 'status-dot online';
+        text.textContent = `Online — ${data.device}`;
+      } else {
+        dot.className  = 'status-dot offline';
+        text.textContent = `Offline — ${data.message}`;
+      }
+      log('GET /clover/ping', data, data.ok ? 'success' : 'error');
+    } catch (err) {
+      dot.className  = 'status-dot offline';
+      text.textContent = 'Cannot reach local server — is Node.js running?';
+      log('GET /clover/ping', { ok: false, message: err.message }, 'error');
+    }
+  }
+
+  // ── Display Order ───────────────────────────────────────────────────────
+
+  async function doDisplayOrder() {
+    let lineItems;
+    try {
+      lineItems = JSON.parse(document.getElementById('display-items').value);
+    } catch (e) {
+      log('display-order:parse', { ok: false, message: 'Line items JSON is invalid: ' + e.message }, 'error');
+      return;
+    }
+
+    const body = {
+      orderId:  document.getElementById('display-order-id').value.trim(),
+      subtotal: document.getElementById('display-subtotal').value.trim(),
+      tax:      document.getElementById('display-tax').value.trim(),
+      total:    document.getElementById('display-total').value.trim(),
+      lineItems,
+    };
+
+    setButtons(true);
+    try {
+      const data = await apiCall('POST', '/clover/display-order', body);
+      log('POST /clover/display-order', data, data.ok ? 'success' : 'error');
+    } catch (err) {
+      log('POST /clover/display-order', { ok: false, message: err.message }, 'error');
+    } finally {
+      setButtons(false);
+    }
+  }
+
+  // ── Sale ────────────────────────────────────────────────────────────────
+
+  async function doSale() {
+    const amount = parseInt(document.getElementById('sale-amount').value);
+    const extId  = document.getElementById('sale-ext-id').value.trim();
+    const iKey   = document.getElementById('sale-idem-key').value.trim() || undefined;
+
+    if (!amount || amount <= 0) {
+      log('sale:validation', { ok: false, message: 'Enter a valid amount in cents.' }, 'error');
+      return;
+    }
+    if (!extId) {
+      log('sale:validation', { ok: false, message: 'External Payment ID is required.' }, 'error');
+      return;
+    }
+
+    const body = { amount, externalPaymentId: extId };
+    if (iKey) body.idempotencyKey = iKey;
+
+    log('sale:sending', { amount, externalPaymentId: extId }, 'info');
+    setButtons(true);
+
+    try {
+      const data = await apiCall('POST', '/clover/sale', body);
+      log('POST /clover/sale', data, data.ok ? 'success' : 'error');
+    } catch (err) {
+      log('POST /clover/sale', { ok: false, message: err.message }, 'error');
+    } finally {
+      setButtons(false);
+    }
+  }
+
+  // ── Cancel ──────────────────────────────────────────────────────────────
+
+  async function doCancel() {
+    try {
+      const data = await apiCall('POST', '/clover/cancel', {});
+      log('POST /clover/cancel', data, data.ok ? 'info' : 'error');
+    } catch (err) {
+      log('POST /clover/cancel', { ok: false, message: err.message }, 'error');
+    }
+  }
+</script>
+</body>
+</html>

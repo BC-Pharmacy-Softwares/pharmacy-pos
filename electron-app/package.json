@@ -1,0 +1,69 @@
+{
+  "name": "pharmacy-pos",
+  "version": "1.0.0",
+  "description": "Pharmacy POS — Pill4Me",
+  "main": "main.js",
+  "author": "Pill4Me",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --win --x64"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "mssql": "^10.0.4",
+    "nodemailer": "^8.0.7"
+  },
+  "devDependencies": {
+    "electron": "^29.0.0",
+    "electron-builder": "^24.9.1"
+  },
+  "build": {
+    "appId": "ca.pill4me.pharmacypos",
+    "productName": "Pharmacy POS",
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "icon.ico"
+    },
+    "nsis": {
+      "oneClick": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Pharmacy POS"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "package.json",
+      "node_modules/**"
+    ],
+    "extraResources": [
+      {
+        "from": "../",
+        "to": "app",
+        "filter": [
+          "**/*",
+          "!electron-app/**",
+          "!pos-worker/**",
+          "!clover-local-pay/**",
+          "!node_modules/**",
+          "!*.md",
+          "!*.json",
+          "!.git/**",
+          "!docs/**",
+          "!setup.bat",
+          "!setup.sh"
+        ]
+      }
+    ]
+  }
+}
