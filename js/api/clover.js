@@ -62,7 +62,8 @@ const CloverAPI = (() => {
      externalPaymentId — your unique order reference
      signal — AbortSignal so the UI cancel button can abort the fetch
      Returns { ok, paymentId, amount, cardType, last4, result } */
-  async function sale(amountCents, externalPaymentId, signal = null, cardEntryMethods = 15) {
+  // 34831 = Clover SDK ALL methods (swipe+chip+tap+manual), includes required KIOSK bit (32768)
+  async function sale(amountCents, externalPaymentId, signal = null, cardEntryMethods = 34831) {
     return _post('/clover/sale', { amount: amountCents, externalPaymentId, cardEntryMethods }, signal);
   }
 

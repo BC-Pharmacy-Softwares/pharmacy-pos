@@ -63,6 +63,7 @@ class SettingsScreen {
             ['btcfolder',    'BTC Records',       true,  false],  // desktop only
             ['emailreports', 'Email Reports',     false, false],
             ['backup',       'Backup',            false, true ],  // Admin only
+            ['updates',      'Updates',           false, false],
           ].filter(row => row[0] === '__hdr__' || !row[2] || !!window.electronAPI)
            .map(row => {
              if (row[0] === '__hdr__') {
@@ -145,6 +146,7 @@ class SettingsScreen {
       case 'btcfolder':  if (window.electronAPI) this._renderBtcFolder(content); break;
       case 'emailreports': this._renderEmailReports(content);  break;
       case 'backup':       this._renderBackup(content);       break;
+      case 'updates':      this._renderUpdates(content);      break;
     }
   }
 
@@ -3592,6 +3594,93 @@ class SettingsScreen {
   }
 
   detach() {}
+
+  _renderUpdates(content) {
+    const REPO = 'BC-Pharmacy-Softwares/pharmacy-pos';
+    const current = window.APP_VERSION || '?';
+
+    content.innerHTML = `
+      <h3>Software Updates</h3>
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:20px;max-width:520px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+          <div>
+            <div style="font-size:13px;color:var(--text-muted);margin-bottom:2px;">Installed version</div>
+            <div style="font-size:20px;font-weight:700;color:var(--primary);">v${current}</div>
+          </div>
+          <button class="btn btn-primary" id="btn-check-update">Check for Updates</button>
+        </div>
+        <div id="update-status" style="font-size:13px;color:var(--text-muted);min-height:24px;"></div>
+        <div id="update-action" style="margin-top:14px;display:none;"></div>
+      </div>
+      <div style="margin-top:24px;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:18px;max-width:520px;">
+        <h4 style="margin:0 0 10px;font-size:14px;">How to publish an update</h4>
+        <ol style="margin:0;padding-left:18px;font-size:13px;line-height:1.9;color:var(--text-muted);">
+          <li>Bump the version in <code>js/version.js</code> and <code>electron-app/package.json</code></li>
+          <li>Run <code>BUILD-WINDOWS.bat</code> to create the new installer</li>
+          <li>Go to <a href="#" id="link-releases" style="color:var(--primary);">GitHub → Releases</a> → <strong>Draft a new release</strong></li>
+          <li>Set the tag to <code>v1.4.2</code> (matching the version number)</li>
+          <li>Attach the <code>Pharmacy POS Setup *.exe</code> file</li>
+          <li>Click <strong>Publish release</strong></li>
+        </ol>
+        <p style="margin:10px 0 0;font-size:12px;color:var(--text-muted);">
+          The app checks this GitHub repo for new releases. Staff will see an update notification here.
+        </p>
+      </div>`;
+
+    const statusEl = content.querySelector('#update-status');
+    const actionEl = content.querySelector('#update-action');
+
+    content.querySelector('#link-releases').addEventListener('click', e => {
+      e.preventDefault();
+      if (window.electronAPI?.openExternal) window.electronAPI.openExternal(`https://github.com/${REPO}/releases`);
+      else window.open(`https://github.com/${REPO}/releases`, '_blank');
+    });
+
+    content.querySelector('#btn-check-update').addEventListener('click', async () => {
+      statusEl.textContent = 'Checking for updates…';
+      statusEl.style.color = 'var(--text-muted)';
+      actionEl.style.display = 'none';
+
+      try {
+        const resp = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`, {
+          headers: { Accept: 'application/vnd.github+json' }
+        });
+        if (!resp.ok) throw new Error(`GitHub API returned ${resp.status}`);
+        const data = await resp.json();
+
+        const tag = (data.tag_name || '').replace(/^v/, '');
+        const isNewer = _semverGt(tag, current);
+
+        if (!tag) {
+          statusEl.textContent = 'No releases published yet.';
+        } else if (isNewer) {
+          statusEl.textContent = `Update available: v${tag}`;
+          statusEl.style.color = 'var(--success, green)';
+
+          const asset = (data.assets || []).find(a => a.name.endsWith('.exe'));
+          const downloadUrl = asset?.browser_download_url || data.html_url;
+          const notes = data.body ? data.body.substring(0, 300) : '';
+
+          actionEl.innerHTML = `
+            ${notes ? `<div style="font-size:12px;color:var(--text-muted);margin-bottom:10px;white-space:pre-wrap;">${notes}</div>` : ''}
+            <button class="btn btn-primary" id="btn-download-update">Download v${tag}</button>
+            <span style="font-size:12px;color:var(--text-muted);margin-left:10px;">Opens in browser — run the installer when downloaded</span>`;
+          actionEl.style.display = 'block';
+
+          actionEl.querySelector('#btn-download-update').addEventListener('click', () => {
+            if (window.electronAPI?.openExternal) window.electronAPI.openExternal(downloadUrl);
+            else window.open(downloadUrl, '_blank');
+          });
+        } else {
+          statusEl.textContent = `You're up to date. (Latest: v${tag})`;
+          statusEl.style.color = 'var(--success, green)';
+        }
+      } catch (e) {
+        statusEl.textContent = 'Could not check for updates: ' + e.message;
+        statusEl.style.color = 'var(--danger)';
+      }
+    });
+  }
 }
 
 function _downloadBlob(blob, filename) {
@@ -3606,4 +3695,11 @@ function _downloadBlob(blob, filename) {
 
 function _dateStr() {
   return localDateStr();
+}
+
+function _semverGt(a, b) {
+  const p = v => String(v || '0').split('.').map(n => parseInt(n) || 0);
+  const [a1, a2, a3] = p(a);
+  const [b1, b2, b3] = p(b);
+  return a1 > b1 || (a1 === b1 && a2 > b2) || (a1 === b1 && a2 === b2 && a3 > b3);
 }

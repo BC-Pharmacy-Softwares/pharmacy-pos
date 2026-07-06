@@ -28,6 +28,17 @@ const {
   PORT               = '3001',
 } = process.env;
 
+// Clover SDK card entry method constants (must include KIOSK bit 0x8000 = 32768)
+// Source: clover/remote-pay-cloud CardEntryMethods
+const CLOVER_CARD_ENTRY = {
+  MAG:    34817,  // swipe
+  ICC:    34818,  // chip/insert
+  NFC:    34820,  // tap/contactless
+  MANUAL: 34824,  // keyed card number entry
+  DEFAULT: 34823, // swipe + chip + tap (no manual)
+  ALL:    34831,  // swipe + chip + tap + manual
+};
+
 if (!CLOVER_DEVICE_IP) {
   console.log('[clover] CLOVER_DEVICE_IP not set — starting in offline mode (payment terminal not connected).');
   console.log('[clover] Configure the device IP in Settings → API Credentials → Clover, then restart.');
@@ -466,7 +477,7 @@ app.post('/clover/display-order', (req, res) => {
 // ── Sale ──────────────────────────────────────────────────────────────────
 
 app.post('/clover/sale', (req, res) => {
-  const { amount, externalPaymentId, cardEntryMethods = 15 } = req.body;
+  const { amount, externalPaymentId, cardEntryMethods = CLOVER_CARD_ENTRY.ALL } = req.body;
 
   if (!amount || typeof amount !== 'number' || amount <= 0) {
     return res.status(400).json({ ok: false, message: '"amount" must be a positive integer (cents).' });
@@ -507,8 +518,7 @@ app.post('/clover/sale', (req, res) => {
       tippableAmount:    amount,
       taxAmount:         0,
       externalPaymentId,
-      // 1=swipe  2=chip  4=tap  8=manual  → 15 = accept all
-      cardEntryMethods:  typeof cardEntryMethods === 'number' ? cardEntryMethods : 15,
+      cardEntryMethods:  typeof cardEntryMethods === 'number' ? cardEntryMethods : CLOVER_CARD_ENTRY.ALL,
       disableCashback:   true,
       tipMode:           'NO_TIP',
       transactionSettings: {
@@ -600,7 +610,7 @@ app.post('/clover/refund', (req, res) => {
         externalPaymentId: externalId,
         tipAmount:         0,
         taxAmount:         0,
-        cardEntryMethods:  15,
+        cardEntryMethods:  CLOVER_CARD_ENTRY.ALL,
         transactionSettings: {
           disablePrinting:         true,
           disableReceiptSelection: true,
