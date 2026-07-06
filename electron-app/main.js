@@ -11,7 +11,7 @@
  * If SQL is not configured, the app falls back to the Cloudflare Worker as usual.
  */
 
-const { app, BrowserWindow, dialog, ipcMain } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, shell } = require('electron');
 const express    = require('express');
 const path       = require('path');
 const http       = require('http');
@@ -423,6 +423,11 @@ function registerIpcHandlers() {
 
   // Native folder picker — returns the chosen path (or null if cancelled).
   // 'createDirectory' lets the user make a new folder right in the dialog.
+  ipcMain.handle('open-external', (_, url) => {
+    shell.openExternal(url);
+    return { ok: true };
+  });
+
   ipcMain.handle('pick-folder', async (_, { current } = {}) => {
     try {
       const opts = {

@@ -42,4 +42,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   /** Open the native folder picker — returns { ok, path?, canceled? } */
   pickFolder: (current) => ipcRenderer.invoke('pick-folder', { current }),
+
+  /** Open a URL in the system default browser */
+  openExternal: (url) => ipcRenderer.invoke('open-external', url),
 });
