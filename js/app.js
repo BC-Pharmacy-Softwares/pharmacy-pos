@@ -84,9 +84,14 @@
     await Tax.loadRates();
     document.getElementById('load-msg').textContent = 'Ready.';
 
-    // Apply saved colour theme
-    const savedColour = await Config.get('theme_colour');
-    if (savedColour) applyThemeColour(savedColour);
+    // Apply saved Brand Kit (falls back to legacy single theme colour)
+    const savedKit = await Config.get('brand_kit');
+    if (savedKit) {
+      applyBrandKit(typeof savedKit === 'string' ? JSON.parse(savedKit) : savedKit);
+    } else {
+      const savedColour = await Config.get('theme_colour');
+      if (savedColour) applyThemeColour(savedColour);
+    }
 
     // Start automated report scheduler (daily + monthly emails)
     Scheduler.start();
@@ -118,14 +123,44 @@
   }
 })();
 
-/* Apply a hex colour to all CSS theme variables — called on startup and when saved */
+/* Darken/lighten a hex by a delta per channel (±0–255). */
+function _shade(hex, delta) {
+  if (!/^#[0-9a-f]{6}$/i.test(hex)) return hex;
+  return '#' + hex.slice(1).match(/.{2}/g)
+    .map(c => Math.min(255, Math.max(0, parseInt(c, 16) + delta)).toString(16).padStart(2, '0'))
+    .join('');
+}
+
+/* Apply a single hex colour as the primary (legacy theme-colour path). */
 function applyThemeColour(hex) {
   if (!hex || !/^#[0-9a-f]{6}$/i.test(hex)) return;
-  // Darken by ~15% for hover state
-  const dk = '#' + hex.slice(1).match(/.{2}/g)
-    .map(c => Math.max(0, parseInt(c, 16) - 38).toString(16).padStart(2, '0'))
-    .join('');
   const root = document.documentElement;
-  root.style.setProperty('--primary',    hex);
-  root.style.setProperty('--primary-dk', dk);
+  root.style.setProperty('--primary',     hex);
+  root.style.setProperty('--primary-dk',  _shade(hex, -38));
+  root.style.setProperty('--primary-soft', _shade(hex, 200));
+}
+
+/* Global brand colours — readable synchronously by print builders (which emit
+   standalone HTML that doesn't inherit the app's CSS variables). */
+window.BRAND_KIT = { background:'#f4f3ee', primary:'#1e4031', danger:'#c62f25', warning:'#e9a93c' };
+
+/* Apply a full Brand Kit. kit = { background, primary, danger, warning, extras:[] }.
+   Any field omitted falls back to the CSS default. */
+function applyBrandKit(kit) {
+  if (!kit || typeof kit !== 'object') return;
+  ['background','primary','danger','warning','success'].forEach(k => {
+    if (kit[k] && /^#[0-9a-f]{6}$/i.test(kit[k])) window.BRAND_KIT[k] = kit[k];
+  });
+  const root = document.documentElement;
+  const set = (v, val) => { if (val && /^#[0-9a-f]{6}$/i.test(val)) root.style.setProperty(v, val); };
+  if (kit.primary) {
+    set('--primary', kit.primary);
+    set('--primary-dk',   _shade(kit.primary, -38));
+    set('--primary-soft', _shade(kit.primary, 200));
+  }
+  set('--bg', kit.background);
+  if (kit.background) set('--surface2', _shade(kit.background, 6));
+  set('--danger',  kit.danger);
+  set('--warning', kit.warning);
+  if (kit.success) set('--success', kit.success);
 }

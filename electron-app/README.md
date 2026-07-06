@@ -32,7 +32,7 @@ The app needs to connect to your WinRx SQL Server before it can look up patients
 1. Open the app and log in with your Admin PIN.
 2. Go to **Settings → SQL Connection**.
 3. Fill in:
-   - **SQL Server** — the computer name and instance, e.g. `PILL4ME-PCY\SQLEXPRESS`
+   - **SQL Server** — the computer name and instance, e.g. `SERVER-PC\SQLEXPRESS`
    - **Database** — usually `winrxdata`
    - **Username** — your SQL Server login username
    - **Password** — your SQL Server login password
@@ -212,4 +212,4 @@ Requirements: Windows PC with Node.js installed (https://nodejs.org).
 
 For technical issues, contact your pharmacy IT support or the software provider.
 
-*Pharmacy POS — Built for Pill4Me Pharmacy*
+*Pharmacy POS*

@@ -29,10 +29,17 @@ const {
 } = process.env;
 
 if (!CLOVER_DEVICE_IP) {
-  console.error('[ERROR] Missing required .env value: CLOVER_DEVICE_IP');
-  console.error('        Copy .env.example to .env and set CLOVER_DEVICE_IP to your device IP.');
-  console.error('        (Shown on Clover device: Network Pay Display app)');
-  process.exit(1);
+  console.log('[clover] CLOVER_DEVICE_IP not set — starting in offline mode (payment terminal not connected).');
+  console.log('[clover] Configure the device IP in Settings → API Credentials → Clover, then restart.');
+  // Start Express anyway so the POS can detect service is running (just not connected to device)
+  const app = require('express')();
+  app.use((req, res, next) => { res.setHeader('Access-Control-Allow-Origin','*'); res.setHeader('Access-Control-Allow-Methods','GET,POST,OPTIONS'); if(req.method==='OPTIONS'){res.sendStatus(204);return;} next(); });
+  app.use(require('express').json());
+  app.get('/clover/ping',    (_, res) => res.json({ ok: false, status: 'not_configured', message: 'CLOVER_DEVICE_IP not set in .env' }));
+  app.post('/clover/sale',   (_, res) => res.status(503).json({ ok: false, message: 'Clover device IP not configured.' }));
+  app.all('*',               (_, res) => res.status(503).json({ ok: false, message: 'Clover not configured.' }));
+  app.listen(parseInt(PORT||3001), () => console.log(`[clover] Offline mode — listening on port ${PORT||3001}`));
+  return;
 }
 
 const WSS_URL     = `wss://${CLOVER_DEVICE_IP}:${CLOVER_DEVICE_PORT}/remote_pay`;
@@ -52,6 +59,7 @@ let pairingCodeToShow   = null;  // 4-digit code sent by device for user to ente
 let authToken           = null;
 let pendingPairCb       = null;  // {resolve, reject} waiting for PAIRING_RESPONSE
 let pendingSale         = null;  // {resolve, reject, timer}
+let pendingRefund       = null;  // {resolve, reject, timer}
 let reconnectTimer      = null;
 
 // ── Token persistence ─────────────────────────────────────────────────────
@@ -252,35 +260,64 @@ function handleMessage(method, payload) {
     }
 
     case 'FINISH_CANCEL': {
-      if (!pendingSale) break;
-      clearTimeout(pendingSale.timer);
-      pendingSale.reject(Object.assign(
+      const pending = pendingSale || pendingRefund;
+      if (!pending) break;
+      clearTimeout(pending.timer);
+      pending.reject(Object.assign(
         new Error('Payment was cancelled on the terminal.'),
         { code: 'PAYMENT_CANCELLED' }
       ));
-      pendingSale = null;
+      if (pendingSale)  pendingSale  = null;
+      if (pendingRefund) pendingRefund = null;
       break;
     }
 
     case 'FINISH_FAIL': {
       console.error('[clover] FINISH_FAIL:', JSON.stringify(payload));
-      if (!pendingSale) break;
-      clearTimeout(pendingSale.timer);
+      const pending = pendingSale || pendingRefund;
+      if (!pending) break;
+      clearTimeout(pending.timer);
       const reason = payload.reason || payload.message || payload.result || 'Payment failed on terminal.';
-      pendingSale.reject(Object.assign(new Error(reason), { code: 'PAYMENT_FAILED' }));
-      pendingSale = null;
+      pending.reject(Object.assign(new Error(reason), { code: 'PAYMENT_FAILED' }));
+      if (pendingSale)   pendingSale   = null;
+      if (pendingRefund) pendingRefund = null;
+      break;
+    }
+
+    case 'REFUND_RESPONSE': {
+      console.log('[clover] REFUND_RESPONSE:', JSON.stringify(payload));
+      if (!pendingRefund) break;
+      clearTimeout(pendingRefund.timer);
+      const result = (payload.result || '').toUpperCase();
+      if (result === 'SUCCESS' || result === 'APPROVED') {
+        const refund = payload.refund || {};
+        pendingRefund.resolve({
+          ok:       true,
+          refundId: refund.id   || null,
+          amount:   refund.amount || null,
+          result:   'SUCCESS',
+        });
+      } else {
+        pendingRefund.reject(Object.assign(
+          new Error(payload.reason || payload.message || 'Refund declined on terminal.'),
+          { code: 'REFUND_FAILED' }
+        ));
+      }
+      pendingRefund = null;
       break;
     }
 
     case 'REMOTE_ERROR': {
       console.error('[clover] REMOTE_ERROR:', JSON.stringify(payload));
-      if (pendingSale) {
-        clearTimeout(pendingSale.timer);
-        pendingSale.reject(Object.assign(
+      const pendingAny = pendingSale || pendingRefund;
+      if (pendingAny) {
+        clearTimeout(pendingAny.timer);
+        pendingAny.reject(Object.assign(
           new Error(payload.message || payload.cause || 'Remote error from Clover device.'),
           { code: 'REMOTE_ERROR' }
         ));
-        pendingSale = null;
+        pendingSale   = null;
+        pendingRefund = null;
       }
       break;
     }
@@ -480,6 +517,12 @@ app.post('/clover/sale', (req, res) => {
         promptForSignature:                 false,
         signatureEntryLocation:             'NONE',
         signatureThreshold:                 0,
+        // Suppress Clover's own receipt prompt — POS prints the receipt instead
+        disablePrinting:                    true,
+        disableReceiptSelection:            true,
+        // Allow cashier to key in card number manually (e.g. phone orders, unreadable cards)
+        allowManualCardEntry:               true,
+        cardEntryMethods:                   typeof cardEntryMethods === 'number' ? cardEntryMethods : 15,
       },
     },
   });
@@ -497,6 +540,74 @@ app.post('/clover/cancel', (req, res) => {
     pendingSale = null;
   }
   res.json({ ok: true });
+});
+
+// ── Refund ────────────────────────────────────────────────────────────────
+//
+//  POST /clover/refund
+//  Body: { amount: <cents>, paymentId: "<clover_payment_id>" }
+//
+//  If paymentId is supplied → REFUND_REQUEST (linked to original payment, preferred)
+//  If paymentId is missing  → TX_START MANUAL_REFUND (standalone, works without original ID)
+
+app.post('/clover/refund', (req, res) => {
+  const { amount, paymentId } = req.body;
+
+  if (!amount || typeof amount !== 'number' || amount <= 0) {
+    return res.status(400).json({ ok: false, message: '"amount" must be a positive integer (cents).' });
+  }
+  if (pairingStatus !== 'ready' && pairingStatus !== 'paired') {
+    return res.status(503).json({
+      ok: false, code: 'NOT_PAIRED',
+      message: `Clover not ready (status: ${pairingStatus}). Check Settings → API Credentials → Clover.`,
+    });
+  }
+  if (pendingSale || pendingRefund) {
+    return res.status(409).json({ ok: false, message: 'A transaction is already in progress on the terminal.' });
+  }
+
+  const timer = setTimeout(() => {
+    pendingRefund = null;
+    wsSend('CANCEL_PAYMENT', {});
+    res.status(504).json({ ok: false, code: 'TIMEOUT', message: 'Refund timed out after 90 seconds.' });
+  }, 90_000);
+
+  pendingRefund = {
+    resolve: result => res.json(result),
+    reject:  err    => {
+      const status = err.code === 'PAYMENT_CANCELLED' ? 422 : 500;
+      res.status(status).json({ ok: false, code: err.code || 'ERROR', message: err.message });
+    },
+    timer,
+  };
+
+  if (paymentId) {
+    // Linked refund — ties back to the original payment record on Clover
+    console.log(`[clover] REFUND_REQUEST → ${amount}¢  paymentId:${paymentId}`);
+    wsSend('REFUND_REQUEST', {
+      paymentId,
+      amount,
+      fullRefund: false,
+    });
+  } else {
+    // Manual refund — no original payment ID (e.g. keyed-in transaction or ID not stored)
+    const externalId = 'REFUND-' + Date.now();
+    console.log(`[clover] TX_START MANUAL_REFUND → ${amount}¢  id:${externalId}`);
+    wsSend('TX_START', {
+      payIntent: {
+        action:           'MANUAL_REFUND',
+        amount,
+        externalPaymentId: externalId,
+        tipAmount:         0,
+        taxAmount:         0,
+        cardEntryMethods:  15,
+        transactionSettings: {
+          disablePrinting:         true,
+          disableReceiptSelection: true,
+        },
+      },
+    });
+  }
 });
 
 // ── Start ─────────────────────────────────────────────────────────────────

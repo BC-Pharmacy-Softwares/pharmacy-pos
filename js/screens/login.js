@@ -76,8 +76,8 @@ class LoginScreen {
       try {
         await Config.unlock(pass);
         await Auth.createInitialAdmin(name, pin);
-        const staff = await Auth.login(pin);
-        this._onLogin(staff);
+        const result = await Auth.login(pin);
+        this._onLogin(result.staff);
       } catch(e) {
         err.textContent = 'Setup failed: ' + e.message;
         btn.disabled = false;
@@ -104,6 +104,9 @@ class LoginScreen {
         <div class="login-error" id="pin-error"></div>
         <div class="setup-prompt">
           First time? <a id="setup-link">Set up config passphrase</a>
+        </div>
+        <div style="text-align:center;margin-top:14px;font-size:11px;color:var(--text-muted);opacity:.7;">
+          Version ${window.APP_VERSION || '?'}
         </div>
       </div>`;
     this._attachPinPad();
@@ -135,10 +138,15 @@ class LoginScreen {
     const doLogin = async () => {
       if (!this._pin) { errEl.textContent = 'Enter your PIN.'; return; }
       errEl.textContent = '';
-      const staff = await Auth.login(this._pin);
-      if (staff) {
-        await Config.unlock(await this._promptPassphrase(staff));
-        this._onLogin(staff);
+      const result = await Auth.login(this._pin);
+      if (result.error) {
+        errEl.textContent = result.error;
+        this._pin = '';
+        updateDisplay();
+      } else if (result.staff) {
+        const pp = await this._promptPassphrase(result.staff);
+        if (pp) await Config.unlock(pp);   // null = already unlocked; don't re-derive a bad key
+        this._onLogin(result.staff);
       } else {
         errEl.textContent = 'Incorrect PIN.';
         this._pin = '';

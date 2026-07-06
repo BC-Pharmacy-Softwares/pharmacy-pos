@@ -1,10 +1,10 @@
 /* ============================================================
    pharmacy-dashboard.js — WinRx / Pharmacy Dashboard API
-   v9 — uses the existing pill4me website Cloudflare Worker
-        (pill4me-api.pill4mepharmacy.workers.dev) which is
+   v9 — uses a configurable website Cloudflare Worker
+        (set via worker_url in Settings) which is
         already deployed and working. No wrangler needed.
 
-   Call pattern (from pill4me dev summary):
+   Call pattern:
      fetch('<workerUrl>/endpointName', {
        method: 'POST',
        headers: { 'Content-Type': 'application/json' },
@@ -89,6 +89,12 @@ const PharmacyDashboardAPI = (() => {
 
   async function getPatientProfile(phn) {
     return _call('getPatientProfile', { PHN: String(phn), ExternalID: '', Stopped: 'N' });
+  }
+
+  /* All-patient billed copay totals for the AR dashboard.
+     Returns [{ PHN, fills, billed }]. cutoff = ISO date (optional). */
+  async function getAllBilled(cutoff, asOf) {
+    return _call('getAllBilled', { Cutoff: cutoff || '', AsOf: asOf || '' });
   }
 
   /* ── Rx transaction ───────────────────────────────────────── */
@@ -296,6 +302,6 @@ const PharmacyDashboardAPI = (() => {
     }
   }
 
-  return { getPatient, getPatients, getPatientProfile, getRxTx, getDrug, saveDocument, savePdfToFolder, ping, getPharmacyInfo };
+  return { getPatient, getPatients, getPatientProfile, getAllBilled, getRxTx, getDrug, saveDocument, savePdfToFolder, ping, getPharmacyInfo };
   // v10: dedicated POS worker; POST + JSON body; X-POS-Key auth; PHARMACY_ID in body
 })();

@@ -1,9 +1,9 @@
 {
   "name": "pharmacy-pos",
-  "version": "1.0.0",
-  "description": "Pharmacy POS — Pill4Me",
+  "version": "1.4.1",
+  "description": "Pharmacy POS",
   "main": "main.js",
-  "author": "Pill4Me",
+  "author": "Pharmacy POS",
   "scripts": {
     "start": "electron .",
     "build": "electron-builder --win --x64"
@@ -18,7 +18,7 @@
     "electron-builder": "^24.9.1"
   },
   "build": {
-    "appId": "ca.pill4me.pharmacypos",
+    "appId": "com.pharmacypos.app",
     "productName": "Pharmacy POS",
     "directories": {
       "output": "dist"
@@ -27,6 +27,12 @@
       "target": [
         {
           "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
           "arch": [
             "x64"
           ]
@@ -39,6 +45,9 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "Pharmacy POS"
+    },
+    "portable": {
+      "artifactName": "PharmacyPOS-Portable.exe"
     },
     "files": [
       "main.js",
@@ -54,14 +63,15 @@
           "**/*",
           "!electron-app/**",
           "!pos-worker/**",
-          "!clover-local-pay/**",
-          "!node_modules/**",
+          "!/node_modules/**",
           "!*.md",
-          "!*.json",
           "!.git/**",
           "!docs/**",
           "!setup.bat",
-          "!setup.sh"
+          "!setup.sh",
+          "!clover-local-pay/.env",
+          "!clover-local-pay/README.md",
+          "!clover-local-pay/public/**"
         ]
       }
     ]

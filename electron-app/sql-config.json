@@ -1,7 +1,7 @@
 {
-  "server":   "PILL4ME-PCY\\SQLEXPRESS",
+  "server": "SERVER-PC\\SQLEXPRESS",
   "database": "winrxdata",
-  "user":     "YOUR_SQL_USERNAME",
+  "user": "YOUR_SQL_USERNAME",
   "password": "YOUR_SQL_PASSWORD",
   "options": {
     "trustServerCertificate": true,

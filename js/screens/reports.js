@@ -22,7 +22,9 @@ class ReportsScreen {
       <div class="settings-body">
         <div class="settings-nav">
           ${[['summary','Sales Summary'],['tax','Tax Report'],['methods','By Method'],
-             ['products','Products Sold'],['orders','Order Suggestions'],['shifts','Shift Reports']].map(([id,label]) =>
+             ['products','Products Sold'],['orders','Order Suggestions'],['shifts','Shift Reports'],
+             ['btclog','BTC / Controlled Log'],['ar','Accounts Receivable'],
+             ['yearend','Year-End (Accountant)']].map(([id,label]) =>
             `<div class="settings-nav-item${id===this._activeTab?' active':''}" data-tab="${id}">${label}</div>`
           ).join('')}
         </div>
@@ -51,7 +53,476 @@ class ReportsScreen {
       case 'products': this._renderProducts(content); break;
       case 'orders':   this._renderOrders(content);   break;
       case 'shifts':   this._renderShifts(content);   break;
+      case 'btclog':   this._renderBtcLog(content);   break;
+      case 'ar':       this._renderAR(content);       break;
+      case 'yearend':  this._renderYearEnd(content);  break;
     }
+  }
+
+  /* ── Year-End accountant package (as of fiscal year-end) ── */
+  async _renderYearEnd(content) {
+    const fyEndSaved = (await Config.get('fiscal_year_end')) || (new Date().getFullYear() + '-12-31');
+    const fyStartOf = (fyEnd) => {
+      const d = new Date(fyEnd); const s = new Date(d);
+      s.setFullYear(d.getFullYear() - 1); s.setDate(s.getDate() + 1);
+      return s.toISOString().slice(0, 10);
+    };
+    const fromSaved  = (await Config.get('ye_from')) || fyStartOf(fyEndSaved);
+    const cutoff     = (await Config.get('ar_cutoff_date')) || '';
+    content.innerHTML = `
+      <div class="settings-section" style="max-width:900px;">
+        <h3>Year-End Accountant Package</h3>
+        <div class="alert alert-info">Bundle for your accountant for any period: AR aging (as of the end date), bad debt written off, collected, inventory value, and sales/tax. CSV-exportable.</div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:14px;">
+          <span style="font-size:13px;color:var(--text-muted);">Period — From</span>
+          <input type="date" id="ye-from" value="${fromSaved}" style="width:auto;" />
+          <span style="font-size:13px;color:var(--text-muted);">To</span>
+          <input type="date" id="ye-to" value="${fyEndSaved}" style="width:auto;" />
+          <button class="btn btn-primary btn-sm" id="ye-generate">Generate</button>
+          <span id="ye-status" style="font-size:12px;color:var(--text-muted);"></span>
+        </div>
+        <div id="ye-out"></div>
+      </div>`;
+
+    const generate = async () => {
+      const from = content.querySelector('#ye-from').value;
+      const to   = content.querySelector('#ye-to').value;
+      if (!from || !to) return;
+      await Config.setMany({ fiscal_year_end: to, ye_from: from });
+      const start = from, fyEnd = to;
+      const status = content.querySelector('#ye-status');
+      status.textContent = 'Reconciling AR from WinRx…';
+
+      // AR outstanding/aging is a point-in-time balance → as of the end date
+      // (uses the global billed-from cutoff). Activity metrics use the From–To period.
+      const ye   = await AR.getYearEndAR({ cutoff, fyEnd: to });
+      const sales = DB.getSalesSummary(start, fyEnd);
+      const coll  = DB.getTotalCollectedInRange(start, fyEnd);
+      const inv   = DB.getInventoryValuation();
+      const wo    = DB.getArWriteOffs(start, fyEnd);
+      const woTotal = wo.reduce((s, w) => s + (w.amount || 0), 0);
+      status.textContent = '';
+
+      if (ye.error) { content.querySelector('#ye-out').innerHTML = `<div class="alert alert-danger">${ye.error}</div>`; return; }
+      const ag = ye.aging;
+      content.querySelector('#ye-out').innerHTML = `
+        <div style="font-size:13px;color:var(--text-muted);margin-bottom:10px;">Period ${start} → ${fyEnd}</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:18px;">
+          ${[['AR outstanding (as of '+fyEnd+')', Tax.fmt(ye.totalOutstanding)],
+             ['Bad debt written off', Tax.fmt(woTotal)],
+             ['Collected in period', Tax.fmt(coll.total)],
+             ['Net sales (POS)', Tax.fmt(sales.gross_sales)],
+             ['GST collected', Tax.fmt(sales.total_gst)],
+             ['PST collected', Tax.fmt(sales.total_pst)],
+             ['Inventory (retail value)', Tax.fmt(inv.retailValue)],
+             ['Accounts owing', String(ye.count)],
+            ].map(([l,v]) => `<div style="background:var(--surface2);border-radius:var(--radius);padding:10px 12px;">
+              <div style="font-size:11px;color:var(--text-muted);">${l}</div>
+              <div style="font-size:17px;font-weight:700;">${v}</div></div>`).join('')}
+        </div>
+
+        <h4 style="margin:0 0 8px;">AR Aging (as of ${fyEnd})</h4>
+        <table class="table" style="margin-bottom:6px;">
+          <thead><tr><th>0–30</th><th>31–60</th><th>61–90</th><th>90+</th>${ye.unmatched?'<th>Unaged*</th>':''}<th class="text-right">Total</th></tr></thead>
+          <tbody><tr>
+            <td>${Tax.fmt(ag.d0_30)}</td><td>${Tax.fmt(ag.d31_60)}</td><td>${Tax.fmt(ag.d61_90)}</td><td>${Tax.fmt(ag.d90_plus)}</td>
+            ${ye.unmatched?`<td>${Tax.fmt(ye.unmatched)}</td>`:''}
+            <td class="text-right fw-bold">${Tax.fmt(ye.totalOutstanding)}</td>
+          </tr></tbody>
+        </table>
+        ${ye.unmatched?`<div style="font-size:11px;color:var(--text-muted);margin-bottom:14px;">*Unaged = patients billed in WinRx but not in the POS patient list (no fill dates to age).</div>`:''}
+
+        <div style="display:flex;gap:8px;margin:12px 0;">
+          <button class="btn btn-outline btn-sm" id="ye-csv-ar">&#8659; AR list CSV</button>
+          <button class="btn btn-outline btn-sm" id="ye-csv-bd">&#8659; Bad debt CSV</button>
+          <button class="btn btn-outline btn-sm" id="ye-print">&#128424; Print package</button>
+        </div>
+
+        <h4 style="margin:14px 0 8px;">Bad Debt Written Off (${start} → ${fyEnd})</h4>
+        ${wo.length ? `<table class="table"><thead><tr><th>Date</th><th>Patient</th><th>Reason</th><th class="text-right">Amount</th></tr></thead>
+          <tbody>${wo.map(w => `<tr><td>${new Date(w.entry_date).toLocaleDateString('en-CA')}</td>
+            <td>${(w.given_name||'')+' '+(w.surname||'')}</td><td>${w.reason||''}</td>
+            <td class="text-right">${Tax.fmt(w.amount)}</td></tr>`).join('')}
+          <tr><td colspan="3" class="text-right fw-bold">Total</td><td class="text-right fw-bold">${Tax.fmt(woTotal)}</td></tr></tbody></table>`
+          : '<div class="text-muted">No write-offs in this fiscal year.</div>'}`;
+
+      content.querySelector('#ye-csv-ar').onclick = () => {
+        _csvDownload([['Account','Patient','PHN','Owing'],
+          ...ye.rows.map(r => [r.acct||'', r.name, r.phn, r.owing.toFixed(2)])],
+          `yearend_AR_${fyEnd}.csv`);
+      };
+      content.querySelector('#ye-csv-bd').onclick = () => {
+        _csvDownload([['Date','Patient','PHN','Reason','Amount'],
+          ...wo.map(w => [new Date(w.entry_date).toLocaleDateString('en-CA'), (w.given_name||'')+' '+(w.surname||''), w.phn||'', w.reason||'', (w.amount||0).toFixed(2)])],
+          `yearend_baddebt_${fyEnd}.csv`);
+      };
+      content.querySelector('#ye-print').onclick = () => window.print();
+    };
+
+    content.querySelector('#ye-generate').addEventListener('click', generate);
+  }
+
+  /* ── Accounts Receivable — who owes (WinRx billed − POS/manual paid) ── */
+  async _renderAR(content) {
+    content.innerHTML = `
+      <div class="settings-section" style="max-width:880px;">
+        <h3>Accounts Receivable</h3>
+        <div class="alert alert-info">Patient copays billed in WinRx that haven't been collected (POS + manual payments). Insurance is not included.</div>
+        <div id="ar-loading" class="text-muted">Loading from WinRx…</div>
+        <div id="ar-body" style="display:none;">
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:12px;" id="ar-kpis"></div>
+          <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px;">Aging</div>
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;margin-bottom:16px;" id="ar-aging"></div>
+          <div style="display:flex;gap:8px;margin-bottom:10px;align-items:center;flex-wrap:wrap;">
+            <input type="text" id="ar-search" placeholder="🔍 Filter by name or PHN…" style="width:auto;flex:1;min-width:180px;" />
+            <span style="font-size:12px;color:var(--text-muted);">Billed from</span>
+            <input type="date" id="ar-cutoff" style="width:auto;" title="Ignore fills billed before this date" />
+            <span style="font-size:12px;color:var(--text-muted);">As of</span>
+            <input type="date" id="ar-asof" style="width:auto;" title="Balance as of this date (blank = today)" />
+            <button class="btn btn-outline btn-sm" id="ar-refresh">&#8635; Refresh</button>
+            <button class="btn btn-outline btn-sm" id="ar-export">&#8659; CSV</button>
+          </div>
+          <div id="ar-table"></div>
+        </div>
+      </div>`;
+
+    let cutoff = (await Config.get('ar_cutoff_date')) || '';
+    let asOf   = '';
+    let allRows = [];
+    const cutoffEl = content.querySelector('#ar-cutoff');
+    const asofEl   = content.querySelector('#ar-asof');
+    const searchEl = content.querySelector('#ar-search');
+    if (cutoffEl) cutoffEl.value = cutoff;
+    const loadEl = content.querySelector('#ar-loading');
+    const bodyEl = content.querySelector('#ar-body');
+
+    let agingFilter = '';
+    let agingData = { d0_30:0, d31_60:0, d61_90:0, d90_plus:0 };
+    const AGE_LABEL = { d0_30:'0–30 days', d31_60:'31–60 days', d61_90:'61–90 days', d90_plus:'90+ days' };
+
+    // Rows after the active search + aging-bucket drill-down
+    const currentRows = () => {
+      const term = (searchEl?.value || '').trim().toLowerCase();
+      let rows = allRows;
+      if (term) rows = rows.filter(r =>
+        (r.name||'').toLowerCase().includes(term) || (r.phn||'').toLowerCase().includes(term) || (r.acct||'').toLowerCase().includes(term));
+      if (agingFilter) rows = rows.filter(r => r.aging && (r.aging[agingFilter]||0) > 0.005);
+      return rows;
+    };
+
+    const renderTable = () => {
+      const rows = currentRows();
+      const showBucket = !!agingFilter;
+      const amt = r => showBucket ? (r.aging[agingFilter]||0) : r.owing;
+      const shownTotal = rows.reduce((s, r) => s + amt(r), 0);
+      content.querySelector('#ar-table').innerHTML = rows.length ? `
+        <table class="table">
+          <thead><tr><th>Acct</th><th>Patient</th><th>PHN</th><th>Fills</th><th class="text-right">Billed</th>
+            <th class="text-right">Paid</th><th class="text-right">${showBucket?AGE_LABEL[agingFilter]:'Owing'}</th></tr></thead>
+          <tbody>${rows.map(r => `
+            <tr style="cursor:pointer;" data-pid="${r.patient_id||''}" data-phn="${r.phn}">
+              <td>${r.acct || '—'}</td><td>${r.name}</td><td>${r.phn}</td><td>${r.fills}</td>
+              <td class="text-right">${Tax.fmt(r.billed)}</td>
+              <td class="text-right">${Tax.fmt(r.paid)}</td>
+              <td class="text-right fw-bold text-danger">${Tax.fmt(amt(r))}</td>
+            </tr>`).join('')}</tbody>
+        </table>
+        <div class="text-muted" style="margin-top:8px;font-size:12px;">
+          Showing ${rows.length} of ${allRows.length}${agingFilter?` in ${AGE_LABEL[agingFilter]}`:''} · ${Tax.fmt(shownTotal)}
+          ${agingFilter?` · <a id="ar-clear-filter" style="cursor:pointer;color:var(--primary);">clear filter</a>`:''} · click a row for the statement.</div>`
+        : `<div class="text-muted">${allRows.length ? 'No accounts in this filter.' : 'No outstanding balances. 🎉'}</div>`;
+
+      content.querySelector('#ar-clear-filter')?.addEventListener('click', () => { agingFilter=''; renderAging(); renderTable(); });
+      content.querySelectorAll('#ar-table tr[data-phn]').forEach(tr => {
+        tr.addEventListener('click', () => {
+          const pid = parseInt(tr.dataset.pid) || null;
+          if (pid) this._showARStatement(pid, tr.dataset.phn, cutoff, asOf);
+          else alert('This patient is billed in WinRx but not yet in the POS patient list — ring a sale or look them up first.');
+        });
+      });
+    };
+
+    // Clickable aging tiles → drill the table to that bucket
+    const renderAging = () => {
+      const ag = agingData;
+      content.querySelector('#ar-aging').innerHTML = ['d0_30','d31_60','d61_90','d90_plus'].map(key => {
+        const warn = key === 'd90_plus', active = agingFilter === key;
+        return `<div class="ar-aging-tile" data-bucket="${key}" title="Click to see these accounts"
+          style="cursor:pointer;background:${active?'var(--primary-soft)':(warn&&ag[key]>0?'#fbeaea':'var(--surface2)')};
+          border:1px solid ${active?'var(--primary)':'var(--border)'};border-radius:var(--radius);padding:8px 11px;">
+          <div style="font-size:11px;color:var(--text-muted);">${AGE_LABEL[key]}</div>
+          <div style="font-size:16px;font-weight:700;${warn&&ag[key]>0?'color:var(--danger);':''}">${Tax.fmt(ag[key])}</div></div>`;
+      }).join('');
+      content.querySelectorAll('.ar-aging-tile').forEach(t => t.addEventListener('click', () => {
+        agingFilter = (agingFilter === t.dataset.bucket) ? '' : t.dataset.bucket;
+        renderAging(); renderTable();
+      }));
+    };
+
+    const load = async () => {
+      loadEl.style.display = 'block'; loadEl.textContent = 'Loading from WinRx…'; bodyEl.style.display = 'none';
+      const res = await AR.getAROutstandingAll({ cutoff, asOf });
+      if (res.error) { loadEl.textContent = res.error; return; }
+      loadEl.style.display = 'none'; bodyEl.style.display = 'block';
+      allRows = res.rows;
+      agingData = res.aging || { d0_30:0, d31_60:0, d61_90:0, d90_plus:0 };
+
+      content.querySelector('#ar-kpis').innerHTML = [
+        ['Total outstanding', Tax.fmt(res.totalOutstanding), 'all'],
+        ['Accounts owing', String(res.count), 'all'],
+        ['As of', asOf || 'today', ''],
+        ['Largest', res.rows[0] ? Tax.fmt(res.rows[0].owing) : '—', 'largest'],
+      ].map(([l,v,act]) => `<div class="ar-kpi" ${act?`data-act="${act}" `:''}style="${act?'cursor:pointer;':''}background:var(--surface2);border-radius:var(--radius);padding:10px 12px;">
+          <div style="font-size:11px;color:var(--text-muted);">${l}</div>
+          <div style="font-size:18px;font-weight:700;">${v}</div></div>`).join('');
+      content.querySelectorAll('.ar-kpi[data-act]').forEach(k => k.addEventListener('click', () => {
+        if (k.dataset.act === 'all') { agingFilter=''; if (searchEl) searchEl.value=''; renderAging(); renderTable(); }
+        else if (k.dataset.act === 'largest' && allRows[0] && allRows[0].patient_id) this._showARStatement(allRows[0].patient_id, allRows[0].phn, cutoff, asOf);
+      }));
+
+      renderAging();
+      renderTable();
+
+      content.querySelector('#ar-export').onclick = () => {
+        const rows = currentRows();
+        const showBucket = !!agingFilter;
+        _csvDownload([['Account','Patient','PHN','Fills','Billed','Paid', showBucket?AGE_LABEL[agingFilter]:'Owing'],
+          ...rows.map(r => [r.acct||'', r.name, r.phn, r.fills, r.billed.toFixed(2), r.paid.toFixed(2),
+            (showBucket ? (r.aging[agingFilter]||0) : r.owing).toFixed(2)])],
+          `accounts_receivable${agingFilter?'_'+agingFilter:''}_${asOf || _dateStr()}.csv`);
+      };
+    };
+
+    content.querySelector('#ar-refresh').addEventListener('click', load);
+    searchEl?.addEventListener('input', renderTable);
+    cutoffEl?.addEventListener('change', async () => {
+      cutoff = cutoffEl.value || '';
+      await Config.set('ar_cutoff_date', cutoff);
+      await load();
+    });
+    asofEl?.addEventListener('change', async () => { asOf = asofEl.value || ''; await load(); });
+    await load();
+  }
+
+  async _showARStatement(patientId, phn, cutoff, asOf) {
+    const patient = DB.getPatient(patientId);
+    const modal = document.createElement('div');
+    modal.className = 'modal-overlay';
+    modal.innerHTML = `
+      <div class="modal" style="max-width:700px;max-height:92vh;display:flex;flex-direction:column;">
+        <div class="modal-header"><h3>Statement — ${patient ? patient.given_name+' '+patient.surname : phn}${patient&&patient.ar_account_no?' · '+patient.ar_account_no:''}</h3>
+          <button class="modal-close">&times;</button></div>
+        <div style="padding:10px 20px 0;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+          <span style="font-size:12px;color:var(--text-muted);">From</span>
+          <input type="date" id="st-from" style="width:auto;" value="${cutoff||''}" />
+          <span style="font-size:12px;color:var(--text-muted);">To</span>
+          <input type="date" id="st-to" style="width:auto;" value="${asOf||''}" />
+          <button class="btn btn-outline btn-sm" id="st-apply">Apply</button>
+          <button class="btn btn-primary btn-sm" id="st-record" style="margin-left:auto;">&#43; Record payment</button>
+        </div>
+        <div class="modal-body" id="st-body" style="overflow-y:auto;">Loading…</div>
+        <div class="modal-footer">
+          <button class="btn btn-outline" id="ar-st-csv">&#8659; CSV</button>
+          <button class="btn btn-outline modal-close-btn">Close</button>
+        </div>
+      </div>`;
+    document.body.appendChild(modal);
+    const close = () => modal.remove();
+    modal.querySelector('.modal-close').addEventListener('click', close);
+    modal.querySelector('.modal-close-btn').addEventListener('click', close);
+
+    let st = null;
+    const render = async () => {
+      const from = modal.querySelector('#st-from').value || '';
+      const to   = modal.querySelector('#st-to').value || '';
+      const body = modal.querySelector('#st-body');
+      body.innerHTML = '<div class="text-muted">Loading…</div>';
+      st = await AR.getStatement({ patient_id: patientId, phn }, { cutoff: from, asOf: to });
+      if (st.error) { body.innerHTML = `<div class="alert alert-danger">${st.error}</div>`; return; }
+      const ag = st.aging || {};
+      const entries = DB.getArEntries(patientId);
+      body.innerHTML = `
+        <div style="display:flex;gap:16px;margin-bottom:10px;font-size:14px;flex-wrap:wrap;">
+          <div>Billed: <strong>${Tax.fmt(st.billed)}</strong></div>
+          <div>Paid: <strong>${Tax.fmt(st.paid)}</strong></div>
+          <div>Owing: <strong class="text-danger">${Tax.fmt(st.owing)}</strong></div>
+          ${st.credit>0?`<div>Credit: <strong class="text-success">${Tax.fmt(st.credit)}</strong></div>`:''}
+        </div>
+        <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px;">
+          Aging — 0-30: ${Tax.fmt(ag.d0_30)} · 31-60: ${Tax.fmt(ag.d31_60)} · 61-90: ${Tax.fmt(ag.d61_90)} · 90+: ${Tax.fmt(ag.d90_plus)}</div>
+        <div style="font-weight:600;font-size:13px;margin:4px 0;">By prescription</div>
+        <table class="table" style="margin-bottom:14px;">
+          <thead><tr><th>Rx #</th><th>Fill date</th><th class="text-right">Billed</th><th class="text-right">Paid</th><th class="text-right">Owing</th><th></th></tr></thead>
+          <tbody>${(st.perRx||[]).map(r => `<tr style="${r.owing>0?'background:#fdf4f3;':''}"><td>Rx #${r.rxNumber}</td>
+            <td>${r.fillDate?new Date(r.fillDate).toLocaleDateString('en-CA'):''}</td>
+            <td class="text-right">${Tax.fmt(r.billed)}</td><td class="text-right">${Tax.fmt(r.paid)}</td>
+            <td class="text-right ${r.owing>0?'fw-bold text-danger':''}">${Tax.fmt(r.owing)}</td>
+            <td style="text-align:right;white-space:nowrap;">${r.owing>0?`
+              <button class="btn btn-outline btn-sm st-pay" data-rx="${r.rxNumber}" data-amt="${r.owing}">Pay</button>
+              <button class="btn btn-outline btn-sm st-wo" data-rx="${r.rxNumber}" data-amt="${r.owing}">Write off</button>`:'<span style="color:var(--success);">✓</span>'}</td></tr>`).join('')}</tbody>
+        </table>
+        <div style="font-weight:600;font-size:13px;margin:4px 0;">Payments &amp; adjustments</div>
+        ${entries.length ? `<table class="table"><thead><tr><th>Date</th><th>Type</th><th>Method / Ref</th><th class="text-right">Amount</th><th></th></tr></thead>
+          <tbody>${entries.map(e => `<tr>
+            <td>${new Date(e.entry_date).toLocaleDateString('en-CA')}</td>
+            <td>${e.entry_type}${e.rx_number?` · Rx#${e.rx_number}`:''}</td>
+            <td>${[e.method,e.reference,e.reason].filter(Boolean).join(' · ')||'—'}</td>
+            <td class="text-right">${Tax.fmt(e.amount)}</td>
+            <td style="white-space:nowrap;text-align:right;">
+              <button class="btn btn-outline btn-sm st-edit" data-id="${e.ar_id}">Edit</button>
+              <button class="btn btn-outline btn-sm st-del" data-id="${e.ar_id}">Del</button></td></tr>`).join('')}</tbody></table>`
+          : '<div class="text-muted" style="font-size:12px;">No manual payments/adjustments recorded.</div>'}`;
+
+      body.querySelectorAll('.st-edit').forEach(b => b.addEventListener('click', () => {
+        this._showArEntryEditModal(DB.getArEntry(parseInt(b.dataset.id)), render);
+      }));
+      body.querySelectorAll('.st-del').forEach(b => b.addEventListener('click', () => {
+        const e = DB.getArEntry(parseInt(b.dataset.id));
+        if (e.entry_type === 'write_off' && !(typeof Auth!=='undefined' && Auth.isAdmin && Auth.isAdmin())) {
+          alert('Deleting a bad-debt write-off requires an Admin login.'); return;
+        }
+        if (confirm(`Delete this ${e.entry_type} of ${Tax.fmt(e.amount)}?`)) {
+          DB.deleteArEntry(e.ar_id);
+          Audit.configChange(`AR entry deleted (${e.entry_type} ${Tax.fmt(e.amount)}) — patient ${patientId}`);
+          render();
+        }
+      }));
+      // Per-Rx actions: pay / write off this specific prescription
+      const pObj = patient || { patient_id: patientId, phn, given_name: '', surname: '' };
+      body.querySelectorAll('.st-pay').forEach(b => b.addEventListener('click', () =>
+        this._showArRecordModal(pObj, { rxNumber: b.dataset.rx, amount: b.dataset.amt, type: 'payment' }, render)));
+      body.querySelectorAll('.st-wo').forEach(b => b.addEventListener('click', () =>
+        this._showArRecordModal(pObj, { rxNumber: b.dataset.rx, amount: b.dataset.amt, type: 'write_off' }, render)));
+    };
+
+    modal.querySelector('#st-apply').addEventListener('click', render);
+    modal.querySelector('#st-record').addEventListener('click', () =>
+      this._showArRecordModal(patient || { patient_id: patientId, phn, given_name:'', surname:'' }, {}, render));
+    modal.querySelector('#ar-st-csv').addEventListener('click', () => {
+      if (!st || st.error) return;
+      _csvDownload([['Rx #','Fill date','Billed','Paid','Owing'],
+        ...(st.perRx||[]).map(r => ['Rx #'+r.rxNumber, r.fillDate?new Date(r.fillDate).toLocaleDateString('en-CA'):'',
+          r.billed.toFixed(2), r.paid.toFixed(2), r.owing.toFixed(2)])],
+        `statement_${phn}_${_dateStr()}.csv`);
+    });
+    await render();
+  }
+
+  /* Edit an existing AR entry (correct a mis-keyed payment/adjustment). */
+  _showArEntryEditModal(entry, onDone) {
+    if (!entry) return;
+    const isWO = entry.entry_type === 'write_off';
+    if (isWO && !(typeof Auth!=='undefined' && Auth.isAdmin && Auth.isAdmin())) {
+      alert('Editing a bad-debt write-off requires an Admin login.'); return;
+    }
+    const modal = document.createElement('div');
+    modal.className = 'modal-overlay';
+    modal.style.zIndex = '1100';
+    modal.innerHTML = `
+      <div class="modal" style="max-width:380px;">
+        <div class="modal-header"><h3>Edit ${entry.entry_type}</h3><button class="modal-close">&times;</button></div>
+        <div class="modal-body">
+          <div class="form-group"><label>Amount ($)</label><input type="number" step="0.01" id="ee-amount" value="${entry.amount}" /></div>
+          <div class="form-group"><label>Date</label><input type="date" id="ee-date" value="${String(entry.entry_date||'').slice(0,10)}" /></div>
+          <div class="form-group"><label>Method</label><input type="text" id="ee-method" value="${entry.method||''}" /></div>
+          <div class="form-group"><label>Reference</label><input type="text" id="ee-ref" value="${entry.reference||''}" /></div>
+          <div class="form-group"><label>Apply to Rx# <span style="font-weight:400;color:var(--text-muted);">(optional)</span></label><input type="text" id="ee-rx" value="${entry.rx_number||''}" /></div>
+          ${isWO?`<div class="form-group"><label>Reason</label><input type="text" id="ee-reason" value="${entry.reason||''}" /></div>`:''}
+          <div class="form-group"><label>Note</label><input type="text" id="ee-note" value="${entry.note||''}" /></div>
+          <div id="ee-err" class="login-error"></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-outline" id="ee-cancel">Cancel</button>
+          <button class="btn btn-primary" id="ee-save">Save</button>
+        </div>
+      </div>`;
+    document.body.appendChild(modal);
+    const $ = s => modal.querySelector(s);
+    const close = () => modal.remove();
+    $('.modal-close').addEventListener('click', close);
+    $('#ee-cancel').addEventListener('click', close);
+    $('#ee-save').addEventListener('click', () => {
+      const amount = parseFloat($('#ee-amount').value);
+      if (!(amount > 0)) { $('#ee-err').textContent = 'Amount must be greater than zero.'; return; }
+      DB.updateArEntry(entry.ar_id, {
+        amount, entry_date: $('#ee-date').value || entry.entry_date,
+        method: $('#ee-method').value.trim() || null,
+        reference: $('#ee-ref').value.trim() || null,
+        rx_number: $('#ee-rx').value.trim() || null,
+        reason: $('#ee-reason') ? ($('#ee-reason').value.trim() || null) : undefined,
+        note: $('#ee-note').value.trim() || null,
+      });
+      Audit.configChange(`AR entry #${entry.ar_id} edited → ${Tax.fmt(amount)}`);
+      close();
+      onDone && onDone();
+    });
+  }
+
+  /* Record a payment / adjustment / write-off — optionally pre-targeted to one Rx. */
+  _showArRecordModal(patient, preset, onDone) {
+    preset = preset || {};
+    if (!patient || !patient.patient_id) { alert('This patient is not in the POS list yet — look them up first.'); return; }
+    const isAdmin = typeof Auth!=='undefined' && Auth.isAdmin && Auth.isAdmin();
+    const modal = document.createElement('div');
+    modal.className = 'modal-overlay';
+    modal.style.zIndex = '1100';
+    modal.innerHTML = `
+      <div class="modal" style="max-width:400px;">
+        <div class="modal-header"><h3>${preset.type==='write_off'?'Write off to bad debt':'Record payment / adjustment'}</h3><button class="modal-close">&times;</button></div>
+        <div class="modal-body">
+          <div style="font-size:13px;color:var(--text-muted);margin-bottom:10px;">${patient.given_name} ${patient.surname} · PHN ${patient.phn}${preset.rxNumber?` · <strong>Rx #${preset.rxNumber}</strong>`:''}</div>
+          <div class="form-group"><label>Type</label>
+            <select id="arr-type">
+              <option value="payment">Payment received</option>
+              <option value="credit">Credit (goodwill)</option>
+              <option value="correction">Correction (billing error)</option>
+              <option value="write_off">Bad-debt write-off${isAdmin?'':' (Admin only)'}</option>
+            </select></div>
+          <div class="form-group"><label>Amount ($)</label><input type="number" step="0.01" id="arr-amt" value="${preset.amount!=null?Number(preset.amount).toFixed(2):''}" /></div>
+          <div class="form-group" id="arr-method-wrap"><label>Method</label>
+            <select id="arr-method"><option value="online">Online</option><option value="payment_link">Payment link</option><option value="etransfer">E-transfer</option><option value="cheque">Cheque</option><option value="cash">Cash</option><option value="other">Other</option></select></div>
+          <div class="form-group"><label>Apply to Rx# <span style="font-weight:400;color:var(--text-muted);">(optional)</span></label><input type="text" id="arr-rx" value="${preset.rxNumber||''}" /></div>
+          <div class="form-group"><label>Reference</label><input type="text" id="arr-ref" placeholder="confirmation #" /></div>
+          <div class="form-group" id="arr-reason-wrap" style="display:none;"><label>Bad-debt reason <span style="color:var(--danger);">*</span></label><input type="text" id="arr-reason" placeholder="e.g. uncollectible" /></div>
+          <div class="form-group"><label>Date</label><input type="date" id="arr-date" value="${_dateStr()}" /></div>
+          <div class="form-group"><label>Note</label><input type="text" id="arr-note" /></div>
+          <div id="arr-err" class="login-error"></div>
+        </div>
+        <div class="modal-footer"><button class="btn btn-outline" id="arr-cancel">Cancel</button><button class="btn btn-primary" id="arr-save">Save</button></div>
+      </div>`;
+    document.body.appendChild(modal);
+    const $ = s => modal.querySelector(s);
+    const close = () => modal.remove();
+    $('.modal-close').addEventListener('click', close);
+    $('#arr-cancel').addEventListener('click', close);
+    const typeEl = $('#arr-type');
+    if (preset.type) typeEl.value = preset.type;
+    const onType = () => {
+      const wo = typeEl.value === 'write_off';
+      $('#arr-reason-wrap').style.display = wo ? 'block' : 'none';
+      $('#arr-method-wrap').style.display = typeEl.value === 'payment' ? 'block' : 'none';
+    };
+    typeEl.addEventListener('change', onType); onType();
+    $('#arr-save').addEventListener('click', () => {
+      const err = $('#arr-err'), type = typeEl.value, amount = parseFloat($('#arr-amt').value), ref = $('#arr-ref').value.trim();
+      if (type === 'write_off' && !isAdmin) { err.textContent = 'Bad-debt write-offs require an Admin login.'; return; }
+      if (!(amount > 0)) { err.textContent = 'Enter an amount greater than zero.'; return; }
+      if (type === 'write_off' && !$('#arr-reason').value.trim()) { err.textContent = 'A reason is required for a write-off.'; return; }
+      if (ref && DB.getArEntryByReference(ref) && !confirm('An entry with this reference already exists. Record anyway?')) return;
+      DB.addArEntry({
+        patient_id: patient.patient_id, entry_date: $('#arr-date').value || _dateStr(),
+        amount, entry_type: type,
+        method: type === 'payment' ? $('#arr-method').value : null,
+        rx_number: $('#arr-rx').value.trim() || null,
+        reference: ref || null,
+        reason: type === 'write_off' ? $('#arr-reason').value.trim() : null,
+        note: $('#arr-note').value.trim() || null,
+        staff_name: (typeof Auth!=='undefined' && Auth.current && Auth.current()?.name) || null,
+      });
+      Audit.configChange(`AR ${type} ${Tax.fmt(amount)} — ${patient.given_name} ${patient.surname}${preset.rxNumber?` Rx#${preset.rxNumber}`:''}`);
+      close();
+      onDone && onDone();
+    });
   }
 
   /* ── Shared date picker + print options header ────────────── */
@@ -628,7 +1099,9 @@ class ReportsScreen {
       body.innerHTML = `
         <div style="margin-bottom:12px;display:flex;gap:10px;flex-wrap:wrap;align-items:center;">
           <button class="btn btn-outline btn-sm" id="btn-export-order-csv">&#8659; Export CSV</button>
-          <button class="btn btn-primary btn-sm" id="btn-export-mckesson">&#8659; McKesson Order TXT</button>
+          <button class="btn btn-outline btn-sm" id="btn-export-mckesson">&#8659; PharmaClik Order (.ord)</button>
+          ${window.electronAPI?.mckessonSoap ? `<button class="btn btn-primary btn-sm" id="btn-upload-mckesson">&#8593; Upload to PharmaClik</button>` : ''}
+          <button class="btn btn-success btn-sm" id="btn-receive-stock">&#8657; Receive Stock</button>
           <button class="btn btn-outline btn-sm" id="btn-email-orders">&#9993; Email</button>
           ${hiddenCount ? `<span style="font-size:12px;color:var(--text-muted);margin-left:4px;">${hiddenCount} item${hiddenCount!==1?'s':''} hidden (ordered recently — uncheck above to show)</span>` : ''}
         </div>
@@ -746,31 +1219,52 @@ class ReportsScreen {
         );
       });
 
-      /* — McKesson TXT export — */
-      body.querySelector('#btn-export-mckesson')?.addEventListener('click', () => {
-        const qtys  = getQtys();
-        const exportable = qtys.filter(i => i.item_no);
-        const skipped    = qtys.length - exportable.length;
-        if (!exportable.length) {
-          alert('No items have McKesson item numbers.\n\nTip: Click the "McKesson #" field for any item above to type its number — it saves automatically and will be remembered for future orders.');
+      /* — PharmaClik .ord export (real format) — */
+      body.querySelector('#btn-export-mckesson')?.addEventListener('click', async () => {
+        const account = (await Config.get('mckesson_account') || '').replace(/\D/g, '');
+        if (!account) {
+          alert('McKesson Account Number is not set.\n\nGo to Settings → API Credentials → McKesson and enter your 6-digit Account / Customer Number first.');
           return;
         }
-        const lines = exportable.map(i => `${String(i.item_no).padStart(7, '0')}\t${i.qty}`);
-        const txt = [
-          'PHARMACY ORDER',
-          `DATE: ${_dateStr()}`,
-          `ITEMS: ${lines.length}`,
-          '',
-          'ITEM_NO\tQTY',
-          ...lines,
-        ].join('\n');
-        const blob = new Blob([txt], { type: 'text/plain' });
-        _downloadBlob(blob, `mckesson_order_${_dateStr()}.txt`);
+
+        const qtys = getQtys();
+        // An item is exportable if it has a McKesson item# OR a UPC
+        const exportable = qtys.filter(i => i.item_no || i.upc);
+        const skipped    = qtys.length - exportable.length;
+        if (!exportable.length) {
+          alert('No items have a McKesson # or UPC.\n\nTip: Click the "McKesson #" field for any item above to type its number — it saves automatically.');
+          return;
+        }
+
+        // Build the PharmaClik electronic order line.
+        // Format: ACE0000000+CU{account}+PO{ponum}+{item}{qty}+...+AAAAAAAAAA+
+        //   McKesson item# = 6 digits, followed directly by qty (1-4 digits)
+        //   UPC fallback   = U + 11 digits, followed by qty
+        const poNum   = 'POS' + new Date().toISOString().slice(2,10).replace(/-/g,''); // e.g. POS260614
+        const segments = ['ACE0000000', `CU${account.padStart(6,'0')}`, `PO${poNum}`];
+
+        exportable.forEach(i => {
+          const qty = Math.max(1, Math.round(i.qty));
+          if (i.item_no) {
+            // 6-digit distributor item number + quantity
+            segments.push(`${String(i.item_no).replace(/\D/g,'').padStart(6,'0')}${qty}`);
+          } else if (i.upc) {
+            // UPC: U + 11 digits + quantity
+            const upc = String(i.upc).replace(/\D/g,'').padStart(11,'0').slice(-11);
+            segments.push(`U${upc}${qty}`);
+          }
+        });
+        segments.push('AAAAAAAAAA');
+
+        // Each segment ends with '+', single continuous line
+        const ordContent = segments.join('+') + '+';
+        const blob = new Blob([ordContent], { type: 'text/plain' });
+        _downloadBlob(blob, `order_${poNum}_${_dateStr()}.ord`);
 
         // Offer to mark exported items as ordered
         const msg = skipped
-          ? `Order file downloaded (${lines.length} item${lines.length!==1?'s':''}, ${skipped} skipped — no McKesson #).\n\nMark the ${lines.length} exported items as "ordered" to hide them from suggestions for 30 days?`
-          : `Order file downloaded (${lines.length} item${lines.length!==1?'s':''}).\n\nMark all as "ordered" to hide them from suggestions for 30 days?`;
+          ? `PharmaClik order file (.ord) downloaded — ${exportable.length} item${exportable.length!==1?'s':''}, ${skipped} skipped (no item# or UPC).\n\nUpload it in PharmaClik → Orders → Upload Orders.\n\nMark exported items as "ordered" to hide them for 30 days?`
+          : `PharmaClik order file (.ord) downloaded — ${exportable.length} item${exportable.length!==1?'s':''}.\n\nUpload it in PharmaClik → Orders → Upload Orders.\n\nMark all as "ordered" to hide them for 30 days?`;
         if (confirm(msg)) {
           const now = new Date().toISOString();
           exportable.forEach(i => {
@@ -779,7 +1273,6 @@ class ReportsScreen {
               i.ordered_at = now;
             }
           });
-          // Visually fade ordered rows
           body.querySelectorAll('.order-qty').forEach((el, idx) => {
             if (visible[idx]?.ordered_at && visible[idx]?.product_id) {
               const row = el.closest('tr');
@@ -790,6 +1283,49 @@ class ReportsScreen {
             }
           });
         }
+      });
+
+      /* — Upload order directly to PharmaClik (web service) — */
+      body.querySelector('#btn-upload-mckesson')?.addEventListener('click', async function() {
+        const account = (await Config.get('mckesson_account') || '').replace(/\D/g, '');
+        if (!account) {
+          alert('Set your McKesson Account Number in Settings → API Credentials first.');
+          return;
+        }
+        const qtys = getQtys().filter(i => i.item_no || i.upc);
+        if (!qtys.length) {
+          alert('No items have a McKesson # or UPC to upload.');
+          return;
+        }
+        if (!confirm(`Upload ${qtys.length} item${qtys.length!==1?'s':''} directly to PharmaClik now?`)) return;
+
+        const btn = this;
+        btn.disabled = true; btn.textContent = 'Uploading…';
+        try {
+          const items = qtys.map(i => i.item_no
+            ? { itemId: String(i.item_no).replace(/\D/g,''), itemType: 'D', quantity: i.qty, modality: 'U' }
+            : { itemId: String(i.upc).replace(/\D/g,''),    itemType: 'U', quantity: i.qty, modality: 'U' });
+          const poNumber = 'POS' + new Date().toISOString().slice(2,10).replace(/-/g,'');
+          const conf = await McKessonAPI.uploadOrder({ items, poNumber });
+
+          // Mark all uploaded items as ordered
+          const now = new Date().toISOString();
+          qtys.forEach(i => { if (i.product_id) {
+            DB.run('UPDATE products SET mckesson_ordered_at=? WHERE product_id=?', [now, i.product_id]);
+          }});
+
+          btn.textContent = '✓ Uploaded';
+          btn.style.background = 'var(--success)';
+          alert(`✓ Order uploaded to PharmaClik.\n\nConfirmation: ${conf}\n\nReview & send it in PharmaClik → Orders → Order Management.`);
+        } catch(e) {
+          btn.disabled = false; btn.textContent = '↑ Upload to PharmaClik';
+          alert('Upload failed:\n\n' + e.message);
+        }
+      });
+
+      /* — Receive Stock (update qty_on_hand) — */
+      body.querySelector('#btn-receive-stock')?.addEventListener('click', () => {
+        this._showReceiveStockModal();
       });
 
       /* — Email — */
@@ -822,6 +1358,410 @@ class ReportsScreen {
     content.querySelector('#hide-ordered').addEventListener('change', () =>
       run(content.querySelector('#rpt-from').value, content.querySelector('#rpt-to').value));
     run(this._from, this._to);
+  }
+
+  /* ── Receive Stock — update qty_on_hand manually or by scan ─ */
+  _showReceiveStockModal() {
+    const modal = document.createElement('div');
+    modal.className = 'modal-overlay';
+    modal.innerHTML = `
+      <div class="modal" style="max-width:620px;">
+        <div class="modal-header" style="background:#d1e7dd;">
+          <h3 style="color:#0a3622;">⬆ Receive Stock</h3>
+          <button class="modal-close">&times;</button>
+        </div>
+        <div class="modal-body">
+          ${window.electronAPI?.mckessonSoap ? `
+          <div style="background:var(--surface2);border-radius:var(--radius);padding:12px 14px;margin-bottom:14px;">
+            <div style="font-weight:700;font-size:12px;text-transform:uppercase;color:var(--text-muted);margin-bottom:8px;">
+              Auto-Receive from PharmaClik Invoice
+            </div>
+            <p style="font-size:12px;color:var(--text-muted);margin:0 0 10px;">
+              Pulls invoices from McKesson and updates stock automatically for matched items.
+            </p>
+
+            <div style="display:flex;gap:14px;margin-bottom:10px;flex-wrap:wrap;">
+              <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
+                <input type="radio" name="rs-inv-mode" value="new" checked /> New invoices only
+              </label>
+              <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
+                <input type="radio" name="rs-inv-mode" value="date" /> By date range
+              </label>
+            </div>
+
+            <div id="rs-date-range" style="display:none;gap:10px;align-items:flex-end;margin-bottom:10px;">
+              <div>
+                <label style="font-size:11px;color:var(--text-muted);">From</label>
+                <input type="date" id="rs-inv-from" value="${_dateStr()}" style="width:140px;" />
+              </div>
+              <div>
+                <label style="font-size:11px;color:var(--text-muted);">To</label>
+                <input type="date" id="rs-inv-to" value="${_dateStr()}" style="width:140px;" />
+              </div>
+            </div>
+
+            <button class="btn btn-primary btn-sm" id="rs-fetch-invoices">⬇ Download Invoices</button>
+            <div id="rs-invoice-status" style="font-size:12px;margin-top:8px;"></div>
+          </div>
+          <div style="text-align:center;font-size:11px;color:var(--text-muted);margin-bottom:12px;">— or add manually —</div>
+          ` : ''}
+          <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px;">
+            Search a product, enter the quantity received, and click Add. On-hand stock updates immediately.
+          </p>
+          <div style="display:flex;gap:8px;margin-bottom:6px;">
+            <input type="text" id="rs-search" placeholder="Search by name, UPC, or McKesson #…"
+                   style="flex:1;" autocomplete="off" />
+          </div>
+          <div id="rs-results" style="max-height:180px;overflow-y:auto;border:1px solid var(--border);
+               border-radius:var(--radius);margin-bottom:14px;display:none;"></div>
+
+          <div style="font-size:12px;font-weight:700;text-transform:uppercase;color:var(--text-muted);
+                      margin-bottom:8px;">Received This Session</div>
+          <div id="rs-received" style="border:1px solid var(--border);border-radius:var(--radius);
+               min-height:60px;max-height:200px;overflow-y:auto;">
+            <div style="padding:20px;text-align:center;color:var(--text-muted);font-size:13px;">
+              No items received yet.
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-outline" id="rs-close">Done</button>
+        </div>
+      </div>`;
+    document.body.appendChild(modal);
+    const self = this;
+    const received  = []; // {desc, source, id, qty}
+
+    // On close, if items were received, offer to print shelf tags
+    const close = () => {
+      modal.remove();
+      if (received.length && typeof ShelfTags !== 'undefined') {
+        self._offerShelfTagsForReceived(received);
+      }
+    };
+    modal.querySelector('.modal-close').addEventListener('click', close);
+    modal.querySelector('#rs-close').addEventListener('click', close);
+
+    const searchEl  = modal.querySelector('#rs-search');
+    const resultsEl = modal.querySelector('#rs-results');
+    const receivedEl= modal.querySelector('#rs-received');
+
+    const renderReceived = () => {
+      if (!received.length) {
+        receivedEl.innerHTML = `<div style="padding:20px;text-align:center;color:var(--text-muted);font-size:13px;">
+          No items received yet.</div>`;
+        return;
+      }
+      receivedEl.innerHTML = received.map((r,i) => `
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;
+                    ${i<received.length-1?'border-bottom:1px solid var(--border);':''}">
+          <span style="flex:1;font-size:13px;">${r.desc}</span>
+          <span style="color:var(--success);font-weight:700;margin:0 12px;">+${r.qty}</span>
+          <span style="font-size:12px;color:var(--text-muted);">→ ${r.newQty} on hand</span>
+        </div>`).join('');
+    };
+
+    /* — Toggle date-range fields based on mode — */
+    modal.querySelectorAll('input[name="rs-inv-mode"]').forEach(r =>
+      r.addEventListener('change', () => {
+        const byDate = modal.querySelector('input[name="rs-inv-mode"]:checked').value === 'date';
+        modal.querySelector('#rs-date-range').style.display = byDate ? 'flex' : 'none';
+      }));
+
+    /* — Auto-receive from PharmaClik invoices — */
+    modal.querySelector('#rs-fetch-invoices')?.addEventListener('click', async function() {
+      const btn = this; // the button element
+      const status = modal.querySelector('#rs-invoice-status');
+      const byDate = modal.querySelector('input[name="rs-inv-mode"]:checked').value === 'date';
+      let opts = { allNew: true };
+      if (byDate) {
+        const from = modal.querySelector('#rs-inv-from').value;
+        const to   = modal.querySelector('#rs-inv-to').value;
+        if (!from || !to) { status.textContent = 'Select both dates.'; status.style.color = 'var(--danger)'; return; }
+        if (from > to)    { status.textContent = 'From date must be before To date.'; status.style.color = 'var(--danger)'; return; }
+        opts = { allNew: false, startDate: from, endDate: to };
+      }
+      btn.disabled = true; btn.textContent = 'Downloading…';
+      status.textContent = byDate ? 'Requesting invoices by date…' : 'Requesting new invoices from McKesson…';
+      status.style.color = 'var(--text-muted)';
+      try {
+        const { invoices, lineItems } = await McKessonAPI.downloadInvoices(opts);
+        if (!lineItems.length) {
+          status.textContent = 'No invoices found.';
+          btn.disabled = false; btn.textContent = '⬇ Download Invoices';
+          return;
+        }
+
+        // Match + classify each line item
+        const rows = lineItems.map(li => {
+          let prod = null;
+          if (li.itemNumber) prod = DB.get('SELECT product_id, description, qty_on_hand, schedule_flag, narcotic_indicator, din, suggested_retail, price_override FROM products WHERE mckesson_item_no=?', [li.itemNumber]);
+          if (!prod && li.upc) prod = DB.get('SELECT product_id, description, qty_on_hand, schedule_flag, narcotic_indicator, din, suggested_retail, price_override FROM products WHERE upc_unit=? OR gtin_unit=?', [li.upc, li.upc]);
+          const units = (li.shippedQty || 0) * (li.qtyPerPack || 1);
+
+          // Classify
+          let category, include;
+          if (!prod) {
+            category = 'unmatched'; include = false;
+          } else if (prod.schedule_flag === 'btc' || prod.schedule_flag === 'btc_ctrl') {
+            category = 'BTC'; include = true;
+          } else if ((prod.narcotic_indicator && prod.narcotic_indicator !== 'N')) {
+            category = 'Rx/Narcotic'; include = false;        // Rx — managed in WinRx, skip
+          } else if (prod.din && !(prod.suggested_retail || prod.price_override)) {
+            category = 'Rx?'; include = false;                 // has DIN, no POS retail price → likely Rx
+          } else {
+            category = 'OTC'; include = true;
+          }
+          return { li, prod, units, category, include,
+                   desc: prod?.description || li.description || '(unknown item)' };
+        });
+
+        // Show review screen
+        btn.disabled = false; btn.textContent = '⬇ Download Invoices';
+        status.innerHTML = `Loaded ${invoices.length} invoice(s), ${rows.length} line(s). Review below.`;
+        status.style.color = 'var(--text-muted)';
+        self._showInvoiceReview(rows, (applied) => {
+          applied.forEach(r => {
+            DB.adjustStock('catalog', r.prod.product_id, r.units);
+            received.push({ desc: r.desc, source:'catalog', id:r.prod.product_id,
+                            qty: r.units, newQty: (r.prod.qty_on_hand||0) + r.units });
+          });
+          renderReceived();
+          status.innerHTML = `✓ Received <strong>${applied.length}</strong> item(s) into stock.`;
+          status.style.color = 'var(--success)';
+        });
+      } catch(e) {
+        status.textContent = 'Failed: ' + e.message;
+        status.style.color = 'var(--danger)';
+        btn.disabled = false; btn.textContent = '⬇ Download Invoices';
+      }
+    });
+
+    const doSearch = () => {
+      const term = searchEl.value.trim();
+      if (!term) { resultsEl.style.display = 'none'; return; }
+      // Search both custom and catalog products
+      const customs = DB.getAllCustomProducts().filter(p =>
+        (p.description||'').toLowerCase().includes(term.toLowerCase()) ||
+        (p.upc||'').includes(term));
+      const catalog = (DB.searchProducts ? DB.searchProducts(term) : []).slice(0, 10);
+
+      const all = [
+        ...customs.map(p => ({ desc:p.description, source:'custom', id:p.custom_product_id, qoh:p.qty_on_hand })),
+        ...catalog.map(p => ({ desc:p.description, source:'catalog', id:p.product_id, qoh:p.qty_on_hand })),
+      ].slice(0, 12);
+
+      if (!all.length) {
+        resultsEl.innerHTML = `<div style="padding:10px;color:var(--text-muted);font-size:13px;">No matches.</div>`;
+        resultsEl.style.display = 'block';
+        return;
+      }
+      resultsEl.innerHTML = all.map((p,i) => `
+        <div class="rs-result" data-idx="${i}" style="display:flex;justify-content:space-between;
+             align-items:center;gap:8px;padding:8px 12px;cursor:pointer;
+             ${i<all.length-1?'border-bottom:1px solid var(--border);':''}">
+          <span style="flex:1;font-size:13px;">${p.desc}
+            <span style="color:var(--text-muted);font-size:11px;">(${p.qoh??0} on hand)</span>
+          </span>
+          <input type="number" class="rs-qty" data-idx="${i}" min="1" step="1" value="1"
+                 placeholder="Qty" style="width:70px;" onclick="event.stopPropagation()" />
+          <button class="btn btn-success btn-sm rs-add" data-idx="${i}">Add</button>
+        </div>`).join('');
+      resultsEl.style.display = 'block';
+
+      resultsEl.querySelectorAll('.rs-add').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const idx = parseInt(btn.dataset.idx);
+          const p   = all[idx];
+          const qty = parseInt(resultsEl.querySelector(`.rs-qty[data-idx="${idx}"]`).value) || 0;
+          if (qty < 1) return;
+          // Update stock
+          DB.adjustStock(p.source, p.id, qty);
+          const newQty = (p.qoh || 0) + qty;
+          received.push({ desc:p.desc, source:p.source, id:p.id, qty, newQty });
+          renderReceived();
+          searchEl.value = '';
+          resultsEl.style.display = 'none';
+          searchEl.focus();
+        });
+      });
+    };
+
+    let _t = null;
+    searchEl.addEventListener('input', () => { clearTimeout(_t); _t = setTimeout(doSearch, 200); });
+    setTimeout(() => searchEl.focus(), 80);
+  }
+
+  /* ── Invoice review — pick which items to receive ──────────
+     rows: [{ li, prod, units, category, include, desc }]
+     onApply(appliedRows) called with the checked, matched rows. */
+  _showInvoiceReview(rows, onApply) {
+    const catStyle = {
+      'OTC':         'background:#d1e7dd;color:#0a3622;',
+      'BTC':         'background:#fff3cd;color:#856404;',
+      'Rx/Narcotic': 'background:#f8d7da;color:#842029;',
+      'Rx?':         'background:#f8d7da;color:#842029;',
+      'unmatched':   'background:#e2e3e5;color:#41464b;',
+    };
+
+    const modal = document.createElement('div');
+    modal.className = 'modal-overlay';
+    modal.style.zIndex = '9600';
+    modal.innerHTML = `
+      <div class="modal" style="max-width:760px;">
+        <div class="modal-header">
+          <h3>Review Invoice Items — Select What to Receive</h3>
+          <button class="modal-close">&times;</button>
+        </div>
+        <div class="modal-body">
+          <div class="alert alert-info" style="font-size:12px;">
+            <strong>OTC &amp; BTC</strong> items are pre-selected. <strong>Rx / prescription</strong> items are
+            unchecked — those are tracked in WinRx, not the POS. Adjust as needed, then Receive.
+          </div>
+          <div style="display:flex;gap:8px;margin-bottom:10px;">
+            <button class="btn btn-outline btn-sm" id="ir-all-otc">Select OTC + BTC only</button>
+            <button class="btn btn-outline btn-sm" id="ir-all">Select all</button>
+            <button class="btn btn-outline btn-sm" id="ir-none">Select none</button>
+          </div>
+          <div style="overflow-x:auto;max-height:50vh;overflow-y:auto;">
+            <table class="table" style="font-size:12px;min-width:680px;">
+              <thead><tr>
+                <th style="width:34px;"></th><th>Category</th><th>Item</th>
+                <th>McKesson# / UPC</th><th class="text-right">Qty to Add</th>
+              </tr></thead>
+              <tbody>
+                ${rows.map((r,i) => `
+                  <tr style="${r.category==='unmatched'?'opacity:.55;':''}">
+                    <td><input type="checkbox" class="ir-cb" data-i="${i}"
+                         ${r.include?'checked':''} ${r.category==='unmatched'?'disabled':''} /></td>
+                    <td><span class="badge" style="${catStyle[r.category]||''}">${r.category}</span></td>
+                    <td>${r.desc}</td>
+                    <td style="font-size:11px;color:var(--text-muted);">
+                      ${r.li.itemNumber||'—'}${r.li.upc?` / ${r.li.upc}`:''}</td>
+                    <td class="text-right">
+                      ${r.category==='unmatched'
+                        ? '<span style="color:var(--danger);">no product</span>'
+                        : `+${r.units} <small style="color:var(--text-muted);">(${r.li.shippedQty}×${r.li.qtyPerPack})</small>`}
+                    </td>
+                  </tr>`).join('')}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div class="modal-footer" style="justify-content:space-between;">
+          <span id="ir-count" style="font-size:13px;color:var(--text-muted);"></span>
+          <div style="display:flex;gap:8px;">
+            <button class="btn btn-outline" id="ir-cancel">Cancel</button>
+            <button class="btn btn-success" id="ir-apply">Receive Selected</button>
+          </div>
+        </div>
+      </div>`;
+    document.body.appendChild(modal);
+    const close = () => modal.remove();
+    modal.querySelector('.modal-close').addEventListener('click', close);
+    modal.querySelector('#ir-cancel').addEventListener('click', close);
+
+    const cbs = [...modal.querySelectorAll('.ir-cb')];
+    const updateCount = () => {
+      const n = cbs.filter(c => c.checked).length;
+      modal.querySelector('#ir-count').textContent = `${n} item${n!==1?'s':''} selected`;
+    };
+    cbs.forEach(c => c.addEventListener('change', updateCount));
+
+    modal.querySelector('#ir-all-otc').addEventListener('click', () => {
+      cbs.forEach(c => { if (!c.disabled) {
+        const cat = rows[parseInt(c.dataset.i)].category;
+        c.checked = (cat === 'OTC' || cat === 'BTC');
+      }});
+      updateCount();
+    });
+    modal.querySelector('#ir-all').addEventListener('click', () => {
+      cbs.forEach(c => { if (!c.disabled) c.checked = true; }); updateCount();
+    });
+    modal.querySelector('#ir-none').addEventListener('click', () => {
+      cbs.forEach(c => c.checked = false); updateCount();
+    });
+
+    modal.querySelector('#ir-apply').addEventListener('click', () => {
+      const applied = cbs.filter(c => c.checked && !c.disabled)
+                         .map(c => rows[parseInt(c.dataset.i)])
+                         .filter(r => r.prod && r.units > 0);
+      if (!applied.length) { alert('No items selected.'); return; }
+      close();
+      onApply(applied);
+    });
+
+    updateCount();
+  }
+
+  /* ── Offer to print shelf tags for just-received products ──
+     received: [{ desc, source, id, qty }]                       */
+  _offerShelfTagsForReceived(received) {
+    // Build tag data by looking up each product's price + barcode
+    const tags = [];
+    received.forEach(r => {
+      let p = null;
+      if (r.source === 'custom') {
+        p = DB.get('SELECT description, upc, price, schedule_flag FROM custom_products WHERE custom_product_id=?', [r.id]);
+        if (p) tags.push({ description: p.description, price: p.price || 0,
+                           barcode: p.upc || '', sku: '', din: '' });
+      } else {
+        p = DB.get('SELECT description, upc_unit, gtin_unit, din, mckesson_item_no, price_override, suggested_retail, regular_unit_price FROM products WHERE product_id=?', [r.id]);
+        if (p) tags.push({ description: p.description,
+                           price: p.price_override ?? p.suggested_retail ?? p.regular_unit_price ?? 0,
+                           barcode: p.upc_unit || p.gtin_unit || '',
+                           sku: p.mckesson_item_no || '', din: p.din || '' });
+      }
+    });
+    if (!tags.length) return;
+
+    const modal = document.createElement('div');
+    modal.className = 'modal-overlay';
+    modal.style.zIndex = '9600';
+    const presetOpts = Object.entries(ShelfTags.PRESETS)
+      .map(([k,v]) => `<option value="${k}">${v.name}</option>`).join('');
+    modal.innerHTML = `
+      <div class="modal" style="max-width:420px;">
+        <div class="modal-header">
+          <h3>🏷 Print Shelf Tags?</h3>
+          <button class="modal-close">&times;</button>
+        </div>
+        <div class="modal-body">
+          <p style="font-size:13px;">
+            You received <strong>${tags.length}</strong> product${tags.length!==1?'s':''}.
+            Print updated shelf price tags for them?
+          </p>
+          <div class="form-group">
+            <label>Label size</label>
+            <select id="rst-preset">${presetOpts}</select>
+          </div>
+          <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;">
+            <input type="checkbox" id="rst-barcode" checked /> Include barcode
+          </label>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-outline" id="rst-skip">No thanks</button>
+          <button class="btn btn-primary" id="rst-print">🖨 Print Tags</button>
+        </div>
+      </div>`;
+    document.body.appendChild(modal);
+    const close = () => modal.remove();
+    modal.querySelector('.modal-close').addEventListener('click', close);
+    modal.querySelector('#rst-skip').addEventListener('click', close);
+
+    modal.querySelector('#rst-print').addEventListener('click', () => {
+      const presetKey = modal.querySelector('#rst-preset').value;
+      const fields = { name:true, price:true, barcode: modal.querySelector('#rst-barcode').checked,
+                       unitPrice:false, sku:false, din:false, date:true, border:true, barcodeType:'auto' };
+      const doc = ShelfTags.buildSheet(tags, fields, presetKey);
+      close();
+      const frame = document.createElement('iframe');
+      frame.style.cssText = 'position:fixed;left:-9999px;width:900px;height:1200px;border:none;';
+      document.body.appendChild(frame);
+      frame.contentDocument.open(); frame.contentDocument.write(doc); frame.contentDocument.close();
+      setTimeout(() => { frame.contentWindow.focus(); frame.contentWindow.print();
+        setTimeout(() => frame.remove(), 1000); }, 400);
+    });
   }
 
   /* ── Shift Reports ───────────────────────────────────────── */
@@ -978,6 +1918,302 @@ class ReportsScreen {
         ])
       ], `shift_reports_${_dateStr()}.csv`);
     });
+  }
+
+  /* ── BTC / Controlled Substance Log ─────────────────────── */
+  _renderBtcLog(content) {
+    const renderTable = (from, to) => {
+      const logs = from ? DB.getBtcLog(from, to) : DB.getBtcLogAll();
+      const bodyEl = content.querySelector('#btc-body');
+
+      if (!logs.length) {
+        bodyEl.innerHTML = `<div style="padding:40px;text-align:center;color:var(--text-muted);">
+          No BTC records in this period.</div>`;
+        return;
+      }
+
+      // Calculate running balance per drug
+      const balance = {};
+      logs.forEach(l => {
+        const key = l.drug_name;
+        if (!balance[key]) balance[key] = 0;
+        if (l.log_type === 'received') balance[key] += l.quantity;
+        else balance[key] -= l.quantity;
+      });
+
+      // Summary cards
+      const drugs = [...new Set(logs.map(l => l.drug_name))];
+      const summaryCards = drugs.map(drug => {
+        const received = logs.filter(l => l.drug_name === drug && l.log_type === 'received')
+                             .reduce((s,l) => s+l.quantity, 0);
+        const dispensed = logs.filter(l => l.drug_name === drug && l.log_type !== 'received')
+                              .reduce((s,l) => s+l.quantity, 0);
+        const bal = received - dispensed;
+        return `<div style="background:var(--surface2);border-radius:var(--radius);padding:12px 16px;
+                            border-left:4px solid ${bal<0?'var(--danger)':bal===0?'var(--text-muted)':'var(--success)'}">
+          <div style="font-size:12px;color:var(--text-muted);margin-bottom:4px;">${drug}</div>
+          <div style="display:flex;gap:20px;font-size:13px;">
+            <span>📥 Received: <strong>${received}</strong></span>
+            <span>📤 Dispensed: <strong>${dispensed}</strong></span>
+            <span style="color:${bal<0?'var(--danger)':bal>0?'var(--success)':'inherit'}">
+              Balance: <strong>${bal}</strong>
+            </span>
+          </div>
+        </div>`;
+      }).join('');
+
+      // Detail rows
+      let runningBal = {};
+      const rows = logs.map(l => {
+        const d    = new Date(l.sale_date);
+        const date = d.toLocaleDateString('en-CA');
+        const time = d.toLocaleTimeString('en-CA', {hour:'2-digit',minute:'2-digit'});
+        const key  = l.drug_name;
+        if (!runningBal[key]) runningBal[key] = 0;
+        const isReceived = l.log_type === 'received';
+        if (isReceived) runningBal[key] += l.quantity;
+        else runningBal[key] -= l.quantity;
+        const bal = runningBal[key];
+
+        const typeBadge = isReceived
+          ? `<span class="badge" style="background:#d1e7dd;color:#0a3622;">📥 RECEIVED</span>`
+          : l.schedule_flag === 'btc_ctrl'
+          ? `<span class="badge" style="background:#ffe5cc;color:#a04000;">CTRL BTC</span>`
+          : `<span class="badge" style="background:#fff3cd;color:#856404;">BTC</span>`;
+
+        return `<tr style="${isReceived?'background:rgba(209,231,221,.2);':''}">
+          <td>${date} ${time}</td>
+          <td>${typeBadge}</td>
+          <td><strong>${l.drug_name}</strong>${l.din?`<br><small style="color:var(--text-muted);">DIN: ${l.din}</small>`:''}</td>
+          <td style="text-align:center;color:${isReceived?'var(--success)':'inherit'};">
+            ${isReceived?'+':'−'}${l.quantity}
+          </td>
+          <td style="text-align:center;font-weight:600;color:${bal<0?'var(--danger)':bal>0?'var(--success)':'inherit'}">
+            ${bal}
+          </td>
+          <td>${isReceived ? (l.pharmacist_name||'—') : (l.pharmacist_name||'—')}</td>
+          <td>${isReceived ? (l.supplier||'—') : (l.counselled?'✅':'—')}</td>
+          <td>${isReceived ? (l.lot_number||'—') : (l.patient_name||'<span style="color:var(--text-muted);">Not recorded</span>')}</td>
+          <td>${isReceived ? (l.notes||'—') : (l.patient_phone||'—')}</td>
+          <td style="text-align:center;">${l.transaction_id?`#${l.transaction_id}`:'—'}</td>
+        </tr>`;
+      }).join('');
+
+      bodyEl.innerHTML = `
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px;margin-bottom:16px;">
+          ${summaryCards}
+        </div>
+        <div style="overflow-x:auto;">
+          <table class="table" style="font-size:12px;min-width:900px;">
+            <thead><tr>
+              <th>Date / Time</th><th>Type</th><th>Drug</th>
+              <th>Qty</th><th>Balance</th><th>Staff / RPh</th>
+              <th>Counselled / Supplier</th><th>Patient / Lot #</th>
+              <th>Phone / Notes</th><th>Txn#</th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+        <div style="margin-top:8px;font-size:12px;color:var(--text-muted);">
+          ${logs.length} record${logs.length!==1?'s':''} &nbsp;·&nbsp;
+          ${logs.filter(l=>l.log_type==='received').length} received &nbsp;·&nbsp;
+          ${logs.filter(l=>l.log_type!=='received').length} dispensed
+        </div>`;
+    };
+
+      if (!logs.length) {
+        content.querySelector('#btc-body').innerHTML = `
+          <div style="padding:40px;text-align:center;color:var(--text-muted);">
+            No BTC/controlled sales recorded in this period.
+          </div>`;
+        return;
+      }
+
+    content.innerHTML = `
+      <div class="settings-section">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+          <h3 style="margin:0;">BTC / Controlled Substance Log</h3>
+          <button class="btn btn-success btn-sm" id="btc-add-received">
+            📥 Record Stock Received
+          </button>
+        </div>
+        <p style="color:var(--text-muted);font-size:13px;margin-bottom:16px;">
+          Tracks all BTC sales (dispensed) and stock receipts. Running balance is calculated
+          per drug. Patient name is for your records only — not sent to WinRx.
+        </p>
+
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;
+                    background:var(--surface2);padding:12px 16px;border-radius:var(--radius);">
+          <label style="font-size:13px;font-weight:500;">From</label>
+          <input type="date" id="btc-from" value="${_dateStr()}" style="width:150px;" />
+          <label style="font-size:13px;font-weight:500;">To</label>
+          <input type="date" id="btc-to"   value="${_dateStr()}" style="width:150px;" />
+          <button class="btn btn-primary btn-sm" id="btc-run">Run Report</button>
+          <div style="display:flex;gap:6px;margin-left:auto;">
+            <button class="btn btn-outline btn-sm" id="btc-quick-today">Today</button>
+            <button class="btn btn-outline btn-sm" id="btc-quick-month">This Month</button>
+            <button class="btn btn-outline btn-sm" id="btc-quick-all">All Time</button>
+          </div>
+        </div>
+
+        <div style="display:flex;gap:8px;margin-bottom:14px;">
+          <button class="btn btn-outline btn-sm" id="btc-csv">⬇ Export CSV</button>
+          <button class="btn btn-outline btn-sm" id="btc-print">🖨 Print</button>
+        </div>
+
+        <div id="btc-body">
+          <div style="padding:40px;text-align:center;color:var(--text-muted);">
+            Select a date range and click Run Report.
+          </div>
+        </div>
+      </div>`;
+
+    const getFrom = () => content.querySelector('#btc-from').value;
+    const getTo   = () => content.querySelector('#btc-to').value;
+
+    content.querySelector('#btc-run').addEventListener('click', () => renderTable(getFrom(), getTo()));
+
+    content.querySelector('#btc-quick-today').addEventListener('click', () => {
+      const t = _dateStr();
+      content.querySelector('#btc-from').value = t;
+      content.querySelector('#btc-to').value   = t;
+      renderTable(t, t);
+    });
+    content.querySelector('#btc-quick-month').addEventListener('click', () => {
+      const d = new Date(); d.setDate(1);
+      const f = d.toISOString().slice(0,10);
+      const t = _dateStr();
+      content.querySelector('#btc-from').value = f;
+      content.querySelector('#btc-to').value   = t;
+      renderTable(f, t);
+    });
+    content.querySelector('#btc-quick-all').addEventListener('click', () => {
+      content.querySelector('#btc-from').value = '2000-01-01';
+      content.querySelector('#btc-to').value   = _dateStr();
+      renderTable('2000-01-01', _dateStr());
+    });
+
+    // Record Stock Received modal
+    content.querySelector('#btc-add-received').addEventListener('click', () => {
+      const modal = document.createElement('div');
+      modal.className = 'modal-overlay';
+      modal.innerHTML = `
+        <div class="modal" style="max-width:440px;">
+          <div class="modal-header" style="background:#d1e7dd;">
+            <h3 style="color:#0a3622;">📥 Record Stock Received</h3>
+            <button class="modal-close">&times;</button>
+          </div>
+          <div class="modal-body">
+            <div class="form-group">
+              <label>Drug Name <span style="color:var(--danger);">*</span></label>
+              <input type="text" id="rcv-drug" placeholder="e.g. LENOLTEC #1 CODEINE CPLT 300-8-15MG" />
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+              <div class="form-group">
+                <label>DIN</label>
+                <input type="text" id="rcv-din" placeholder="e.g. 06458900" />
+              </div>
+              <div class="form-group">
+                <label>Qty Received <span style="color:var(--danger);">*</span></label>
+                <input type="number" id="rcv-qty" min="1" step="1" placeholder="e.g. 24" />
+              </div>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+              <div class="form-group">
+                <label>Date Received</label>
+                <input type="date" id="rcv-date" value="${_dateStr()}" />
+              </div>
+              <div class="form-group">
+                <label>Lot / Batch #</label>
+                <input type="text" id="rcv-lot" placeholder="Optional" />
+              </div>
+            </div>
+            <div class="form-group">
+              <label>Supplier</label>
+              <input type="text" id="rcv-supplier" placeholder="e.g. McKesson, Shoppers Drug Mart" />
+            </div>
+            <div class="form-group">
+              <label>Received By</label>
+              <input type="text" id="rcv-by"
+                value="${Auth.current()?.name||''}" placeholder="Staff name" />
+            </div>
+            <div class="form-group">
+              <label>Notes</label>
+              <input type="text" id="rcv-notes" placeholder="Optional" />
+            </div>
+            <div id="rcv-err" class="alert alert-danger" style="display:none;"></div>
+          </div>
+          <div class="modal-footer">
+            <button class="btn btn-outline" id="rcv-cancel">Cancel</button>
+            <button class="btn btn-success" id="rcv-save">Save Stock Receipt</button>
+          </div>
+        </div>`;
+      document.body.appendChild(modal);
+      const close = () => modal.remove();
+      modal.querySelector('.modal-close').addEventListener('click', close);
+      modal.querySelector('#rcv-cancel').addEventListener('click', close);
+      setTimeout(() => modal.querySelector('#rcv-drug').focus(), 80);
+
+      modal.querySelector('#rcv-save').addEventListener('click', () => {
+        const drug    = modal.querySelector('#rcv-drug').value.trim();
+        const qty     = parseInt(modal.querySelector('#rcv-qty').value);
+        const errEl   = modal.querySelector('#rcv-err');
+        if (!drug) { errEl.style.display='block'; errEl.textContent='Drug name is required.'; return; }
+        if (!qty || qty < 1) { errEl.style.display='block'; errEl.textContent='Quantity must be at least 1.'; return; }
+
+        DB.addBtcReceived({
+          drug_name:     drug,
+          din:           modal.querySelector('#rcv-din').value.trim() || null,
+          quantity:      qty,
+          received_date: modal.querySelector('#rcv-date').value || _dateStr(),
+          lot_number:    modal.querySelector('#rcv-lot').value.trim() || null,
+          supplier:      modal.querySelector('#rcv-supplier').value.trim() || null,
+          received_by:   modal.querySelector('#rcv-by').value.trim() || null,
+          notes:         modal.querySelector('#rcv-notes').value.trim() || null,
+          schedule_flag: 'btc',
+        });
+        close();
+        renderTable(getFrom(), getTo());
+      });
+    });
+
+    content.querySelector('#btc-csv').addEventListener('click', () => {
+      const logs = DB.getBtcLog(getFrom(), getTo());
+      const rows = [
+        ['Date/Time','Type','Drug Name','DIN','Qty (+In/-Out)','Balance','Price',
+         'Staff/RPh','Counselled/Supplier','Patient Name/Lot#','Phone/Notes','Supplier','Txn#'],
+      ];
+      let runBal = {};
+      logs.forEach(l => {
+        const key = l.drug_name;
+        if (!runBal[key]) runBal[key] = 0;
+        const isRcv = l.log_type === 'received';
+        if (isRcv) runBal[key] += l.quantity; else runBal[key] -= l.quantity;
+        rows.push([
+          new Date(l.sale_date).toLocaleString(),
+          isRcv ? 'RECEIVED' : (l.schedule_flag==='btc_ctrl'?'CTRL BTC':'BTC'),
+          l.drug_name, l.din||'',
+          (isRcv?'+':'-') + l.quantity,
+          runBal[key],
+          isRcv ? '' : (l.price||0).toFixed(2),
+          l.pharmacist_name||'',
+          isRcv ? (l.supplier||'') : (l.counselled?'Yes':'No'),
+          isRcv ? (l.lot_number||'') : (l.patient_name||''),
+          isRcv ? (l.notes||'') : (l.patient_phone||''),
+          l.supplier||'',
+          l.transaction_id||'',
+        ]);
+      });
+      _csvDownload(rows, `btc_log_${getFrom()}_to_${getTo()}.csv`);
+    });
+
+    content.querySelector('#btc-print').addEventListener('click', () => window.print());
+
+    // Auto-run for this month to show balance
+    const d = new Date(); d.setDate(1);
+    const monthStart = d.toISOString().slice(0,10);
+    content.querySelector('#btc-from').value = monthStart;
+    renderTable(monthStart, _dateStr());
   }
 
   detach() {}

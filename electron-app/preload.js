@@ -26,8 +26,20 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getPrinters: () => ipcRenderer.invoke('get-printers'),
 
   /** Print a standalone HTML document silently to the named printer — returns { ok, reason } */
-  printReceiptHtml: (html, printerName) => ipcRenderer.invoke('print-receipt-html', { html, printerName }),
+  printReceiptHtml: (html, printerName, paperMm) => ipcRenderer.invoke('print-receipt-html', { html, printerName, paperMm }),
 
   /** Send email directly via nodemailer (no Cloudflare Worker) — returns { ok, error? } */
   sendEmail: (params) => ipcRenderer.invoke('send-email', params),
+
+  /** Save a base64 PDF to a local folder path — returns { ok, path?, error? } */
+  savePdfFile: (params) => ipcRenderer.invoke('save-pdf-file', params),
+
+  /** Make a McKesson PharmaClik SOAP call (runs in Node, no CORS) — returns { ok, status, body } */
+  mckessonSoap: (params) => ipcRenderer.invoke('mckesson-soap', params),
+
+  /** Write Clover .env from Settings and restart the bridge — returns { ok, error? } */
+  saveCloverEnv: (vals) => ipcRenderer.invoke('save-clover-env', vals),
+
+  /** Open the native folder picker — returns { ok, path?, canceled? } */
+  pickFolder: (current) => ipcRenderer.invoke('pick-folder', { current }),
 });

@@ -76,5 +76,18 @@ const CloverAPI = (() => {
     }).catch(() => {}); // best-effort — device may already be done
   }
 
-  return { isConfigured, ping, displayOrder, sale, cancel };
+  /* Trigger a refund on the terminal.
+     amountCents     — refund amount in cents (e.g. $13.50 → 1350)
+     cloverPaymentId — original Clover payment ID (preferred, enables linked refund)
+                       pass null to fall back to manual/standalone refund
+     signal          — optional AbortSignal
+     Returns { ok, refundId, amount, result }                         */
+  async function refund(amountCents, cloverPaymentId = null, signal = null) {
+    return _post('/clover/refund', {
+      amount:    amountCents,
+      paymentId: cloverPaymentId || undefined,
+    }, signal);
+  }
+
+  return { isConfigured, ping, displayOrder, sale, cancel, refund };
 })();

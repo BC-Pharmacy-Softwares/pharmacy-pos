@@ -39,34 +39,51 @@ function startCloverBridge() {
     return;
   }
 
-  // Check .env exists and has a real IP set
-  const envPath = path.join(cloverDir, '.env');
-  if (fs.existsSync(envPath)) {
-    const envContent = fs.readFileSync(envPath, 'utf8');
-    if (envContent.includes('CLOVER_DEVICE_IP=192.168.1.100') ||
-        !envContent.match(/CLOVER_DEVICE_IP=\d+\.\d+\.\d+\.\d+/)) {
-      console.log('Clover bridge: no real device IP configured — skipping.');
-      return;
+  // Ensure .env exists — create a blank one if missing so server.js doesn't crash
+  const envPath     = path.join(cloverDir, '.env');
+  const envExample  = path.join(cloverDir, '.env.example');
+  if (!fs.existsSync(envPath)) {
+    // Copy from .env.example if available, otherwise write minimal placeholder
+    if (fs.existsSync(envExample)) {
+      fs.copyFileSync(envExample, envPath);
+      console.log('Clover bridge: created .env from .env.example');
+    } else {
+      fs.writeFileSync(envPath,
+        '# Set CLOVER_DEVICE_IP to your Clover terminal IP address\n' +
+        'CLOVER_DEVICE_IP=\nCLOVER_DEVICE_PORT=12345\nCLOVER_POS_ID=PharmacyPOS\nPORT=3001\n');
+      console.log('Clover bridge: created blank .env');
     }
   }
 
-  console.log('Starting Clover Local Pay bridge...');
-  cloverProcess = spawn(process.execPath.replace('Pharmacy POS.exe', 'node.exe')
-      .replace(/[^/\\]*\.exe$/, 'node.exe'),
-    [serverJs], {
+  // Only start if a real device IP is configured
+  const envContent = fs.readFileSync(envPath, 'utf8');
+  const ipMatch    = envContent.match(/CLOVER_DEVICE_IP\s*=\s*(\d+\.\d+\.\d+\.\d+)/);
+  if (!ipMatch || ipMatch[1] === '192.168.1.100') {
+    console.log('Clover bridge: no real device IP in .env — skipping. Configure in Settings → API Credentials → Clover.');
+    return;
+  }
+
+  // Kill any existing bridge process before (re)starting
+  if (cloverProcess) { try { cloverProcess.kill(); } catch(_) {} cloverProcess = null; }
+
+  console.log('Starting Clover Local Pay bridge (in-app, using Electron runtime)...');
+  // Run the bridge with Electron's OWN bundled Node runtime — no separate Node.js
+  // install needed. ELECTRON_RUN_AS_NODE=1 makes the app binary behave as plain Node.
+  cloverProcess = spawn(process.execPath, [serverJs], {
     cwd:   cloverDir,
-    env:   { ...process.env },
+    env:   { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
     stdio: 'ignore',
     detached: false,
   });
 
   cloverProcess.on('error', (err) => {
-    // node not found via that path — try system node
-    console.warn('Clover bridge spawn error:', err.message, '— trying system node');
-    cloverProcess = spawn('node', [serverJs], {
-      cwd: cloverDir, env: { ...process.env }, stdio: 'ignore', detached: false,
-    });
-    cloverProcess.on('error', e => console.warn('Clover bridge unavailable:', e.message));
+    console.warn('Clover bridge spawn error:', err.message, '— trying system node as fallback');
+    try {
+      cloverProcess = spawn('node', [serverJs], {
+        cwd: cloverDir, env: { ...process.env }, stdio: 'ignore', detached: false,
+      });
+      cloverProcess.on('error', e => console.warn('Clover bridge unavailable:', e.message));
+    } catch (e) { console.warn('Clover bridge unavailable:', e.message); }
   });
 
   cloverProcess.on('exit', (code) => {
@@ -293,27 +310,42 @@ function registerIpcHandlers() {
   });
 
   // Print receipt HTML silently to a named printer (no dialog)
-  ipcMain.handle('print-receipt-html', async (_, { html, printerName }) => {
+  ipcMain.handle('print-receipt-html', async (_, { html, printerName, paperMm }) => {
     return new Promise((resolve) => {
       let win;
       try {
+        const paperW  = parseInt(paperMm) || 80;          // thermal roll paper width
+        // Printable width (matches wrapThermal in print.js) — avoids right-edge clipping
+        const widthMm = paperW >= 80 ? 72 : paperW >= 72 ? 64 : 48;
+        const widthPx = Math.round(widthMm * 3.7795);     // 96 dpi
         win = new BrowserWindow({
           show:   false,
-          width:  400,
+          width:  widthPx,
           height: 1200,
           webPreferences: { nodeIntegration: false, contextIsolation: true },
         });
 
         win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
 
-        win.webContents.once('did-finish-load', () => {
+        win.webContents.once('did-finish-load', async () => {
+          // Measure the actual rendered content height so the page is exactly
+          // as tall as the receipt — no blank paper fed, content not cut off.
+          let contentMm = 150;
+          try {
+            const px = await win.webContents.executeJavaScript(
+              'Math.ceil(document.body.scrollHeight)'
+            );
+            if (px && px > 0) contentMm = px / 3.7795 + 4;  // +4mm bottom padding for the cut
+          } catch (_) {}
+
           win.webContents.print(
             {
               silent:          true,
               printBackground: true,
               deviceName:      printerName,
-              // No pageSize — let the printer driver use its own paper settings
-              margins:         { marginType: 'printableArea' },
+              margins:         { marginType: 'none' },     // thermal printers handle their own edges
+              // Page sized to the roll width × measured content height (microns)
+              pageSize:        { width: widthMm * 1000, height: Math.round(contentMm * 1000) },
             },
             (success, failureReason) => {
               try { win.close(); } catch {}
@@ -361,6 +393,110 @@ function registerIpcHandlers() {
     } catch (e) {
       return { ok: false, error: e.message };
     }
+  });
+
+  // Save a base64-encoded PDF to a local folder path
+  // Body: { base64, filename, folderPath }
+  // Creates the folder (and monthly subfolder) if it doesn't exist
+  ipcMain.handle('save-pdf-file', async (_, { base64, filename, folderPath }) => {
+    if (!base64 || !filename || !folderPath) {
+      return { ok: false, error: 'base64, filename, and folderPath are all required' };
+    }
+    try {
+      // Build monthly subfolder: folderPath\2026-06\
+      const now        = new Date();
+      const monthDir   = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
+      const targetDir  = path.join(folderPath, monthDir);
+      fs.mkdirSync(targetDir, { recursive: true });   // creates all missing directories
+
+      const safeName  = path.basename(filename).replace(/[^a-zA-Z0-9._\-]/g, '_');
+      const fullPath  = path.join(targetDir, safeName);
+      const buf       = Buffer.from(base64, 'base64');
+      fs.writeFileSync(fullPath, buf);
+      console.log('[save-pdf-file] Saved:', fullPath, `(${buf.length} bytes)`);
+      return { ok: true, path: fullPath };
+    } catch (e) {
+      console.error('[save-pdf-file] Error:', e.message);
+      return { ok: false, error: e.message };
+    }
+  });
+
+  // Native folder picker — returns the chosen path (or null if cancelled).
+  // 'createDirectory' lets the user make a new folder right in the dialog.
+  ipcMain.handle('pick-folder', async (_, { current } = {}) => {
+    try {
+      const opts = {
+        title: 'Select Folder',
+        properties: ['openDirectory', 'createDirectory'],
+      };
+      if (current) opts.defaultPath = current;
+      const result = await dialog.showOpenDialog(mainWindow, opts);
+      if (result.canceled || !result.filePaths.length) return { ok: false, canceled: true };
+      return { ok: true, path: result.filePaths[0] };
+    } catch (e) {
+      return { ok: false, error: e.message };
+    }
+  });
+
+  // Write the Clover .env from Settings, then restart the in-app bridge.
+  // Body: { CLOVER_DEVICE_IP, CLOVER_DEVICE_PORT, CLOVER_POS_ID, PORT }
+  ipcMain.handle('save-clover-env', async (_, vals) => {
+    try {
+      const cloverDir = app.isPackaged
+        ? path.join(process.resourcesPath, 'app', 'clover-local-pay')
+        : path.join(__dirname, '..', 'clover-local-pay');
+      const envPath = path.join(cloverDir, '.env');
+      const content =
+        `CLOVER_DEVICE_IP=${vals.CLOVER_DEVICE_IP || ''}\n` +
+        `CLOVER_DEVICE_PORT=${vals.CLOVER_DEVICE_PORT || '12345'}\n` +
+        `CLOVER_POS_ID=${vals.CLOVER_POS_ID || 'PharmacyPOS'}\n` +
+        `PORT=${vals.PORT || '3001'}\n`;
+      fs.writeFileSync(envPath, content, 'utf8');
+      console.log('[clover] .env updated from Settings:', envPath);
+
+      // Restart the bridge with the new config
+      startCloverBridge();
+      return { ok: true };
+    } catch (e) {
+      console.error('[clover] save-clover-env error:', e.message);
+      return { ok: false, error: e.message };
+    }
+  });
+
+  // McKesson PharmaClik SOAP call — runs in Node (no CORS like the browser).
+  // Body: { url, soapAction, xml }  → returns { ok, status, body }
+  ipcMain.handle('mckesson-soap', async (_, { url, soapAction, xml }) => {
+    return new Promise((resolve) => {
+      try {
+        const https = require('https');
+        const u = new URL(url);
+        const data = Buffer.from(xml, 'utf8');
+        const req = https.request({
+          hostname: u.hostname,
+          port:     u.port || 443,
+          path:     u.pathname + u.search,
+          method:   'POST',
+          headers: {
+            'Content-Type':   'text/xml; charset=utf-8',
+            'Content-Length': data.length,
+            'SOAPAction':     soapAction ? `"${soapAction}"` : '""',
+          },
+          timeout: 60000,
+          rejectUnauthorized: true,
+        }, (res) => {
+          let chunks = '';
+          res.on('data', c => chunks += c);
+          res.on('end', () => resolve({ ok: res.statusCode >= 200 && res.statusCode < 300,
+                                        status: res.statusCode, body: chunks }));
+        });
+        req.on('error',   e => resolve({ ok: false, status: 0, body: '', error: e.message }));
+        req.on('timeout', () => { req.destroy(); resolve({ ok: false, status: 0, body: '', error: 'Request timed out' }); });
+        req.write(data);
+        req.end();
+      } catch (e) {
+        resolve({ ok: false, status: 0, body: '', error: e.message });
+      }
+    });
   });
 
   // Return current config (password masked)
@@ -640,6 +776,28 @@ function addSqlRoutes(expressApp) {
         console.warn('/getRxTx: TXNS query failed (copay will be 0):', txErr.message);
       }
 
+      // ── Step 2b: Get the BILLED quantity from the latest fill ────
+      // RX.RXQTY is the prescribed total; the actual dispensed/billed qty per
+      // fill lives in REFILL.REQTY. Use the most recent NON-reversed fill
+      // (REREVDATE IS NULL). Also grab RECOPAY as a more accurate copay source.
+      let fillRow = null;
+      try {
+        const r2b = await sqlPool.request()
+          .input('rxnum', sql.Float, rxNum)
+          .query(`
+            SELECT TOP 1
+              REQTY   AS FILLQTY,
+              RECOPAY AS FILLCOPAY,
+              REEFDATE
+            FROM REFILL
+            WHERE RERXNUM = @rxnum AND REREVDATE IS NULL
+            ORDER BY REEFDATE DESC
+          `);
+        if (r2b.recordset.length) fillRow = r2b.recordset[0];
+      } catch (fillErr) {
+        console.warn('/getRxTx: REFILL query failed (qty falls back to RXQTY):', fillErr.message);
+      }
+
       // ── Step 3: Look up patient by PHN ───────────────────────────
       const phn = rxRow.PHN ? String(rxRow.PHN).trim() : null;
       let patientData = null;
@@ -685,6 +843,9 @@ function addSqlRoutes(expressApp) {
         console.warn('/getRxTx: RXPANUM is null/empty — cannot auto-link patient');
       }
 
+      // Billed qty = latest fill's REQTY; fall back to RX.RXQTY (prescribed total) only if no fill found
+      const billedQty = (fillRow && fillRow.FILLQTY != null) ? fillRow.FILLQTY : (rxRow.REQTY || 0);
+
       res.json({
         RECOPAY:   parseFloat(txRow?.RECOPAY)   || 0,
         RECOST:    0,
@@ -694,7 +855,7 @@ function addSqlRoutes(expressApp) {
         REEFDATE:  txRow?.REEFDATE  || null,
         REUSERID:  null,
         PHN:       phn              || null,
-        REQTY:     rxRow.REQTY      || 0,
+        REQTY:     billedQty,
         RXNUM:     rxRow.RXNUM,
         RXDAYS:    rxRow.RXDAYS     || null,
         RXLIM:     rxRow.RXLIM      || null,
@@ -749,31 +910,29 @@ function addSqlRoutes(expressApp) {
     if (!PHN) return res.status(400).json({ error: 'PHN required' });
     const inclStopped = (Stopped || 'N').toUpperCase() === 'Y';
     try {
-      // Try with DRUG join; fall back to basic if RXDIN column doesn't exist
+      // Pull from REFILL = actual BILLED/dispensed fills (not every Rx on file).
+      // Gives the billed qty (REQTY), real copay (RECOPAY) and fill date (REEFDATE),
+      // excluding reversed fills (REREVDATE IS NULL). Most recent first.
       let result;
-      const baseWhere = `r.RXPANUM = @phn ${inclStopped ? '' : 'AND (r.RXSTOP IS NULL OR r.RXSTOP > GETDATE())'}`;
       try {
         result = await sqlPool.request()
           .input('phn', sql.VarChar, String(PHN))
           .query(`
             SELECT TOP 60
-              r.RXNUM,
-              r.RXPANUM           AS PHN,
-              r.RXQTY             AS QTY,
+              rf.RERXNUM            AS RXNUM,
+              r.RXPANUM             AS PHN,
+              rf.REQTY              AS QTY,
+              rf.RECOPAY            AS RECOPAY,
+              rf.REEFDATE           AS REEFDATE,
               r.RXDAYS,
-              r.RXLIM             AS REFILL,
-              r.RXSTOP,
+              r.RXLIM               AS REFILL,
               CAST(d.DGDIN AS BIGINT) AS DIN,
-              d.DGDESC            AS DRUG,
-              t.AMT               AS RECOPAY,
-              t.ADJDATE           AS REEFDATE,
-              t.PLANID
-            FROM RX r
+              d.DGDESC              AS DRUG
+            FROM REFILL rf
+            JOIN RX r ON r.RXNUM = rf.RERXNUM
             LEFT JOIN DRUG d ON d.DGDIN = r.RXDIN
-            LEFT JOIN TXNS t ON t.RX = r.RXNUM
-              AND t.ADJDATE = (SELECT MAX(ADJDATE) FROM TXNS WHERE RX = r.RXNUM)
-            WHERE ${baseWhere}
-            ORDER BY t.ADJDATE DESC, r.RXNUM DESC
+            WHERE r.RXPANUM = @phn AND rf.REREVDATE IS NULL
+            ORDER BY rf.REEFDATE DESC
           `);
       } catch (_drugErr) {
         console.warn('/getPatientProfile: DRUG join failed, using basic query:', _drugErr.message);
@@ -781,20 +940,16 @@ function addSqlRoutes(expressApp) {
           .input('phn', sql.VarChar, String(PHN))
           .query(`
             SELECT TOP 60
-              r.RXNUM,
-              r.RXPANUM AS PHN,
-              r.RXQTY   AS QTY,
-              r.RXDAYS,
-              r.RXLIM   AS REFILL,
-              r.RXSTOP,
-              t.AMT     AS RECOPAY,
-              t.ADJDATE AS REEFDATE,
-              t.PLANID
-            FROM RX r
-            LEFT JOIN TXNS t ON t.RX = r.RXNUM
-              AND t.ADJDATE = (SELECT MAX(ADJDATE) FROM TXNS WHERE RX = r.RXNUM)
-            WHERE ${baseWhere}
-            ORDER BY t.ADJDATE DESC, r.RXNUM DESC
+              rf.RERXNUM  AS RXNUM,
+              r.RXPANUM   AS PHN,
+              rf.REQTY    AS QTY,
+              rf.RECOPAY  AS RECOPAY,
+              rf.REEFDATE AS REEFDATE,
+              r.RXLIM     AS REFILL
+            FROM REFILL rf
+            JOIN RX r ON r.RXNUM = rf.RERXNUM
+            WHERE r.RXPANUM = @phn AND rf.REREVDATE IS NULL
+            ORDER BY rf.REEFDATE DESC
           `);
       }
       // Shape each row to match PD API response fields
@@ -816,6 +971,40 @@ function addSqlRoutes(expressApp) {
       res.json(rows);
     } catch (e) {
       console.error('/getPatientProfile error:', e.message);
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  /* /getAllBilled — patient copay billed totals across ALL patients (AR dashboard).
+     Sums REFILL.RECOPAY (patient portion only) grouped by patient, optionally since
+     a cutoff date. Insurance is never included — RECOPAY is the patient's portion. */
+  expressApp.post('/getAllBilled', async (req, res) => {
+    const { Cutoff, AsOf } = req.body || {};
+    try {
+      const reqst = sqlPool.request();
+      reqst.input('cutoff', sql.Date, Cutoff ? new Date(Cutoff) : null);
+      reqst.input('asof',   sql.Date, AsOf   ? new Date(AsOf)   : null);
+      const result = await reqst.query(`
+        SELECT
+          LTRIM(RTRIM(r.RXPANUM)) AS PHN,
+          COUNT(*)                AS Fills,
+          SUM(rf.RECOPAY)         AS Billed
+        FROM REFILL rf
+        JOIN RX r ON r.RXNUM = rf.RERXNUM
+        WHERE rf.REREVDATE IS NULL AND rf.RECOPAY > 0
+          AND (@cutoff IS NULL OR rf.REEFDATE >= @cutoff)
+          AND (@asof   IS NULL OR rf.REEFDATE <= @asof)
+        GROUP BY LTRIM(RTRIM(r.RXPANUM))
+        HAVING SUM(rf.RECOPAY) > 0
+        ORDER BY SUM(rf.RECOPAY) DESC
+      `);
+      res.json(result.recordset.map(row => ({
+        PHN:    String(row.PHN || '').trim(),
+        fills:  row.Fills || 0,
+        billed: parseFloat(row.Billed) || 0,
+      })));
+    } catch (e) {
+      console.error('/getAllBilled error:', e.message);
       res.status(500).json({ error: e.message });
     }
   });

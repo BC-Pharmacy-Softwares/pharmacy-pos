@@ -13,7 +13,7 @@ if errorlevel 1 (
   exit /b 1
 )
 
-echo [1/3] Installing dependencies...
+echo [1/4] Installing app dependencies...
 call npm install
 if errorlevel 1 (
   echo ERROR: npm install failed.
@@ -22,7 +22,19 @@ if errorlevel 1 (
 )
 
 echo.
-echo [2/3] Building Windows installer...
+echo [2/4] Installing Clover bridge dependencies (bundled into the app)...
+pushd ..\clover-local-pay
+call npm install
+if errorlevel 1 (
+  echo ERROR: Clover bridge npm install failed.
+  popd
+  pause
+  exit /b 1
+)
+popd
+
+echo.
+echo [3/4] Building Windows installer...
 call npm run build
 if errorlevel 1 (
   echo ERROR: Build failed.
@@ -31,9 +43,9 @@ if errorlevel 1 (
 )
 
 echo.
-echo [3/3] Done!
+echo [4/4] Done!
 echo.
 echo Installer is in:  electron-app\dist\
-echo File to share:    Pharmacy POS Setup 1.0.0.exe
+echo File to share:    Pharmacy POS Setup 1.2.0.exe
 echo.
 pause
