@@ -10,57 +10,143 @@ const Scheduler = (() => {
 
   /* ── Report builders ───────────────────────────────────────── */
 
-  async function _buildDailyEmail(date) {
-    const name    = (await Config.get('pharmacy_name')) || 'Pharmacy POS';
-    const s       = DB.getSalesSummary(date, date);
-    const methods = DB.getSalesByMethod(date, date);
+  /* Read which optional sections the pharmacy enabled.
+     Sales Summary is always included. Defaults match the UI defaults. */
+  async function _enabledSections() {
+    const flag = async (key, def) => {
+      const v = await Config.get(key);
+      return v !== null && v !== undefined && v !== '' ? v === 'true' : def;
+    };
+    return {
+      methods:  await flag('auto_rpt_methods',  true),
+      tax:      await flag('auto_rpt_tax',      true),
+      products: await flag('auto_rpt_products', false),
+      btc:      await flag('auto_rpt_btc',      false),
+      lowstock: await flag('auto_rpt_lowstock', false),
+    };
+  }
+
+  /* Build the report sections array shared by daily + monthly.
+     `from`/`to` are date strings (same for a single day).      */
+  async function _buildSections(from, to) {
+    const s       = DB.getSalesSummary(from, to);
     const gstRate = (Tax.gstRate() * 100).toFixed(1).replace(/\.0$/, '');
     const pstRate = (Tax.pstRate() * 100).toFixed(1).replace(/\.0$/, '');
+    const enabled = await _enabledSections();
 
-    const html = EmailAPI.buildEmailHTML({
-      pharmacyName: name,
-      title:        'Daily Sales Report',
-      subtitle:     `Date: ${date}`,
-      sections: [
-        { kpis: [
-            ['Transactions',     s.txn_count],
-            ['Gross Sales',      Tax.fmt(s.gross_sales)],
-            [`GST (${gstRate}%)`, Tax.fmt(s.total_gst)],
-            [`PST (${pstRate}%)`, Tax.fmt(s.total_pst)],
-          ]},
-        { heading: 'Sales Summary',
-          headers: ['', 'Amount'],
-          rows: [
-            ['Total Sales (excl. tax)', Tax.fmt(s.total_subtotal)],
-            [`GST Collected (${gstRate}%)`, Tax.fmt(s.total_gst)],
-            [`PST Collected (${pstRate}%)`, Tax.fmt(s.total_pst)],
-            ['Total Tax Collected',        Tax.fmt(s.total_gst + s.total_pst)],
-            ['Gross Revenue (incl. tax)',  Tax.fmt(s.gross_sales)],
-            ['Voided / Reversed',
-             `${s.voided_count} txn${s.voided_count !== 1 ? 's' : ''} / ${Tax.fmt(s.voided_amount)}`],
-          ]},
-        ...(methods.length ? [{
+    const sections = [
+      { kpis: [
+          ['Transactions',      s.txn_count],
+          ['Gross Sales',       Tax.fmt(s.gross_sales)],
+          [`GST (${gstRate}%)`, Tax.fmt(s.total_gst)],
+          [`PST (${pstRate}%)`, Tax.fmt(s.total_pst)],
+        ]},
+      { heading: 'Sales Summary',
+        headers: ['', 'Amount'],
+        rows: [
+          ['Total Sales (excl. tax)',     Tax.fmt(s.total_subtotal)],
+          [`GST Collected (${gstRate}%)`, Tax.fmt(s.total_gst)],
+          [`PST Collected (${pstRate}%)`, Tax.fmt(s.total_pst)],
+          ['Total Tax Collected',         Tax.fmt(s.total_gst + s.total_pst)],
+          ['Gross Revenue (incl. tax)',   Tax.fmt(s.gross_sales)],
+          ['Voided / Reversed',
+           `${s.voided_count} txn${s.voided_count !== 1 ? 's' : ''} / ${Tax.fmt(s.voided_amount)}`],
+        ]},
+    ];
+
+    // By Payment Method
+    if (enabled.methods) {
+      const methods = DB.getSalesByMethod(from, to);
+      if (methods.length) {
+        sections.push({
           heading: 'By Payment Method',
           headers: ['Method', 'Transactions', 'Total'],
           rows: methods.map(m => [m.method, String(m.count), Tax.fmt(m.total)]),
-        }] : []),
-      ],
-    });
+        });
+      }
+    }
 
-    const text = [
-      `DAILY SALES REPORT — ${name}`,
-      `Date: ${date}`,
+    // Tax Breakdown
+    if (enabled.tax) {
+      sections.push({
+        heading: 'Tax Breakdown',
+        headers: ['Tax', 'Rate', 'Collected'],
+        rows: [
+          ['GST', `${gstRate}%`, Tax.fmt(s.total_gst)],
+          ['PST', `${pstRate}%`, Tax.fmt(s.total_pst)],
+          ['Total Tax', '', Tax.fmt(s.total_gst + s.total_pst)],
+        ],
+      });
+    }
+
+    // Top Products Sold
+    if (enabled.products) {
+      const sold = (DB.getSoldProducts(from, to) || [])
+        .filter(p => p.item_type !== 'RX')
+        .sort((a,b) => (b.qty_sold||0) - (a.qty_sold||0))
+        .slice(0, 15);
+      if (sold.length) {
+        sections.push({
+          heading: 'Top Products Sold',
+          headers: ['Product', 'Qty', 'Revenue'],
+          rows: sold.map(p => [p.description, String(p.qty_sold||0), Tax.fmt(p.revenue||0)]),
+        });
+      }
+    }
+
+    // BTC / Controlled Log
+    if (enabled.btc) {
+      const logs = (DB.getBtcLog(from, to) || []).filter(l => l.log_type !== 'received');
+      if (logs.length) {
+        sections.push({
+          heading: 'BTC / Controlled Substance Log',
+          headers: ['Date', 'Drug', 'Qty', 'Pharmacist'],
+          rows: logs.map(l => [
+            new Date(l.sale_date).toLocaleDateString('en-CA'),
+            l.drug_name, String(l.quantity), l.pharmacist_name || '—',
+          ]),
+        });
+      }
+    }
+
+    // Low Stock Alert
+    if (enabled.lowstock) {
+      const low = DB.getLowStockProducts() || [];
+      if (low.length) {
+        sections.push({
+          heading: 'Low Stock Alert',
+          headers: ['Product', 'On Hand', 'Threshold'],
+          rows: low.map(p => [p.description, String(p.qty_on_hand ?? 0), String(p.qty_threshold ?? 0)]),
+        });
+      }
+    }
+
+    return { sections, summary: s, gstRate, pstRate };
+  }
+
+  function _summaryText(title, name, period, s) {
+    return [
+      `${title} — ${name}`,
+      period,
       '',
       `Transactions: ${s.txn_count}`,
       `Gross Sales:  ${Tax.fmt(s.gross_sales)}`,
       `GST:          ${Tax.fmt(s.total_gst)}`,
       `PST:          ${Tax.fmt(s.total_pst)}`,
       `Voided:       ${s.voided_count} / ${Tax.fmt(s.voided_amount)}`,
-      '',
-      ...methods.map(m => `${m.method.padEnd(12)} ${Tax.fmt(m.total).padStart(10)}  (${m.count} txns)`),
     ].join('\n');
+  }
 
-    return { html, text };
+  async function _buildDailyEmail(date) {
+    const name = (await Config.get('pharmacy_name')) || 'Pharmacy POS';
+    const { sections, summary } = await _buildSections(date, date);
+    const html = EmailAPI.buildEmailHTML({
+      pharmacyName: name,
+      title:        'Daily Sales Report',
+      subtitle:     `Date: ${date}`,
+      sections,
+    });
+    return { html, text: _summaryText('DAILY SALES REPORT', name, `Date: ${date}`, summary) };
   }
 
   async function _buildMonthlyEmail(year, month) {
@@ -71,54 +157,45 @@ const Scheduler = (() => {
     const monthName = new Date(year, month - 1, 1).toLocaleString('en-CA',
       { month: 'long', year: 'numeric' });
 
-    const s       = DB.getSalesSummary(from, to);
-    const methods = DB.getSalesByMethod(from, to);
-    const gstRate = (Tax.gstRate() * 100).toFixed(1).replace(/\.0$/, '');
-    const pstRate = (Tax.pstRate() * 100).toFixed(1).replace(/\.0$/, '');
-
+    const { sections, summary } = await _buildSections(from, to);
     const html = EmailAPI.buildEmailHTML({
       pharmacyName: name,
       title:        'Monthly Sales Report',
       subtitle:     monthName,
-      sections: [
-        { kpis: [
-            ['Transactions',      s.txn_count],
-            ['Gross Sales',       Tax.fmt(s.gross_sales)],
-            [`GST (${gstRate}%)`, Tax.fmt(s.total_gst)],
-            [`PST (${pstRate}%)`, Tax.fmt(s.total_pst)],
-          ]},
-        { heading: 'Monthly Summary',
-          headers: ['', 'Amount'],
-          rows: [
-            ['Total Sales (excl. tax)',   Tax.fmt(s.total_subtotal)],
-            [`GST Collected (${gstRate}%)`, Tax.fmt(s.total_gst)],
-            [`PST Collected (${pstRate}%)`, Tax.fmt(s.total_pst)],
-            ['Total Tax Collected',        Tax.fmt(s.total_gst + s.total_pst)],
-            ['Gross Revenue (incl. tax)', Tax.fmt(s.gross_sales)],
-            ['Voided / Reversed',
-             `${s.voided_count} txn${s.voided_count !== 1 ? 's' : ''} / ${Tax.fmt(s.voided_amount)}`],
-          ]},
-        ...(methods.length ? [{
-          heading: 'By Payment Method',
-          headers: ['Method', 'Transactions', 'Total'],
-          rows: methods.map(m => [m.method, String(m.count), Tax.fmt(m.total)]),
-        }] : []),
-      ],
+      sections,
     });
+    return { html, text: _summaryText('MONTHLY SALES REPORT', name, `Month: ${monthName}`, summary) };
+  }
 
-    const text = [
-      `MONTHLY SALES REPORT — ${name}`,
-      `Month: ${monthName}`,
-      `Period: ${from} to ${to}`,
-      '',
-      `Transactions: ${s.txn_count}`,
-      `Gross Sales:  ${Tax.fmt(s.gross_sales)}`,
-      `GST:          ${Tax.fmt(s.total_gst)}`,
-      `PST:          ${Tax.fmt(s.total_pst)}`,
-      `Voided:       ${s.voided_count} / ${Tax.fmt(s.voided_amount)}`,
-    ].join('\n');
+  /* ── Nightly DB backup ─────────────────────────────────────── */
 
-    return { html, text };
+  // Uint8Array → base64 (chunked; btoa(String.fromCharCode(...big)) overflows the stack)
+  function _bytesToB64(bytes) {
+    let bin = '';
+    const CHUNK = 0x8000;
+    for (let i = 0; i < bytes.length; i += CHUNK) {
+      bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+    }
+    return btoa(bin);
+  }
+
+  /* Write a plaintext .sqlite snapshot to the configured folder.
+     Same format as the manual Settings → Export, so Import/Restore works on it.
+     Returns { ok, path } or { ok:false, error }. */
+  async function runBackupNow(folderOverride) {
+    const folder = folderOverride || (await Config.get('auto_backup_folder')) || '';
+    if (!folder) return { ok: false, error: 'No backup folder configured.' };
+    if (!window.electronAPI?.savePdfFile) return { ok: false, error: 'Backup needs the desktop app.' };
+    const bytes = DB.exportDb();
+    if (!bytes) return { ok: false, error: 'Database not ready.' };
+    const stamp    = localDateStr(new Date());           // YYYY-MM-DD
+    const filename = `pharmacy_pos_backup_${stamp}.sqlite`;
+    const res = await window.electronAPI.savePdfFile({
+      base64:     _bytesToB64(bytes),
+      filename,
+      folderPath: folder,
+    });
+    return res;
   }
 
   /* ── Main check (runs every 60 s) ──────────────────────────── */
@@ -127,6 +204,30 @@ const Scheduler = (() => {
     const now  = new Date();
     const hhmm = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
     const today = localDateStr(now);
+
+    /* ── Nightly DB backup ── */
+    try {
+      if ((await Config.get('auto_backup_enabled')) === 'true') {
+        const backupTime = (await Config.get('auto_backup_time')) || '23:30';
+        const lastDone   = (await Config.get('auto_last_backup')) || '';
+        if (hhmm === backupTime && lastDone !== today) {
+          const folder = (await Config.get('auto_backup_folder')) || '';
+          if (folder) {
+            const res = await runBackupNow(folder);
+            if (res && res.ok) {
+              await Config.set('auto_last_backup', today);
+              console.log(`✓ Scheduler: DB backup saved — ${res.path}`);
+            } else {
+              console.error('Scheduler: backup failed:', res && res.error);
+            }
+          } else {
+            console.warn('Scheduler: backup enabled but no folder configured.');
+          }
+        }
+      }
+    } catch (e) {
+      console.error('Scheduler: backup error:', e.message);
+    }
 
     /* ── Daily report ── */
     try {
@@ -230,5 +331,5 @@ const Scheduler = (() => {
     });
   }
 
-  return { start, stop, sendDailyNow, sendMonthlyNow };
+  return { start, stop, sendDailyNow, sendMonthlyNow, runBackupNow };
 })();

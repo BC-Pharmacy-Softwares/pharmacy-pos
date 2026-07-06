@@ -228,19 +228,27 @@ class PatientScreen {
           </div>
         </div>
 
-        <!-- AR Summary -->
+        <!-- AR Summary (WinRx billed − POS/manual paid) -->
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;gap:10px;flex-wrap:wrap;">
+          <div style="display:flex;align-items:center;gap:10px;">
+            <div style="font-size:12px;color:var(--text-muted);" id="ar-source">Accounts Receivable</div>
+            <span id="ar-acct" style="font-size:12px;font-weight:600;color:var(--primary);">${patient.ar_account_no ? 'Acct ' + patient.ar_account_no : ''}</span>
+            <button class="btn btn-outline btn-sm" id="btn-ar-assign" style="${patient.ar_account_no ? 'display:none;' : ''}">Assign AR #</button>
+          </div>
+          <button class="btn btn-outline btn-sm" id="btn-ar-entry">&#43; Record Payment / Adjustment</button>
+        </div>
         <div class="ar-summary">
           <div class="ar-box">
             <div class="ar-box-label">Total Billed</div>
-            <div class="ar-box-value">${Tax.fmt(ar.billed)}</div>
+            <div class="ar-box-value" id="ar-billed">${Tax.fmt(ar.billed)}</div>
           </div>
           <div class="ar-box paid">
             <div class="ar-box-label">Total Paid</div>
-            <div class="ar-box-value">${Tax.fmt(ar.paid)}</div>
+            <div class="ar-box-value" id="ar-paid">${Tax.fmt(ar.paid)}</div>
           </div>
           <div class="ar-box owing">
             <div class="ar-box-label">Balance Owing</div>
-            <div class="ar-box-value">${Tax.fmt(ar.outstanding)}</div>
+            <div class="ar-box-value" id="ar-owing">${Tax.fmt(ar.outstanding)}</div>
           </div>
         </div>
 
@@ -285,6 +293,32 @@ class PatientScreen {
       content.querySelector('#btn-link-pos')?.addEventListener('click', () => {
         this._onNavigate('pos', { linkPatient: patient });
       });
+      content.querySelector('#btn-ar-entry')?.addEventListener('click', () => {
+        this._showArEntryModal(patient);
+      });
+      content.querySelector('#btn-ar-assign')?.addEventListener('click', () => {
+        const suggested = DB.getNextArAccountNo();
+        if (confirm(`Assign account number ${suggested} to ${patient.given_name} ${patient.surname}?`)) {
+          DB.setPatientArAccount(patient.patient_id, suggested);
+          patient.ar_account_no = suggested;
+          Audit.configChange(`AR account ${suggested} assigned to ${patient.given_name} ${patient.surname}`);
+          const chip = content.querySelector('#ar-acct'); if (chip) chip.textContent = 'Acct ' + suggested;
+          const btn  = content.querySelector('#btn-ar-assign'); if (btn) btn.style.display = 'none';
+        }
+      });
+
+      // Reconcile AR against WinRx (billed) − POS/manual (paid). Async; falls back to POS-only summary.
+      (async () => {
+        try {
+          const cutoff = (await Config.get('ar_cutoff_date')) || '';
+          const rec = await AR.getPatientAR({ patient_id: patient.patient_id, phn: patient.phn }, { cutoff });
+          if (rec.error) { const s = content.querySelector('#ar-source'); if (s) s.textContent = 'Accounts Receivable (POS only — ' + rec.error + ')'; return; }
+          const set = (id, val) => { const el = content.querySelector(id); if (el) el.textContent = Tax.fmt(val); };
+          set('#ar-billed', rec.billed); set('#ar-paid', rec.paid); set('#ar-owing', rec.owing);
+          const s = content.querySelector('#ar-source');
+          if (s) s.textContent = `Accounts Receivable — WinRx billed − paid${rec.credit>0?` · credit ${Tax.fmt(rec.credit)}`:''}`;
+        } catch(_) {}
+      })();
 
       // Expandable transaction rows — click to show purchased items inline
       content.querySelector('#txn-table')?.querySelectorAll('tr.txn-summary-row').forEach(row => {
@@ -366,6 +400,127 @@ class PatientScreen {
     } catch(e) {
       content.innerHTML = `<div class="alert alert-danger">Error loading profile: ${e.message}</div>`;
     }
+  }
+
+  /* Record a payment / adjustment against a patient's AR account.
+     Bad-debt write-offs are Admin-only. Allocation is oldest-first (handled by AR engine). */
+  _showArEntryModal(patient) {
+    const isAdmin = Auth.isAdmin && Auth.isAdmin();
+    const modal = document.createElement('div');
+    modal.className = 'modal-overlay';
+    modal.innerHTML = `
+      <div class="modal" style="max-width:420px;">
+        <div class="modal-header"><h3>Record Payment / Adjustment</h3><button class="modal-close">&times;</button></div>
+        <div class="modal-body">
+          <div style="font-size:13px;color:var(--text-muted);margin-bottom:10px;">${patient.given_name} ${patient.surname} · PHN ${patient.phn}</div>
+          <div class="form-group">
+            <label>Type</label>
+            <select id="ae-type">
+              <option value="payment">Payment received</option>
+              <option value="credit">Credit (goodwill)</option>
+              <option value="correction">Correction (billing error)</option>
+              <option value="write_off">Bad-debt write-off${isAdmin?'':' (Admin only)'}</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Amount ($)</label>
+            <input type="number" step="0.01" id="ae-amount" placeholder="0.00" />
+          </div>
+          <div class="form-group">
+            <label>Apply to</label>
+            <select id="ae-apply"><option value="">Oldest unpaid first (auto)</option></select>
+            <div style="font-size:11px;color:var(--text-muted);margin-top:3px;">Or target a specific Rx# — outstanding fills load here.</div>
+          </div>
+          <div class="form-group" id="ae-method-wrap">
+            <label>Method</label>
+            <select id="ae-method">
+              <option value="online">Online</option>
+              <option value="payment_link">Payment link</option>
+              <option value="etransfer">E-transfer</option>
+              <option value="cheque">Cheque</option>
+              <option value="cash">Cash</option>
+              <option value="other">Other</option>
+            </select>
+          </div>
+          <div class="form-group" id="ae-ref-wrap">
+            <label>Reference <span style="font-weight:400;color:var(--text-muted);">(confirmation # — recommended)</span></label>
+            <input type="text" id="ae-ref" placeholder="e.g. e-transfer ref / link ID" />
+          </div>
+          <div class="form-group" id="ae-reason-wrap" style="display:none;">
+            <label>Bad-debt reason <span style="color:var(--danger);">*</span></label>
+            <input type="text" id="ae-reason" placeholder="e.g. uncollectible, deceased estate" />
+          </div>
+          <div class="form-group">
+            <label>Date</label>
+            <input type="date" id="ae-date" value="${_dateStr()}" />
+          </div>
+          <div class="form-group">
+            <label>Note</label>
+            <input type="text" id="ae-note" placeholder="Optional" />
+          </div>
+          <div id="ae-err" class="login-error"></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-outline" id="ae-cancel">Cancel</button>
+          <button class="btn btn-primary" id="ae-save">Save</button>
+        </div>
+      </div>`;
+    document.body.appendChild(modal);
+    const close = () => modal.remove();
+    const $ = s => modal.querySelector(s);
+    modal.querySelector('.modal-close').addEventListener('click', close);
+    $('#ae-cancel').addEventListener('click', close);
+
+    const typeEl = $('#ae-type');
+    const onType = () => {
+      const wo = typeEl.value === 'write_off';
+      $('#ae-reason-wrap').style.display = wo ? 'block' : 'none';
+      $('#ae-method-wrap').style.display = (typeEl.value === 'payment') ? 'block' : 'none';
+    };
+    typeEl.addEventListener('change', onType); onType();
+
+    // Populate the "Apply to" picker with this patient's outstanding fills (Rx#)
+    (async () => {
+      try {
+        const cutoff = (await Config.get('ar_cutoff_date')) || '';
+        const ar = await AR.getPatientAR({ patient_id: patient.patient_id, phn: patient.phn }, { cutoff });
+        if (ar && Array.isArray(ar.outstanding) && ar.outstanding.length) {
+          const sel = $('#ae-apply');
+          ar.outstanding.forEach(f => {
+            const o = document.createElement('option');
+            o.value = f.rxNumber;
+            o.textContent = `Rx #${f.rxNumber} — owing ${Tax.fmt(f.owing)}${f.fillDate ? ' (' + new Date(f.fillDate).toLocaleDateString('en-CA') + ')' : ''}`;
+            sel.appendChild(o);
+          });
+        }
+      } catch (_) {}
+    })();
+
+    $('#ae-save').addEventListener('click', () => {
+      const err = $('#ae-err');
+      const type = typeEl.value;
+      const amount = parseFloat($('#ae-amount').value);
+      const ref = $('#ae-ref').value.trim();
+      if (type === 'write_off' && !isAdmin) { err.textContent = 'Bad-debt write-offs require an Admin login.'; return; }
+      if (!(amount > 0)) { err.textContent = 'Enter an amount greater than zero.'; return; }
+      if (type === 'write_off' && !$('#ae-reason').value.trim()) { err.textContent = 'A reason is required for a write-off.'; return; }
+      if (ref && DB.getArEntryByReference(ref) && !confirm('An entry with this reference already exists. Record anyway?')) return;
+
+      DB.addArEntry({
+        patient_id: patient.patient_id,
+        entry_date: $('#ae-date').value || _dateStr(),
+        amount, entry_type: type,
+        method: type === 'payment' ? $('#ae-method').value : null,
+        rx_number: $('#ae-apply').value || null,
+        reference: ref || null,
+        reason: type === 'write_off' ? $('#ae-reason').value.trim() : null,
+        note: $('#ae-note').value.trim() || null,
+        staff_name: Auth.current()?.name || null,
+      });
+      Audit.configChange(`AR ${type} ${Tax.fmt(amount)} — ${patient.given_name} ${patient.surname}${ref?` (ref ${ref})`:''}`);
+      close();
+      this._renderProfile(patient);
+    });
   }
 
   _showProfileModal(existing) {

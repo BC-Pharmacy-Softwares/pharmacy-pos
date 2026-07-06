@@ -12,6 +12,7 @@ class POSScreen {
     this._scanning        = false;
     this._keyHandler      = null;
     this._pendingRxLoaded = false;
+    this._pendingBtcLog   = null;
   }
 
   render() {
@@ -65,6 +66,11 @@ class POSScreen {
             <div class="cart-totals-row"><span id="cart-gst-label">GST</span><span id="cart-gst">$0.00</span></div>
             <div class="cart-totals-row"><span id="cart-pst-label">PST</span><span id="cart-pst">$0.00</span></div>
             <div class="cart-totals-row total"><span>TOTAL</span><span id="cart-total">$0.00</span></div>
+            <div style="padding:0 0 6px;display:flex;gap:6px;flex-wrap:wrap;">
+              <button class="btn btn-outline btn-sm" id="btn-discount" style="flex:1;font-size:12px;">% Discount</button>
+              <button class="btn btn-outline btn-sm" id="btn-hold" style="flex:1;font-size:12px;">⏸ Hold</button>
+              <button class="btn btn-outline btn-sm" id="btn-quote" style="flex:1;font-size:12px;">📄 Quote</button>
+            </div>
             <div class="cart-charge-btn">
               <button class="btn btn-success btn-xl btn-block" id="btn-charge">Charge Patient</button>
             </div>
@@ -97,6 +103,17 @@ class POSScreen {
             <span class="shortcut-key">F1</span> New transaction &nbsp;
             <span class="shortcut-key">F2</span> Search patient &nbsp;
             <span class="shortcut-key">ESC</span> Remove last item
+          </div>
+
+          <!-- Always-available tools (use the empty space under Quick Actions) -->
+          <div style="margin-top:18px;border-top:1px solid var(--border);padding-top:14px;
+                      display:flex;flex-direction:column;gap:8px;">
+            <button class="btn btn-outline" id="tile-find-receipt" style="padding:12px;font-size:13px;">
+              &#128203; Find Paid Receipt (Txn #)
+            </button>
+            <button class="btn btn-outline" id="tile-resume-held" style="padding:12px;font-size:13px;">
+              &#9208; Held Carts <span id="tile-held-count" style="background:var(--danger);color:#fff;border-radius:8px;padding:0 6px;font-size:11px;display:none;"></span>
+            </button>
           </div>
         </div>
       </div>`;
@@ -158,14 +175,30 @@ class POSScreen {
         'width=800,height=500,menubar=no,toolbar=no,location=no,status=no');
     });
     this._el.querySelector('#btn-settings').addEventListener('click', () => this._onNavigate('settings'));
-    this._el.querySelector('#btn-lock').addEventListener('click', () => { Auth.logout(); this._onNavigate('login'); });
+    this._el.querySelector('#btn-lock').addEventListener('click', () => {
+      this._holdCart();
+      Auth.logout();
+      this._onNavigate('login');
+    });
     this._el.querySelector('#btn-charge').addEventListener('click', () => this._showPaymentModal());
+    this._el.querySelector('#btn-discount')?.addEventListener('click', () => this._showDiscountModal());
+    this._el.querySelector('#btn-hold')?.addEventListener('click', () => this._holdCartWithReason());
+    this._el.querySelector('#btn-quote')?.addEventListener('click', () => this._printQuote());
+    this._el.querySelector('#tile-resume-held')?.addEventListener('click', () => this._showHeldCartsModal());
+    this._el.querySelector('#tile-find-receipt')?.addEventListener('click', () => this._showFindReceiptModal());
+    this._refreshHeldCount();
     this._el.querySelector('#btn-clear-cart').addEventListener('click', () => this._confirmClearCart());
     this._el.querySelector('#btn-manual-otc').addEventListener('click', () => this._showManualOTCModal());
     this._el.querySelector('#btn-manual-rx').addEventListener('click', () => this._showManualRxModal());
     this._el.querySelector('#btn-custom-products').addEventListener('click', () => this._showCustomProductsModal());
 
     this._loadAndRenderQuickActions();
+
+    // Register auto-lock hold-cart hook
+    window._posHoldCart = () => this._holdCart();
+
+    // Offer to resume a cart held before last lock/logout
+    setTimeout(() => this._offerResumeCart(), 600);
 
     setTimeout(() => scanInput.focus(), 100);
   }
@@ -279,10 +312,12 @@ class POSScreen {
         ? rxData.unit_price
         : fallbackPrice;
 
-      // Build description — append fill qty if API returned it (e.g. "Metformin 500mg [Qty:90]")
-      const desc = rxData.fill_qty
+      // Real drug name (kept internally for BTC log + WinRx docs, never shown to patient)
+      const drugName = rxData.fill_qty
         ? `${rxData.description} [Qty:${rxData.fill_qty}]`
         : rxData.description;
+      // Patient-facing privacy label — no medication name
+      const desc = `Rx ${rxNum}${rxData.fill_qty ? ` [Qty:${rxData.fill_qty}]` : ''}`;
 
       this._cart.push({
         item_type:      'RX',
@@ -290,6 +325,7 @@ class POSScreen {
         branch_code:    branchCode,
         din:            rxData.din,
         description:    desc,
+        drug_name:      drugName,        // internal only — BTC log + WinRx pickup doc
         quantity:       1,              // always 1 billing unit; copay is for the whole fill
         unit_price:     unitPrice,
         gst_applicable: false,
@@ -350,18 +386,36 @@ class POSScreen {
     const price = product.price_override != null
       ? product.price_override
       : (product.suggested_retail || product.regular_unit_price || product.price || 0);
+    // Determine source and ID so stock can be deducted on save
+    const isCustom = product.custom_product_id != null;
     this._cart.push({
-      item_type:      'OTC',
-      din:            product.din || null,
-      upc:            barcode,
-      description:    product.description,
-      quantity:       1,
-      unit_price:     price,
-      gst_applicable: !!product.gst_applicable,
-      pst_applicable: !!product.pst_applicable,
-      line_total:     price,
+      item_type:       'OTC',
+      din:             product.din || null,
+      upc:             barcode,
+      description:     product.description,
+      quantity:        1,
+      unit_price:      price,
+      gst_applicable:  !!product.gst_applicable,
+      pst_applicable:  !!product.pst_applicable,
+      line_total:      price,
+      _product_id:     isCustom ? product.custom_product_id : product.product_id,
+      _product_source: isCustom ? 'custom' : 'catalog',
+      // schedule_flag from DB, or fall back to checking narcotic_indicator (McKesson catalog)
+      // or notes containing "CTRL" (legacy workaround before Phase 3)
+      _schedule_flag:  product.schedule_flag ||
+                       (product.narcotic_indicator && product.narcotic_indicator !== 'N' ? 'narcotic' : null) ||
+                       (/CTRL/i.test(product.notes||'') || /\bBTC\b/i.test(product.location||'') ? 'btc' : null),
     });
-    this._setStatus('success', `Added: ${product.description} — ${Tax.fmt(price)}`);
+
+    // Debug: log what flag was detected
+    const flag = this._cart[this._cart.length-1]?._schedule_flag;
+    console.log('[BTC] product:', product.description,
+      '| schedule_flag:', product.schedule_flag,
+      '| notes:', product.notes,
+      '| location:', product.location,
+      '| detected flag:', flag);
+
+    this._setStatus('success', `Added: ${product.description} — ${Tax.fmt(price)}${flag ? ` [${flag.toUpperCase()}]` : ''}`);
     this._updateDisplay();
   }
 
@@ -370,6 +424,71 @@ class POSScreen {
     const removed = this._cart.pop();
     this._setStatus('', `Removed: ${removed.description}`);
     this._updateDisplay();
+  }
+
+  /* Save current cart to localStorage so it survives a lock/logout */
+  _holdCart() {
+    if (this._cart.length === 0) return;
+    try {
+      localStorage.setItem('pos_held_cart', JSON.stringify({
+        cart:      this._cart,
+        patient:   this._patient,
+        savedAt:   new Date().toISOString(),
+      }));
+    } catch(e) { console.warn('Cart hold failed:', e.message); }
+  }
+
+  /* Offer to resume a previously held cart */
+  _offerResumeCart() {
+    try {
+      const raw = localStorage.getItem('pos_held_cart');
+      if (!raw) return;
+      const held = JSON.parse(raw);
+      if (!held?.cart?.length) return;
+
+      const total   = Tax.calcCartTotals(held.cart).total_amount;
+      const patient = held.patient;
+      const name    = patient ? `${patient.given_name} ${patient.surname}` : 'No patient';
+      const age     = held.savedAt
+        ? Math.round((Date.now() - new Date(held.savedAt)) / 60000) + ' min ago'
+        : '';
+
+      const banner = document.createElement('div');
+      banner.style.cssText = `
+        position:fixed;bottom:16px;right:16px;z-index:9000;
+        background:var(--surface);border:1px solid var(--border);
+        border-radius:var(--radius);box-shadow:0 4px 20px rgba(0,0,0,.25);
+        padding:14px 18px;max-width:320px;`;
+      banner.innerHTML = `
+        <div style="font-weight:700;font-size:14px;margin-bottom:4px;">🛒 Resume held cart?</div>
+        <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px;">
+          ${held.cart.length} item${held.cart.length>1?'s':''} &nbsp;·&nbsp;
+          ${Tax.fmt(total)} &nbsp;·&nbsp; ${name}
+          ${age ? `<br><span style="opacity:.6;">${age}</span>` : ''}
+        </div>
+        <div style="display:flex;gap:8px;">
+          <button id="resume-yes" class="btn btn-primary btn-sm" style="flex:1;">Resume</button>
+          <button id="resume-no"  class="btn btn-outline btn-sm" style="flex:1;">Discard</button>
+        </div>`;
+      document.body.appendChild(banner);
+
+      banner.querySelector('#resume-yes').addEventListener('click', () => {
+        this._cart    = held.cart;
+        this._patient = held.patient;
+        this._pendingRxLoaded = false;
+        this._updateDisplay();
+        this._updatePatientBar();
+        this._setStatus('success', 'Cart resumed');
+        localStorage.removeItem('pos_held_cart');
+        banner.remove();
+      });
+      banner.querySelector('#resume-no').addEventListener('click', () => {
+        localStorage.removeItem('pos_held_cart');
+        banner.remove();
+      });
+      // Auto-dismiss after 30 seconds if no action
+      setTimeout(() => banner.remove(), 30000);
+    } catch(e) { /* ignore */ }
   }
 
   newTransaction() {
@@ -414,6 +533,11 @@ class POSScreen {
       const row = document.createElement('div');
       row.className = 'cart-item';
       const isDiscount = item.item_type === 'DISCOUNT';
+      const scheduleBadge = item._schedule_flag === 'btc'
+        ? `<span class="badge" style="background:#fff3cd;color:#856404;border:1px solid #ffc107;margin-left:4px;">BTC</span>`
+        : item._schedule_flag === 'btc_ctrl'
+        ? `<span class="badge" style="background:#ffe5cc;color:#a04000;border:1px solid #ffa04a;margin-left:4px;">CTRL BTC</span>`
+        : '';
       const badge = isDiscount
         ? `<span class="badge" style="background:rgba(220,53,69,.12);color:var(--danger);">Disc</span>`
         : item.item_type === 'RX'
@@ -422,12 +546,21 @@ class POSScreen {
         ? `<span class="badge badge-otc">OTC</span>`
         : `<span class="badge badge-custom">Custom</span>`;
       if (isDiscount) row.style.cssText = 'background:rgba(220,53,69,.04);border-left:3px solid var(--danger);';
+      // Quantity stepper for OTC/Custom items (not Rx — billed as 1 fill — or discounts)
+      const qtyEditable = item.item_type === 'OTC' || item.item_type === 'CUSTOM';
+      const qtyControl = qtyEditable
+        ? `<span class="cart-qty" style="display:inline-flex;align-items:center;gap:4px;margin-top:3px;">
+             <button class="qty-dec" data-idx="${idx}" style="width:20px;height:20px;border:1px solid var(--border);border-radius:4px;background:var(--surface2);cursor:pointer;line-height:1;">−</button>
+             <span style="min-width:22px;text-align:center;font-weight:600;">${item.quantity || 1}</span>
+             <button class="qty-inc" data-idx="${idx}" style="width:20px;height:20px;border:1px solid var(--border);border-radius:4px;background:var(--surface2);cursor:pointer;line-height:1;">+</button>
+           </span>`
+        : (item.quantity > 1 ? `Qty: ${item.quantity}` : '');
       row.innerHTML = `
         <div class="cart-item-info">
-          ${badge} <span class="cart-item-name" style="${isDiscount?'color:var(--danger);':''}">${item.description}</span>
-          <div class="cart-item-detail">
+          ${badge}${scheduleBadge} <span class="cart-item-name" style="${isDiscount?'color:var(--danger);':''}">${item.description}</span>
+          <div class="cart-item-detail" style="display:flex;align-items:center;gap:8px;">
             ${item.rx_number ? `Rx# ${item.rx_number}-${item.branch_code}` : ''}
-            ${item.quantity > 1 ? `Qty: ${item.quantity}` : ''}
+            ${qtyControl}
             ${!item.gst_applicable && !item.pst_applicable ? '' : `${item.gst_applicable?'GST ':' '}${item.pst_applicable?'PST':''}`}
           </div>
         </div>
@@ -447,6 +580,10 @@ class POSScreen {
           this._editItemPrice(idx);
         });
       }
+      const decBtn = row.querySelector('.qty-dec');
+      const incBtn = row.querySelector('.qty-inc');
+      if (decBtn) decBtn.addEventListener('click', e => { e.stopPropagation(); this._changeItemQty(idx, -1); });
+      if (incBtn) incBtn.addEventListener('click', e => { e.stopPropagation(); this._changeItemQty(idx, +1); });
       cartItems.appendChild(row);
     });
 
@@ -457,6 +594,26 @@ class POSScreen {
     this._el.querySelector('#cart-pst-label').textContent = `PST (${(Tax.pstRate()*100).toFixed(1).replace(/\.0$/,'')}%)`;
     this._el.querySelector('#cart-pst').textContent       = Tax.fmt(totals.pst_amount);
     this._el.querySelector('#cart-total').textContent     = Tax.fmt(totals.total_amount);
+
+    // ── Allergy warning banner ──────────────────────────────────
+    let allergyBanner = this._el.querySelector('#allergy-warning');
+    if (this._patient?.allergies) {
+      if (!allergyBanner) {
+        allergyBanner = document.createElement('div');
+        allergyBanner.id = 'allergy-warning';
+        allergyBanner.style.cssText = `
+          background:#fff3cd;color:#856404;border:1px solid #ffc107;
+          border-radius:var(--radius);padding:8px 12px;margin-bottom:10px;
+          font-size:13px;font-weight:600;display:flex;align-items:flex-start;gap:8px;`;
+        // Insert before the charge button row
+        const chargeBtn = this._el.querySelector('.cart-charge-btn');
+        chargeBtn?.parentNode.insertBefore(allergyBanner, chargeBtn);
+      }
+      allergyBanner.innerHTML = `<span style="font-size:16px;">⚠️</span>
+        <span><strong>ALLERGY ALERT:</strong> ${this._patient.allergies}</span>`;
+    } else if (allergyBanner) {
+      allergyBanner.remove();
+    }
 
     // Broadcast cart state to customer display window
     try {
@@ -530,13 +687,22 @@ class POSScreen {
                   cursor:pointer;color:var(--text-muted);padding:0 4px;line-height:1;">&times;</button>
         </div>
 
+        <!-- Date filter -->
+        <div style="padding:10px 20px 0;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+          <span style="font-size:11px;color:var(--text-muted);margin-right:2px;">Show filled:</span>
+          <button class="pp-filter" data-range="today" style="font-size:12px;padding:4px 12px;border:1px solid var(--border);border-radius:14px;background:var(--primary);color:#fff;cursor:pointer;">Today</button>
+          <button class="pp-filter" data-range="week"  style="font-size:12px;padding:4px 12px;border:1px solid var(--border);border-radius:14px;background:var(--surface2);cursor:pointer;">This Week</button>
+          <button class="pp-filter" data-range="all"   style="font-size:12px;padding:4px 12px;border:1px solid var(--border);border-radius:14px;background:var(--surface2);cursor:pointer;">All</button>
+          <input type="date" id="pp-filter-date" style="font-size:12px;padding:3px 6px;margin-left:4px;" title="Pick a specific fill date" />
+        </div>
+
         <!-- Rx list -->
         <div style="flex:1;overflow-y:auto;padding:0;">
           <div style="padding:12px 20px 6px;display:flex;align-items:center;justify-content:space-between;">
             <span style="font-size:12px;font-weight:700;text-transform:uppercase;
-                         letter-spacing:.04em;color:var(--text-muted);">Active Prescriptions</span>
+                         letter-spacing:.04em;color:var(--text-muted);">Prescriptions</span>
             <label style="font-size:12px;color:var(--text-muted);cursor:pointer;">
-              <input type="checkbox" id="pp-select-all" style="margin-right:4px;">Select all
+              <input type="checkbox" id="pp-select-all" style="margin-right:4px;">Select all shown
             </label>
           </div>
           <div id="pp-rx-list" style="padding:0 20px 12px;">
@@ -555,7 +721,7 @@ class POSScreen {
             Close
           </button>
           <button id="pp-add" style="padding:8px 22px;border:none;border-radius:var(--radius);
-            background:var(--accent);color:#fff;cursor:pointer;font-size:13px;font-weight:600;">
+            background:var(--primary);color:#fff;cursor:pointer;font-size:13px;font-weight:600;">
             Add Selected to Cart
           </button>
         </div>
@@ -598,37 +764,104 @@ class POSScreen {
           din:      r.DIN    || r.din    || null,
         })).filter(r => r.rxNumber);
 
-        listEl.innerHTML = pending.map((r, i) => {
-          const already = inCart.has(r.rxNumber);
-          return `
-            <label style="display:flex;align-items:center;gap:10px;padding:10px 0;
-                          cursor:${already ? 'default' : 'pointer'};
-                          border-bottom:1px solid var(--border-faint,#2a2a2a);
-                          opacity:${already ? '.5' : '1'};">
-              <input type="checkbox" class="pp-cb" data-idx="${i}"
-                     ${already ? 'disabled checked' : ''}
-                     style="flex-shrink:0;width:16px;height:16px;">
-              <div style="flex:1;min-width:0;">
-                <div style="font-size:13px;font-weight:600;white-space:nowrap;
-                             overflow:hidden;text-overflow:ellipsis;">${r.drug}</div>
-                <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">
-                  Rx #${r.rxNumber}
-                  ${r.qty      ? ` &nbsp;·&nbsp; Qty: ${r.qty}`          : ''}
-                  ${r.fillDate ? ` &nbsp;·&nbsp; Filled: ${fmtDate(r.fillDate)}` : ''}
-                  ${already    ? ` &nbsp;·&nbsp; <em>already in cart</em>` : ''}
+        // Normalise a fill date to YYYY-MM-DD for comparison
+        const toYmd = d => {
+          if (!d) return '';
+          const s = String(d);
+          if (/^\d{8}$/.test(s)) return `${s.slice(0,4)}-${s.slice(4,6)}-${s.slice(6,8)}`;
+          return s.slice(0, 10);
+        };
+        const todayYmd = (typeof localDateStr === 'function')
+          ? localDateStr(new Date()) : new Date().toISOString().slice(0,10);
+        const weekAgoYmd = new Date(Date.now() - 6*86400000).toISOString().slice(0,10);
+
+        let currentRange = 'today';   // today | week | all | a specific YYYY-MM-DD
+
+        // Running total of selected (non-disabled) prescriptions
+        const updateTotal = () => {
+          const checked = [...overlay.querySelectorAll('.pp-cb:checked:not(:disabled)')];
+          const sum = checked.reduce((s, cb) => s + (pending[parseInt(cb.dataset.idx)]?.copay || 0), 0);
+          statusEl.textContent = checked.length
+            ? `${checked.length} selected · ${Tax.fmt(sum)}`
+            : '';
+        };
+
+        const matchesFilter = r => {
+          const ymd = toYmd(r.fillDate);
+          if (currentRange === 'all')   return true;
+          if (currentRange === 'today') return ymd === todayYmd;
+          if (currentRange === 'week')  return ymd >= weekAgoYmd && ymd <= todayYmd;
+          return ymd === currentRange;  // specific picked date
+        };
+
+        const renderList = () => {
+          const visible = pending.filter(matchesFilter);
+          if (!visible.length) {
+            listEl.innerHTML = `<div style="text-align:center;padding:24px;color:var(--text-muted);font-size:13px;">
+              No prescriptions match this date filter.</div>`;
+            updateTotal();
+            return;
+          }
+          listEl.innerHTML = visible.map(r => {
+            const i = pending.indexOf(r);
+            const already = inCart.has(r.rxNumber);
+            return `
+              <label style="display:flex;align-items:center;gap:10px;padding:10px 0;
+                            cursor:${already ? 'default' : 'pointer'};
+                            border-bottom:1px solid var(--border-faint,#2a2a2a);
+                            opacity:${already ? '.5' : '1'};">
+                <input type="checkbox" class="pp-cb" data-idx="${i}"
+                       ${already ? 'disabled checked' : ''}
+                       style="flex-shrink:0;width:16px;height:16px;">
+                <div style="flex:1;min-width:0;">
+                  <div style="font-size:13px;font-weight:600;white-space:nowrap;
+                               overflow:hidden;text-overflow:ellipsis;">Rx #${r.rxNumber}</div>
+                  <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">
+                    ${r.qty      ? `Qty: ${r.qty}`                         : ''}
+                    ${r.fillDate ? ` &nbsp;·&nbsp; Filled: ${fmtDate(r.fillDate)}` : ''}
+                    ${already    ? ` &nbsp;·&nbsp; <em>already in cart</em>` : ''}
+                  </div>
                 </div>
-              </div>
-              <div style="font-size:15px;font-weight:700;color:var(--accent);white-space:nowrap;">
-                $${r.copay.toFixed(2)}
-              </div>
-            </label>`;
-        }).join('');
+                <div style="font-size:15px;font-weight:700;color:var(--primary);white-space:nowrap;">
+                  $${r.copay.toFixed(2)}
+                </div>
+              </label>`;
+          }).join('');
+          // wire checkbox totals
+          listEl.querySelectorAll('.pp-cb').forEach(cb => cb.addEventListener('change', updateTotal));
+          overlay.querySelector('#pp-select-all').checked = false;
+          updateTotal();
+        };
+
+        // Filter button wiring
+        overlay.querySelectorAll('.pp-filter').forEach(btn => {
+          btn.addEventListener('click', () => {
+            currentRange = btn.dataset.range;
+            overlay.querySelector('#pp-filter-date').value = '';
+            overlay.querySelectorAll('.pp-filter').forEach(b => {
+              b.style.background = 'var(--surface2)'; b.style.color = '';
+            });
+            btn.style.background = 'var(--primary)'; btn.style.color = '#fff';
+            renderList();
+          });
+        });
+        overlay.querySelector('#pp-filter-date').addEventListener('change', e => {
+          if (!e.target.value) return;
+          currentRange = e.target.value;
+          overlay.querySelectorAll('.pp-filter').forEach(b => {
+            b.style.background = 'var(--surface2)'; b.style.color = '';
+          });
+          renderList();
+        });
 
         overlay.querySelector('#pp-select-all').addEventListener('change', e => {
           overlay.querySelectorAll('.pp-cb:not(:disabled)').forEach(cb => {
             cb.checked = e.target.checked;
           });
+          updateTotal();
         });
+
+        renderList();  // initial render (defaults to Today)
       }
     } catch(e) {
       listEl.innerHTML = `<div style="padding:16px;color:var(--danger);">
@@ -644,13 +877,15 @@ class POSScreen {
       checked.forEach(cb => {
         const r = pending[parseInt(cb.dataset.idx)];
         if (!r || this._cart.some(c => String(c.rx_number) === r.rxNumber)) return;
-        const desc = r.qty ? `${r.drug} [Qty:${r.qty}]` : r.drug;
+        const drugName = r.qty ? `${r.drug} [Qty:${r.qty}]` : r.drug;       // internal only
+        const desc = `Rx ${r.rxNumber}${r.qty ? ` [Qty:${r.qty}]` : ''}`;   // patient-facing
         this._cart.push({
           item_type:      'RX',
           rx_number:      r.rxNumber,
           branch_code:    branchCode,
           din:            r.din,
           description:    desc,
+          drug_name:      drugName,
           quantity:       1,
           unit_price:     r.copay,
           gst_applicable: false,
@@ -804,6 +1039,584 @@ class POSScreen {
     el.textContent = msg;
   }
 
+  /* ---- Partial Refund Modal ---- */
+  _showPartialRefundModal(txnId, onDone) {
+    const txn   = DB.getTransaction(txnId);
+    const items = DB.getItemsForTransaction(txnId).filter(i => i.line_total > 0);
+    if (!txn || !items.length) { alert('No returnable items found.'); return; }
+
+    const modal = document.createElement('div');
+    modal.className = 'modal-overlay';
+    modal.innerHTML = `
+      <div class="modal" style="max-width:520px;">
+        <div class="modal-header">
+          <h3>↩ Return Items — Txn #${txnId}</h3>
+          <button class="modal-close">&times;</button>
+        </div>
+        <div class="modal-body">
+          <p style="font-size:13px;color:var(--text-muted);margin-bottom:14px;">
+            Select items to return. A refund transaction will be created and a receipt printed.
+          </p>
+          <div style="border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;margin-bottom:14px;">
+            <label style="display:flex;align-items:center;gap:10px;padding:8px 14px;
+                           background:var(--surface2);border-bottom:1px solid var(--border);
+                           cursor:pointer;font-size:13px;font-weight:600;">
+              <input type="checkbox" id="refund-select-all" />
+              Select all items
+            </label>
+            ${items.map((item, i) => `
+              <label style="display:flex;align-items:center;gap:10px;padding:10px 14px;
+                             cursor:pointer;font-size:13px;
+                             ${i < items.length-1 ? 'border-bottom:1px solid var(--border);' : ''}">
+                <input type="checkbox" class="refund-item-cb" data-idx="${i}" />
+                <span style="flex:1;">${item.description}
+                  ${item.rx_number ? `<span style="font-size:11px;color:var(--text-muted);"> — Rx# ${item.rx_number}</span>` : ''}
+                </span>
+                <strong style="color:var(--danger);">-${Tax.fmt(item.line_total)}</strong>
+              </label>`).join('')}
+          </div>
+
+          <div style="display:flex;justify-content:space-between;padding:10px 14px;
+                      background:var(--surface2);border-radius:var(--radius);font-size:14px;">
+            <span>Refund Total:</span>
+            <strong id="refund-total" style="color:var(--danger);">$0.00</strong>
+          </div>
+
+          <div class="form-group" style="margin-top:14px;">
+            <label>Reason for Return</label>
+            <select id="refund-reason">
+              <option value="Customer Return">Customer Return</option>
+              <option value="Wrong Item">Wrong Item Dispensed</option>
+              <option value="Damaged">Damaged / Defective</option>
+              <option value="Overpayment">Overpayment Correction</option>
+              <option value="Other">Other</option>
+            </select>
+          </div>
+
+          <div id="refund-err" class="alert alert-danger" style="display:none;margin-top:8px;"></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-outline" id="refund-cancel">Cancel</button>
+          <button class="btn btn-danger" id="refund-confirm" disabled>Process Refund</button>
+        </div>
+      </div>`;
+
+    document.body.appendChild(modal);
+    const close  = () => modal.remove();
+    const errEl  = modal.querySelector('#refund-err');
+    const totalEl= modal.querySelector('#refund-total');
+    const confirmBtn = modal.querySelector('#refund-confirm');
+
+    modal.querySelector('.modal-close').addEventListener('click', close);
+    modal.querySelector('#refund-cancel').addEventListener('click', close);
+
+    const updateTotal = () => {
+      const checked = [...modal.querySelectorAll('.refund-item-cb:checked')];
+      const total   = checked.reduce((s, cb) => s + (items[parseInt(cb.dataset.idx)]?.line_total || 0), 0);
+      totalEl.textContent     = `-${Tax.fmt(total)}`;
+      confirmBtn.disabled     = checked.length === 0;
+    };
+
+    modal.querySelector('#refund-select-all').addEventListener('change', e => {
+      modal.querySelectorAll('.refund-item-cb').forEach(cb => { cb.checked = e.target.checked; });
+      updateTotal();
+    });
+    modal.querySelectorAll('.refund-item-cb').forEach(cb => cb.addEventListener('change', updateTotal));
+
+    modal.querySelector('#refund-confirm').addEventListener('click', async () => {
+      const checked     = [...modal.querySelectorAll('.refund-item-cb:checked')];
+      const reason      = modal.querySelector('#refund-reason').value;
+      const returnItems = checked.map(cb => items[parseInt(cb.dataset.idx)]);
+
+      if (!returnItems.length) {
+        errEl.style.display = 'block'; errEl.textContent = 'Select at least one item.'; return;
+      }
+
+      confirmBtn.disabled    = true;
+      confirmBtn.textContent = 'Processing…';
+      errEl.style.display    = 'none';
+
+      // Work out if this transaction had a card (Clover) payment
+      const payments      = DB.getPaymentsForTransaction(txnId);
+      const cardPayment   = payments.find(p =>
+        ['DEBIT','CREDIT','MANUAL_ENTRY'].includes((p.method||'').toUpperCase()) && p.amount > 0
+      );
+      const refundAmtCents = Math.round(
+        returnItems.reduce((s, i) => s + Math.abs(i.line_total || 0), 0) * 100
+      );
+      const hasClover = !!cardPayment?.clover_payment_id;
+
+      try {
+        // ── Step 1: Clover terminal refund (if card was used) ──────────
+        if (cardPayment && refundAmtCents > 0) {
+          confirmBtn.textContent = hasClover
+            ? 'Sending to Clover terminal…'
+            : 'Manual card refund — processing…';
+
+          try {
+            const cloverResult = await CloverAPI.refund(
+              refundAmtCents,
+              cardPayment.clover_payment_id || null
+            );
+            if (!cloverResult.ok) throw new Error(cloverResult.message || 'Clover refund failed');
+            confirmBtn.textContent = '✓ Card refunded — saving record…';
+          } catch (cloverErr) {
+            if (cloverErr.code === 'PAYMENT_CANCELLED') {
+              errEl.style.display   = 'block';
+              errEl.textContent     = 'Refund cancelled on terminal. No record created.';
+              confirmBtn.disabled   = false;
+              confirmBtn.textContent = 'Process Refund';
+              return;
+            }
+            // Non-cancel error — warn but still create the record
+            console.warn('Clover refund error:', cloverErr.message);
+            errEl.style.display = 'block';
+            errEl.textContent   = `⚠ Card terminal error: ${cloverErr.message} — record saved, process card refund manually on Clover.`;
+          }
+        }
+
+        // ── Step 2: Create refund transaction in DB ─────────────────────
+        confirmBtn.textContent = 'Saving refund record…';
+        const refundTxnId = DB.createRefundTransaction(txnId, returnItems, Auth.current()?.name);
+        Audit.refund(txnId, `Partial refund #${refundTxnId} — ${reason} — by ${Auth.current()?.name}`);
+
+        // ── Step 3: Print refund receipt ────────────────────────────────
+        const refundTxn   = DB.getTransaction(refundTxnId);
+        const refundedItems = DB.getItemsForTransaction(refundTxnId);
+        const patient     = txn.patient_id ? DB.getPatient(txn.patient_id) : null;
+        refundTxn.notes   = `↩ Refund for Txn #${txnId} — ${reason}`;
+        Print.printReceipt(refundTxn, refundedItems, [], patient);
+
+        confirmBtn.textContent      = '✓ Refund Complete';
+        confirmBtn.style.background = 'var(--success)';
+        setTimeout(() => { close(); if (onDone) onDone(); }, 1500);
+
+      } catch(e) {
+        errEl.style.display    = 'block';
+        errEl.textContent      = 'Refund failed: ' + e.message;
+        confirmBtn.disabled    = false;
+        confirmBtn.textContent = 'Process Refund';
+      }
+    });
+  }
+
+  /* ---- BTC PDF — auto-save to configured folder ---- */
+  async _saveBtcPdf(txnId) {
+    if (!window.electronAPI?.savePdfFile) {
+      console.warn('[BTC PDF] SKIPPED — window.electronAPI.savePdfFile not available. Rebuild the app with the latest preload.js.');
+      this._setStatus('warn', '⚠ BTC record not saved — app needs rebuild (savePdfFile missing)');
+      return;
+    }
+    const folderPath = await Config.get('btc_records_folder');
+    if (!folderPath) {
+      console.warn('[BTC PDF] SKIPPED — no folder configured. Set it in Settings → BTC Records.');
+      this._setStatus('warn', '⚠ BTC record not saved — no folder set (Settings → BTC Records)');
+      return;
+    }
+    console.log('[BTC PDF] Folder path:', folderPath);
+
+    const txn   = DB.getTransaction(txnId);
+    const logs  = DB.getBtcLogAll().filter(l => l.transaction_id === txnId);
+    if (!logs.length) {
+      console.warn('[BTC PDF] SKIPPED — no BTC log entries found for txn', txnId);
+      return;
+    }
+    console.log('[BTC PDF] Generating PDF for', logs.length, 'BTC item(s)...');
+
+    const ph    = await Config.getAll();
+    const now   = new Date();
+    const stamp = now.toISOString().slice(0,19).replace(/[T:]/g,'-');
+    const drug  = logs[0].drug_name.replace(/[^a-zA-Z0-9]/g,'').slice(0,20);
+    const rph   = (logs[0].pharmacist_name||'').replace(/[^a-zA-Z0-9]/g,'').slice(0,15);
+    const fname = `${stamp}_${drug}_${rph}.pdf`;
+
+    const rows  = logs.map(l => `
+      <tr>
+        <td>${new Date(l.sale_date).toLocaleString()}</td>
+        <td><strong>${l.drug_name}</strong>${l.din?` <small>(DIN: ${l.din})</small>`:''}</td>
+        <td style="text-align:center;">${l.quantity}</td>
+        <td>$${(l.price||0).toFixed(2)}</td>
+        <td>${l.pharmacist_name||''}</td>
+        <td style="text-align:center;">${l.counselled?'✅':'—'}</td>
+        <td>${l.patient_name||'—'}</td>
+        <td>${l.patient_phone||'—'}</td>
+      </tr>`).join('');
+
+    const html = `<!DOCTYPE html><html><head><meta charset="UTF-8">
+      <style>
+        @page{size:Letter landscape;margin:12mm;}
+        body{font-family:Arial,sans-serif;font-size:11pt;padding:0;margin:0;}
+        h2{margin:0 0 4px;}h4{margin:0 0 16px;color:#555;font-weight:400;}
+        table{width:100%;border-collapse:collapse;margin-top:16px;}
+        th{background:#f0f0f0;padding:7px 10px;border:1px solid #ccc;text-align:left;font-size:10pt;}
+        td{padding:7px 10px;border:1px solid #ddd;font-size:10pt;}
+        .footer{margin-top:24px;font-size:9pt;color:#777;border-top:1px solid #ccc;padding-top:8px;}
+      </style></head><body>
+      <h2>${ph.pharmacy_name||'Pharmacy'} — BTC / Controlled Substance Record</h2>
+      <h4>Transaction #${txnId} &nbsp;·&nbsp; ${now.toLocaleDateString('en-CA',{year:'numeric',month:'long',day:'numeric'})}</h4>
+      <table>
+        <thead><tr>
+          <th>Date/Time</th><th>Drug</th><th>Qty</th><th>Price</th>
+          <th>Pharmacist</th><th>Counselled</th><th>Patient Name</th><th>Phone</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <div class="footer">Generated by Pharmacy POS &nbsp;·&nbsp; For internal records only</div>
+    </body></html>`;
+
+    try {
+      // Use A5 PDF for a proper readable record (not the narrow 80mm receipt size)
+      const generateFn = window.electronAPI.generateA5Pdf || window.electronAPI.generateReceiptPdf;
+      if (generateFn) {
+        const b64 = await generateFn(html);
+        if (b64) {
+          const result = await window.electronAPI.savePdfFile({ base64: b64, filename: fname, folderPath });
+          if (result?.ok) {
+            console.log('[BTC PDF] ✓ Saved:', result.path);
+            this._setStatus('success', `✓ BTC record saved: ${result.path}`);
+          } else {
+            console.warn('[BTC PDF] Save FAILED:', result?.error);
+            this._setStatus('error', `⚠ BTC PDF save failed: ${result?.error || 'unknown error'}`);
+          }
+        } else {
+          console.warn('[BTC PDF] PDF generation returned empty');
+          this._setStatus('error', '⚠ BTC PDF generation failed (empty result)');
+        }
+      }
+    } catch(e) { console.warn('BTC PDF save error:', e.message); }
+  }
+
+  /* ---- BTC / Controlled Substance Counselling Modal ---- */
+  _showBtcCounsellingModal(controlledItems, onProceed) {
+    const isCtrl     = controlledItems.some(i => i._schedule_flag === 'btc_ctrl');
+    const isBtc      = controlledItems.some(i => i._schedule_flag === 'btc') && !isCtrl;
+    const nameRequired = isCtrl; // Controlled BTC requires patient name
+    const staff      = Auth.current();
+
+    const modal = document.createElement('div');
+    modal.className = 'modal-overlay';
+    modal.innerHTML = `
+      <div class="modal" style="max-width:460px;">
+        <div class="modal-header" style="background:${isCtrl?'#ffe5cc':'#fff3cd'};border-radius:var(--radius) var(--radius) 0 0;">
+          <h3 style="color:${isCtrl?'#a04000':'#856404'};">
+            ${isCtrl ? '🟠 Controlled BTC — Patient Name Required' : '🟡 Behind the Counter (Schedule II)'}
+          </h3>
+        </div>
+        <div class="modal-body">
+
+          <div style="margin-bottom:14px;">
+            ${controlledItems.map(i => `
+              <div style="display:flex;justify-content:space-between;padding:6px 0;
+                          border-bottom:1px solid var(--border);font-size:13px;">
+                <span><strong>${i.description}</strong></span>
+                <span class="badge" style="background:${i._schedule_flag==='btc_ctrl'?'#ffe5cc':'#fff3cd'};
+                  color:${i._schedule_flag==='btc_ctrl'?'#a04000':'#856404'};">
+                  ${i._schedule_flag==='btc_ctrl'?'CTRL BTC':'BTC'}
+                </span>
+              </div>`).join('')}
+          </div>
+
+          <!-- Counselling checklist -->
+          <div style="background:var(--surface2);border-radius:var(--radius);padding:12px 14px;margin-bottom:14px;">
+            <div style="font-weight:700;font-size:12px;text-transform:uppercase;color:var(--text-muted);margin-bottom:10px;">
+              Pharmacist Counselling
+            </div>
+            <label style="display:flex;gap:10px;align-items:center;margin-bottom:8px;cursor:pointer;font-size:13px;">
+              <input type="checkbox" id="btc-chk-counsel" style="width:16px;height:16px;" />
+              Patient counselled on use, dosage &amp; side effects
+            </label>
+            <label style="display:flex;gap:10px;align-items:center;margin-bottom:8px;cursor:pointer;font-size:13px;">
+              <input type="checkbox" id="btc-chk-allergy" style="width:16px;height:16px;" />
+              Allergies &amp; interactions reviewed
+            </label>
+            <label style="display:flex;gap:10px;align-items:center;cursor:pointer;font-size:13px;">
+              <input type="checkbox" id="btc-chk-id" style="width:16px;height:16px;" />
+              Patient identity confirmed
+            </label>
+          </div>
+
+          <!-- Optional patient name + phone (not mandatory for BTC) -->
+          <div style="background:${nameRequired?'#fff8f2':'var(--surface2)'};
+                      border:${nameRequired?'1px solid #ffa04a':''};
+                      border-radius:var(--radius);padding:12px 14px;margin-bottom:4px;">
+            <div style="font-weight:700;font-size:12px;text-transform:uppercase;
+                        color:${nameRequired?'#a04000':'var(--text-muted)'};margin-bottom:10px;">
+              Patient Info
+              <span style="font-weight:400;font-size:11px;text-transform:none;margin-left:6px;
+                           color:${nameRequired?'#a04000':'var(--text-muted)'};">
+                ${nameRequired ? '⚠ Name required for Controlled BTC' : '(optional for BTC — your records only)'}
+              </span>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+              <div>
+                <label style="font-size:12px;color:var(--text-muted);">
+                  Name ${nameRequired ? '<span style="color:var(--danger);">*</span>' : ''}
+                </label>
+                <input id="btc-pt-name" type="text"
+                  placeholder="${nameRequired ? 'Patient name (required)' : 'Patient name (optional)'}"
+                  value="${this._patient ? this._patient.given_name+' '+this._patient.surname : ''}"
+                  style="margin-top:4px;width:100%;box-sizing:border-box;
+                         ${nameRequired ? 'border-color:#ffa04a;' : ''}" />
+              </div>
+              <div>
+                <label style="font-size:12px;color:var(--text-muted);">Phone</label>
+                <input id="btc-pt-phone" type="tel" placeholder="Phone number (optional)"
+                  value="${this._patient?.phone||this._patient?.cell||''}"
+                  style="margin-top:4px;width:100%;box-sizing:border-box;" />
+              </div>
+            </div>
+          </div>
+
+          <div id="btc-err" class="alert alert-danger" style="display:none;margin-top:10px;"></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-outline" id="btc-cancel">Cancel</button>
+          <button class="btn btn-primary" id="btc-confirm">
+            ✓ Counselled — Proceed to Payment
+          </button>
+        </div>
+      </div>`;
+
+    document.body.appendChild(modal);
+    const close  = () => modal.remove();
+    const errEl  = modal.querySelector('#btc-err');
+
+    modal.querySelector('#btc-cancel').addEventListener('click', close);
+
+    modal.querySelector('#btc-confirm').addEventListener('click', async () => {
+      const chkCounsel = modal.querySelector('#btc-chk-counsel').checked;
+      const chkAllergy = modal.querySelector('#btc-chk-allergy').checked;
+      const chkId      = modal.querySelector('#btc-chk-id').checked;
+      const ptName     = modal.querySelector('#btc-pt-name').value.trim();
+      const ptPhone    = modal.querySelector('#btc-pt-phone').value.trim();
+
+      if (!chkCounsel) {
+        errEl.style.display = 'block';
+        errEl.textContent   = 'Please confirm the patient has been counselled before proceeding.';
+        return;
+      }
+
+      // Controlled BTC requires patient name
+      if (nameRequired && !ptName) {
+        errEl.style.display = 'block';
+        errEl.textContent   = 'Patient name is required for Controlled BTC items.';
+        modal.querySelector('#btc-pt-name').focus();
+        return;
+      }
+
+      // Log each controlled item to btc_log (transaction_id filled in after save)
+      const pharmacist = staff?.name || '';
+      modal._btcLogEntries = controlledItems.map(item => ({
+        drug_name:      item.drug_name || item.description,   // real name for the legal log
+        din:            item.din || null,
+        quantity:       item.quantity || 1,
+        price:          item.line_total,
+        pharmacist_name: pharmacist,
+        counselled:     chkCounsel,
+        patient_name:   ptName || null,
+        patient_phone:  ptPhone || null,
+        schedule_flag:  item._schedule_flag,
+      }));
+
+      // Store on POS instance so saveTransaction can pick them up
+      this._pendingBtcLog = modal._btcLogEntries;
+
+      close();
+      onProceed();
+    });
+
+    setTimeout(() => modal.querySelector('#btc-chk-counsel')?.focus(), 100);
+  }
+
+  /* ---- Discount Modal ---- */
+  _showDiscountModal() {
+    if (this._cart.length === 0) return;
+    const totals = Tax.calcCartTotals(this._cart);
+    const modal  = document.createElement('div');
+    modal.className = 'modal-overlay';
+    modal.innerHTML = `
+      <div class="modal" style="max-width:400px;">
+        <div class="modal-header">
+          <h3>% Apply Discount</h3>
+          <button class="modal-close">&times;</button>
+        </div>
+        <div class="modal-body">
+
+          <!-- Quick preset buttons — tap one to select -->
+          <div class="form-group">
+            <label>Quick Select</label>
+            <div style="display:grid;grid-template-columns:repeat(6,1fr);gap:6px;margin-top:4px;">
+              ${[5,10,15,20,25,50].map(p =>
+                `<button class="btn btn-outline disc-pct-btn"
+                  data-pct="${p}"
+                  style="font-size:14px;font-weight:700;padding:10px 0;">${p}%</button>`
+              ).join('')}
+            </div>
+          </div>
+
+          <!-- Or type custom % -->
+          <div class="form-group">
+            <label>Or enter custom %</label>
+            <input type="number" id="disc-pct" min="0.1" max="100" step="0.1"
+                   placeholder="e.g. 12.5"
+                   style="font-size:20px;text-align:center;max-width:140px;" />
+          </div>
+
+          <!-- Applies to -->
+          <div class="form-group">
+            <label>Applies to</label>
+            <select id="disc-type">
+              <option value="cart">Whole cart (subtotal ${Tax.fmt(totals.subtotal)})</option>
+              <option value="item">Single item</option>
+            </select>
+          </div>
+          <div id="disc-item-row" class="form-group" style="display:none;">
+            <label>Which item?</label>
+            <select id="disc-item-select">
+              ${this._cart.filter(i => i.item_type !== 'DISCOUNT').map((item, i) =>
+                `<option value="${i}">${item.description} — ${Tax.fmt(item.line_total)}</option>`
+              ).join('')}
+            </select>
+          </div>
+
+          <!-- Reason -->
+          <div class="form-group">
+            <label>Reason</label>
+            <select id="disc-reason">
+              <option value="Staff Discount">Staff Discount</option>
+              <option value="Senior Discount">Senior Discount</option>
+              <option value="Loyalty">Loyalty</option>
+              <option value="Promotion">Promotion</option>
+              <option value="Courtesy">Courtesy</option>
+              <option value="Other">Other</option>
+            </select>
+          </div>
+
+          <!-- Live preview -->
+          <div id="disc-preview"
+               style="background:var(--surface2);border-radius:var(--radius);
+                      padding:12px 14px;font-size:14px;display:none;text-align:center;">
+          </div>
+
+          <!-- Error -->
+          <div id="disc-err" class="alert alert-danger" style="display:none;margin-top:8px;"></div>
+
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-outline" id="disc-cancel">Cancel</button>
+          <button class="btn btn-danger btn-lg" id="disc-apply" style="min-width:160px;">
+            Apply Discount
+          </button>
+        </div>
+      </div>`;
+
+    document.body.appendChild(modal);
+
+    const close    = () => modal.remove();
+    const typeEl   = modal.querySelector('#disc-type');
+    const itemRow  = modal.querySelector('#disc-item-row');
+    const pctInput = modal.querySelector('#disc-pct');
+    const preview  = modal.querySelector('#disc-preview');
+    const errEl    = modal.querySelector('#disc-err');
+
+    modal.querySelector('.modal-close').addEventListener('click', close);
+    modal.querySelector('#disc-cancel').addEventListener('click', close);
+
+    /* ── Define updatePreview FIRST, then attach listeners ── */
+    function updatePreview() {
+      const pct = parseFloat(pctInput.value);
+      errEl.style.display = 'none';
+      if (!pct || pct <= 0 || pct > 100) { preview.style.display = 'none'; return; }
+      let baseAmount;
+      if (typeEl.value === 'item') {
+        const idx = parseInt(modal.querySelector('#disc-item-select').value) || 0;
+        baseAmount = Math.abs(totals.subtotal); // fallback
+        const nonDisc = modal._cartItems || [];
+        if (nonDisc[idx]) baseAmount = Math.abs(nonDisc[idx].line_total);
+      } else {
+        baseAmount = totals.subtotal;
+      }
+      const discAmt = Tax.round2(baseAmount * pct / 100);
+      preview.style.display = 'block';
+      preview.innerHTML =
+        `<span style="color:var(--danger);font-size:18px;font-weight:800;">-${Tax.fmt(discAmt)}</span>` +
+        `<span style="color:var(--text-muted);font-size:12px;margin-left:6px;">
+          ${pct}% off ${typeEl.value === 'cart' ? 'cart' : 'item'}
+        </span>`;
+    }
+
+    // Store non-discount cart items for item-mode lookup
+    modal._cartItems = this._cart.filter(i => i.item_type !== 'DISCOUNT');
+
+    // Preset buttons
+    modal.querySelectorAll('.disc-pct-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        modal.querySelectorAll('.disc-pct-btn').forEach(b => b.classList.remove('btn-primary'));
+        btn.classList.add('btn-primary');
+        btn.classList.remove('btn-outline');
+        pctInput.value = btn.dataset.pct;
+        updatePreview();
+      });
+    });
+
+    // Type toggle
+    typeEl.addEventListener('change', () => {
+      itemRow.style.display = typeEl.value === 'item' ? 'block' : 'none';
+      updatePreview();
+    });
+
+    pctInput.addEventListener('input', updatePreview);
+    modal.querySelector('#disc-item-select')?.addEventListener('change', updatePreview);
+
+    // Apply
+    modal.querySelector('#disc-apply').addEventListener('click', () => {
+      const pct    = parseFloat(pctInput.value);
+      const reason = modal.querySelector('#disc-reason').value;
+
+      if (!pct || pct <= 0 || pct > 100) {
+        errEl.style.display = 'block';
+        errEl.textContent   = 'Please select a quick % above or type a percentage first.';
+        pctInput.focus();
+        return;
+      }
+
+      let discAmt, description;
+      if (typeEl.value === 'item') {
+        const nonDisc = modal._cartItems;
+        const idx     = parseInt(modal.querySelector('#disc-item-select').value) || 0;
+        const item    = nonDisc[idx];
+        if (!item) { errEl.style.display = 'block'; errEl.textContent = 'Item not found.'; return; }
+        discAmt     = Tax.round2(Math.abs(item.line_total) * pct / 100);
+        description = `${reason} — ${pct}% off ${item.description}`;
+      } else {
+        discAmt     = Tax.round2(totals.subtotal * pct / 100);
+        description = `${reason} — ${pct}% cart discount`;
+      }
+
+      if (discAmt <= 0) {
+        errEl.style.display = 'block';
+        errEl.textContent   = 'Discount amount is $0.00 — nothing to apply.';
+        return;
+      }
+
+      this._cart.push({
+        item_type:      'DISCOUNT',
+        description,
+        quantity:       1,
+        unit_price:     -discAmt,
+        gst_applicable: false,
+        pst_applicable: false,
+        line_total:     -discAmt,
+      });
+      this._updateDisplay();
+      this._setStatus('success', `Discount applied: -${Tax.fmt(discAmt)}`);
+      close();
+    });
+
+    // Focus the first preset button for quick keyboard use
+    setTimeout(() => modal.querySelector('.disc-pct-btn')?.focus(), 80);
+  }
+
   /* ---- Payment Modal ---- */
   /* Canadian nickel rounding: round to nearest $0.05 */
   _cashRound(amount) {
@@ -812,6 +1625,19 @@ class POSScreen {
 
   _showPaymentModal() {
     if (this._cart.length === 0) return;
+
+    // Check for BTC / Narcotic items — must counsel before payment
+    const controlledItems = this._cart.filter(i =>
+      i._schedule_flag === 'btc' || i._schedule_flag === 'btc_ctrl'
+    );
+    if (controlledItems.length > 0) {
+      this._showBtcCounsellingModal(controlledItems, () => this._openPaymentModal());
+      return;
+    }
+    this._openPaymentModal();
+  }
+
+  _openPaymentModal() {
     const shift = DB.getActiveShift();
     if (!shift) {
       if (!confirm('No shift is currently open.\n\nOpen a shift first for proper cash tracking.\nProceed anyway?')) return;
@@ -873,8 +1699,10 @@ class POSScreen {
             <div style="font-size:11px;font-weight:700;text-transform:uppercase;color:var(--text-muted);
                         letter-spacing:.04em;margin-bottom:8px;">Add Payment</div>
             <div class="payment-method-grid">
-              ${['Cash','Debit','Credit','Insurance'].map(m =>
-                `<button class="payment-method-btn" data-method="${m.toUpperCase()}">${m}</button>`
+              ${['Cash','Debit','Credit','Insurance','AR'].map(m =>
+                `<button class="payment-method-btn" data-method="${m === 'AR' ? 'AR' : m.toUpperCase()}"
+                  ${m === 'AR' && !this._patient ? 'disabled title="Link a patient first to use AR"' : ''}
+                >${m === 'AR' ? '🧾 AR (Account)' : m}</button>`
               ).join('')}
               <button class="payment-method-btn" data-method="MANUAL_ENTRY"
                       style="grid-column:1/-1;font-size:12px;"
@@ -1028,10 +1856,35 @@ class POSScreen {
         selectedMethod = btn.dataset.method;
 
         const isCash        = selectedMethod === 'CASH';
+        const isAR          = selectedMethod === 'AR';
         const isClover      = selectedMethod === 'DEBIT' || selectedMethod === 'CREDIT';
         const isManualEntry = selectedMethod === 'MANUAL_ENTRY';
         const isCloverAny   = isClover || isManualEntry;
         const remaining = getRemaining();
+
+        // AR — show patient balance and charge immediately
+        if (isAR) {
+          const arSummary = this._patient ? DB.getPatientARSummary(this._patient.patient_id) : null;
+          const outstanding = arSummary?.outstanding || 0;
+          modal.querySelector('#pm-entry').style.display = 'block';
+          modal.querySelector('#pm-cash-extras').style.display = 'none';
+          modal.querySelector('#pm-clover-hint').style.display = 'none';
+          modal.querySelector('#pm-amount').value = Tax.round2(remaining).toFixed(2);
+          modal.querySelector('#pm-amt-label').textContent = 'Amount to charge to AR';
+          if (this._patient) {
+            let arInfo = modal.querySelector('#pm-ar-info');
+            if (!arInfo) {
+              arInfo = document.createElement('div');
+              arInfo.id = 'pm-ar-info';
+              arInfo.style.cssText = 'font-size:12px;padding:8px 10px;background:var(--surface2);border-radius:var(--radius);margin-bottom:8px;';
+              modal.querySelector('#pm-amount').parentNode.insertAdjacentElement('afterend', arInfo);
+            }
+            arInfo.innerHTML = `<strong>${this._patient.given_name} ${this._patient.surname}</strong>` +
+              (outstanding > 0 ? ` &nbsp;·&nbsp; <span style="color:var(--danger);">Current balance: ${Tax.fmt(outstanding)}</span>` : ' &nbsp;·&nbsp; <span style="color:var(--success);">No outstanding balance</span>');
+          }
+          modal.querySelector('#pm-add-btn').textContent = 'Charge to AR';
+          return;
+        }
 
         // Pre-fill amount: cash gets rounded remainder, card gets exact
         const suggest = isCash ? this._cashRound(remaining) : Tax.round2(remaining);
@@ -1135,6 +1988,8 @@ class POSScreen {
         if (savedPatient?.phn) {
           this._showRphSignatureModal(saved.txn, saved.items, saved.payments, savedPatient);
         }
+        // Offer to email the receipt (corner prompt — won't block the RPh modal)
+        this._offerPostSaleEmail(saved, savedPatient);
       } catch(e) {
         errEl.style.display = 'block'; errEl.textContent = 'Error: ' + e.message;
       }
@@ -1332,6 +2187,10 @@ class POSScreen {
 
     for (const item of this._cart) {
       DB.addTransactionItem({ ...item, transaction_id: txnId });
+      // Deduct inventory for OTC / custom items that have a tracked product ID
+      if (item._product_id && item._product_source) {
+        DB.adjustStock(item._product_source, item._product_id, -(item.quantity || 1));
+      }
     }
 
     for (const pay of paymentLines) {
@@ -1349,6 +2208,17 @@ class POSScreen {
     }
 
     Audit.sale(txnId, `${txnType} sale ${Tax.fmt(totals.total_amount)} via ${methodsStr}`);
+
+    // Save any pending BTC / controlled substance log entries
+    if (this._pendingBtcLog?.length) {
+      this._pendingBtcLog.forEach(entry => {
+        try { DB.addBtcLog({ ...entry, transaction_id: txnId }); } catch(_) {}
+      });
+      this._pendingBtcLog = null;
+
+      // Auto-save BTC PDF to configured folder
+      this._saveBtcPdf(txnId).catch(e => console.warn('BTC PDF save failed:', e.message));
+    }
 
     const txn      = DB.getTransaction(txnId);
     const items    = DB.getItemsForTransaction(txnId);
@@ -1726,6 +2596,13 @@ class POSScreen {
           refresh();
         });
       });
+
+      resultsEl.querySelectorAll('[data-action="refund"]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const txnId = parseInt(btn.dataset.txnid);
+          this._showPartialRefundModal(txnId, () => refresh());
+        });
+      });
       resultsEl.querySelectorAll('[data-action="link-patient"]').forEach(btn => {
         btn.addEventListener('click', () => {
           this._showLinkPatientModal(parseInt(btn.dataset.txnid), () => refresh());
@@ -1786,7 +2663,8 @@ class POSScreen {
             ${txns.map(t => {
               const time = new Date(t.transaction_date).toLocaleTimeString(navigator.language, { hour:'2-digit', minute:'2-digit' });
               const sc = t.status === 'PAID' ? 'success' : t.status === 'REVERSED' ? 'danger' : 'warning';
-              const canVoid = isToday && t.status !== 'REVERSED';
+              const canVoid   = isToday && t.status !== 'REVERSED' && t.transaction_type !== 'REFUND';
+              const canRefund = t.status === 'PAID' && t.transaction_type !== 'REFUND';
               return `<tr style="${t.status === 'REVERSED' ? 'opacity:0.5;text-decoration:line-through;' : ''}">
                 <td>#${t.transaction_id}</td>
                 <td>${time}</td>
@@ -1797,7 +2675,8 @@ class POSScreen {
                 <td class="text-right">${Tax.fmt(t.total_amount)}</td>
                 <td style="text-align:center;white-space:nowrap;">
                   <button class="btn btn-sm btn-outline" data-action="view" data-txnid="${t.transaction_id}" style="margin-right:4px;">View</button>
-                  ${canVoid ? `<button class="btn btn-sm btn-danger" data-action="void" data-txnid="${t.transaction_id}">Void</button>` : ''}
+                  ${canRefund ? `<button class="btn btn-sm btn-warning" data-action="refund" data-txnid="${t.transaction_id}" style="margin-right:4px;background:#fd7e14;color:#fff;border:none;">↩ Return</button>` : ''}
+                  ${canVoid   ? `<button class="btn btn-sm btn-danger"  data-action="void"   data-txnid="${t.transaction_id}">Void</button>` : ''}
                 </td>
               </tr>`;
             }).join('')}
@@ -2117,6 +2996,11 @@ class POSScreen {
       close();
       this._updateShiftIndicator();
       this._setStatus('success', `Shift opened — float ${Tax.fmt(floatTotal)}`);
+      // Start-of-Day opening checklist
+      if (typeof Checklists !== 'undefined') {
+        const sh = DB.getActiveShift();
+        Checklists.show('open', { shift_id: sh?.shift_id });
+      }
     });
 
     // Focus first qty input
@@ -2408,12 +3292,17 @@ class POSScreen {
 
     modal.querySelector('#cs-confirm').addEventListener('click', () => {
       const notes = modal.querySelector('#cs-notes').value.trim();
-      DB.closeShift(shift.shift_id, counted, notes);
+      const shiftId = shift.shift_id;
+      DB.closeShift(shiftId, counted, notes);
       const variance = Tax.round2(counted - summary.expectedCash);
       Audit.configChange(`Shift closed by ${Auth.current()?.name} — counted ${Tax.fmt(counted)}, variance ${Tax.fmt(variance)}`);
       close();
       this._updateShiftIndicator();
       this._setStatus('', `Shift closed — ${Tax.fmt(summary.txnSummary.total_sales)} total sales`);
+      // End-of-Day sign-off checklist
+      if (typeof Checklists !== 'undefined') {
+        Checklists.show('close', { shift_id: shiftId });
+      }
     });
 
     modal.querySelector('.cs-denom-qty').focus();
@@ -2548,6 +3437,379 @@ class POSScreen {
     modal.querySelector('#edit-price-save').addEventListener('click', save);
     input.addEventListener('keydown', e => { if (e.key === 'Enter') save(); });
     setTimeout(() => { input.focus(); input.select(); }, 50);
+  }
+
+  /* ---- Cart quantity stepper (OTC / Custom items) ---- */
+  _changeItemQty(idx, delta) {
+    const item = this._cart[idx];
+    if (!item) return;
+    const newQty = Math.max(1, (item.quantity || 1) + delta);
+    item.quantity   = newQty;
+    item.line_total = Tax.round2((item.unit_price || 0) * newQty);
+    this._updateDisplay();
+  }
+
+  /* ---- Hold cart with a reason (park multiple sales) ---- */
+  _heldKey() { return 'pos_held_carts'; }
+  _getHeldCarts() {
+    try { return JSON.parse(localStorage.getItem(this._heldKey()) || '[]'); } catch(_) { return []; }
+  }
+  _setHeldCarts(list) {
+    try { localStorage.setItem(this._heldKey(), JSON.stringify(list)); } catch(_) {}
+    this._refreshHeldCount();
+  }
+  _refreshHeldCount() {
+    const n = this._getHeldCarts().length;
+    // Held Carts tile is always visible; show the count badge only when > 0
+    const tileCount = this._el?.querySelector('#tile-held-count');
+    if (tileCount) {
+      tileCount.textContent = n;
+      tileCount.style.display = n ? 'inline-block' : 'none';
+    }
+  }
+
+  async _holdCartWithReason() {
+    if (!this._cart.length) { this._setStatus('error', 'Cart is empty — nothing to hold.'); return; }
+    const reason = await this._askHoldReason();
+    if (reason === null) return;  // cancelled
+    const label = reason.trim() || 'Held cart';
+    const held = this._getHeldCarts();
+    held.push({
+      id:      Date.now(),
+      reason:  label,
+      patient: this._patient || null,
+      cart:    this._cart,
+      total:   Tax.calcCartTotals(this._cart).total_amount,
+      heldAt:  new Date().toISOString(),
+      heldBy:  Auth.current()?.name || '',
+    });
+    this._setHeldCarts(held);
+    this.newTransaction();
+    this._refreshHeldCount();
+    this._setStatus('success', `Cart held — ${label}`);
+  }
+
+  // In-app reason prompt (Electron has no window.prompt). Resolves to the
+  // entered string, or null if cancelled.
+  _askHoldReason() {
+    return new Promise(resolve => {
+      const modal = document.createElement('div');
+      modal.className = 'modal-overlay';
+      modal.innerHTML = `
+        <div class="modal" style="max-width:400px;">
+          <div class="modal-header"><h3>⏸ Hold Cart</h3></div>
+          <div class="modal-body">
+            <div class="form-group">
+              <label>Reason / label (optional)</label>
+              <input type="text" id="hr-input" autocomplete="off" style="font-size:16px;"
+                     placeholder='e.g. "Delivery — J. Smith", "Waiting for price"' />
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button class="btn btn-outline" id="hr-cancel">Cancel</button>
+            <button class="btn btn-primary" id="hr-hold">Hold Cart</button>
+          </div>
+        </div>`;
+      document.body.appendChild(modal);
+      const input = modal.querySelector('#hr-input');
+      input.focus();
+      const done = (val) => { modal.remove(); resolve(val); };
+      modal.querySelector('#hr-cancel').addEventListener('click', () => done(null));
+      modal.querySelector('#hr-hold').addEventListener('click', () => done(input.value));
+      input.addEventListener('keydown', e => {
+        if (e.key === 'Enter') done(input.value);
+        else if (e.key === 'Escape') done(null);
+      });
+    });
+  }
+
+  _showHeldCartsModal() {
+    const held = this._getHeldCarts();
+    const modal = document.createElement('div');
+    modal.className = 'modal-overlay';
+    modal.innerHTML = `
+      <div class="modal" style="max-width:520px;">
+        <div class="modal-header">
+          <h3>⏸ Held Carts</h3>
+          <button class="modal-close">&times;</button>
+        </div>
+        <div class="modal-body">
+          ${held.length ? held.map(h => {
+            const when = new Date(h.heldAt).toLocaleString('en-CA',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
+            const who  = h.patient ? `${h.patient.given_name} ${h.patient.surname}` : 'No patient';
+            return `
+              <div style="display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--border);">
+                <div style="flex:1;min-width:0;">
+                  <div style="font-weight:600;font-size:13px;">${h.reason}</div>
+                  <div style="font-size:11px;color:var(--text-muted);">
+                    ${h.cart.length} item${h.cart.length!==1?'s':''} · ${Tax.fmt(h.total)} · ${who} · ${when}
+                  </div>
+                </div>
+                <button class="btn btn-primary btn-sm held-resume" data-id="${h.id}">Resume</button>
+                <button class="btn btn-sm held-del" data-id="${h.id}" style="color:var(--danger);background:none;border:none;cursor:pointer;font-size:16px;">✕</button>
+              </div>`;
+          }).join('') : '<div style="padding:24px;text-align:center;color:var(--text-muted);font-size:13px;">No held carts.</div>'}
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-outline modal-close-btn">Close</button>
+        </div>
+      </div>`;
+    document.body.appendChild(modal);
+    const close = () => modal.remove();
+    modal.querySelector('.modal-close').addEventListener('click', close);
+    modal.querySelector('.modal-close-btn').addEventListener('click', close);
+
+    modal.querySelectorAll('.held-resume').forEach(btn => btn.addEventListener('click', () => {
+      const id = parseInt(btn.dataset.id);
+      const list = this._getHeldCarts();
+      const h = list.find(x => x.id === id);
+      if (!h) return;
+      if (this._cart.length && !confirm('Resuming will replace the current cart. Continue?')) return;
+      this._cart    = h.cart;
+      this._patient = h.patient;
+      this._pendingRxLoaded = false;
+      this._setHeldCarts(list.filter(x => x.id !== id));
+      this._updateDisplay();
+      this._updatePatientBar();
+      this._setStatus('success', `Resumed: ${h.reason}`);
+      close();
+    }));
+    modal.querySelectorAll('.held-del').forEach(btn => btn.addEventListener('click', () => {
+      const id = parseInt(btn.dataset.id);
+      this._setHeldCarts(this._getHeldCarts().filter(x => x.id !== id));
+      close(); this._showHeldCartsModal();
+    }));
+  }
+
+  /* ---- Email a receipt to the patient (or a typed address) ---- */
+  // In-app email prompt (Electron has no window.prompt). Resolves to a
+  // trimmed address, or null if cancelled.
+  _askEmailAddress(preset) {
+    return new Promise(resolve => {
+      const modal = document.createElement('div');
+      modal.className = 'modal-overlay';
+      modal.innerHTML = `
+        <div class="modal" style="max-width:360px;">
+          <div class="modal-header"><h3>✉ Email Receipt</h3></div>
+          <div class="modal-body">
+            <div class="form-group">
+              <label>Send receipt to:</label>
+              <input type="email" id="ea-input" placeholder="name@example.com"
+                     value="${(preset || '').replace(/"/g, '&quot;')}"
+                     style="font-size:16px;" autocomplete="email" />
+            </div>
+            <div id="ea-err" class="login-error"></div>
+          </div>
+          <div class="modal-footer">
+            <button class="btn btn-outline" id="ea-cancel">Cancel</button>
+            <button class="btn btn-primary" id="ea-send">Send</button>
+          </div>
+        </div>`;
+      document.body.appendChild(modal);
+      const input = modal.querySelector('#ea-input');
+      const err   = modal.querySelector('#ea-err');
+      input.focus(); input.select();
+      const done = (val) => { modal.remove(); resolve(val); };
+      const submit = () => {
+        const addr = input.value.trim();
+        if (!/.+@.+\..+/.test(addr)) { err.textContent = 'Enter a valid email address.'; return; }
+        done(addr);
+      };
+      modal.querySelector('#ea-cancel').addEventListener('click', () => done(null));
+      modal.querySelector('#ea-send').addEventListener('click', submit);
+      input.addEventListener('keydown', e => {
+        if (e.key === 'Enter') submit();
+        else if (e.key === 'Escape') done(null);
+      });
+    });
+  }
+
+  async _emailReceipt(txn, items, payments, patient) {
+    const preset = patient?.email || '';
+    const addr = await this._askEmailAddress(preset);
+    if (addr === null) return;          // cancelled
+    if (!/.+@.+\..+/.test(addr)) { this._setStatus('error', 'Enter a valid email address.'); return; }
+
+    this._setStatus('loading', 'Emailing receipt…');
+    try {
+      const ph     = await Config.getAll();
+      const inner  = await Print.generateReceiptHTML(txn, items, payments, patient, null);
+      const html   = `<!DOCTYPE html><html><head><meta charset="UTF-8"></head>
+        <body style="background:#f4f4f4;padding:16px;">
+          <div style="max-width:340px;margin:0 auto;background:#fff;padding:16px;
+                       border-radius:8px;font-family:'Courier New',monospace;">${inner}</div>
+        </body></html>`;
+      const res = await EmailAPI.send({
+        to:       addr,
+        subject:  `Receipt #${txn.transaction_id} — ${ph.pharmacy_name || 'Pharmacy'}`,
+        htmlBody: html,
+        textBody: `Receipt #${txn.transaction_id} — total ${Tax.fmt(txn.total_amount)}`,
+      });
+      if (res && res.ok === false) throw new Error(res.error || 'send failed');
+      this._setStatus('success', `Receipt emailed to ${addr}`);
+    } catch(e) {
+      this._setStatus('error', 'Email failed: ' + e.message);
+    }
+  }
+
+  /* ---- After a sale: offer to email the receipt (non-intrusive corner prompt) ---- */
+  _offerPostSaleEmail(saved, patient) {
+    if (!saved?.txn) return;
+    // Remove any existing prompt
+    document.getElementById('post-sale-email')?.remove();
+
+    const box = document.createElement('div');
+    box.id = 'post-sale-email';
+    box.style.cssText = `position:fixed;bottom:16px;right:16px;z-index:9000;
+      background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+      box-shadow:0 4px 20px rgba(0,0,0,.25);padding:14px 16px;max-width:300px;`;
+    box.innerHTML = `
+      <div style="font-weight:700;font-size:14px;margin-bottom:4px;">✓ Sale complete — #${saved.txn.transaction_id}</div>
+      <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px;">
+        ${patient?.email ? `Email receipt to ${patient.email}?` : 'Email a copy of the receipt?'}
+      </div>
+      <div style="display:flex;gap:8px;">
+        <button id="pse-email" class="btn btn-primary btn-sm" style="flex:1;">✉ Email Receipt</button>
+        <button id="pse-no" class="btn btn-outline btn-sm">No</button>
+      </div>`;
+    document.body.appendChild(box);
+
+    box.querySelector('#pse-no').addEventListener('click', () => box.remove());
+    box.querySelector('#pse-email').addEventListener('click', () => {
+      box.remove();
+      this._emailReceipt(saved.txn, saved.items, saved.payments, patient);
+    });
+    // Auto-dismiss after 20s
+    setTimeout(() => box.remove(), 20000);
+  }
+
+  /* ---- Find a paid receipt by transaction # and reprint ---- */
+  _showFindReceiptModal() {
+    const modal = document.createElement('div');
+    modal.className = 'modal-overlay';
+    modal.innerHTML = `
+      <div class="modal" style="max-width:460px;">
+        <div class="modal-header">
+          <h3>📋 Find Paid Receipt</h3>
+          <button class="modal-close">&times;</button>
+        </div>
+        <div class="modal-body">
+          <div class="form-group">
+            <label>Transaction #</label>
+            <input type="number" id="fr-txn" placeholder="e.g. 1042" style="font-size:18px;" autocomplete="off" />
+          </div>
+          <div id="fr-result" style="margin-top:10px;"></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-outline" id="fr-cancel">Close</button>
+          <button class="btn btn-primary" id="fr-find">Find</button>
+        </div>
+      </div>`;
+    document.body.appendChild(modal);
+    const close = () => modal.remove();
+    modal.querySelector('.modal-close').addEventListener('click', close);
+    modal.querySelector('#fr-cancel').addEventListener('click', close);
+
+    const resultEl = modal.querySelector('#fr-result');
+    const input = modal.querySelector('#fr-txn');
+
+    const find = () => {
+      const id = parseInt(input.value);
+      if (!id) { resultEl.innerHTML = '<div class="alert alert-danger">Enter a transaction #.</div>'; return; }
+      const txn = DB.getTransaction(id);
+      if (!txn) { resultEl.innerHTML = `<div class="alert alert-danger">No transaction #${id} found.</div>`; return; }
+      const items    = DB.getItemsForTransaction(id);
+      const payments = DB.getPaymentsForTransaction(id);
+      const patient  = txn.patient_id ? DB.getPatient(txn.patient_id) : null;
+      const when = new Date(txn.transaction_date).toLocaleString('en-CA');
+      const statusBadge = txn.status === 'REVERSED' ? '<span style="color:var(--danger);">VOIDED</span>' : txn.status;
+      resultEl.innerHTML = `
+        <div style="background:var(--surface2);border-radius:var(--radius);padding:12px 14px;font-size:13px;">
+          <div style="display:flex;justify-content:space-between;"><strong>Txn #${id}</strong><span>${statusBadge}</span></div>
+          <div style="color:var(--text-muted);font-size:12px;margin:4px 0;">${when}
+            ${patient?` · ${patient.given_name} ${patient.surname}`:''}</div>
+          <div style="margin:6px 0;">${items.map(i=>`<div style="display:flex;justify-content:space-between;">
+            <span>${i.description}</span><span>${Tax.fmt(i.line_total)}</span></div>`).join('')}</div>
+          <div style="display:flex;justify-content:space-between;font-weight:700;border-top:1px solid var(--border);padding-top:4px;">
+            <span>Total</span><span>${Tax.fmt(txn.total_amount)}</span></div>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:10px;">
+          <button class="btn btn-success" id="fr-reprint" style="flex:1;">🖨 Reprint</button>
+          <button class="btn btn-outline" id="fr-email" style="flex:1;">✉ Email Receipt</button>
+        </div>`;
+      resultEl.querySelector('#fr-reprint').addEventListener('click', () => {
+        Print.printReceipt(txn, items, payments, patient);
+        this._setStatus('success', `Reprinted receipt #${id}`);
+        close();
+      });
+      resultEl.querySelector('#fr-email').addEventListener('click', () => {
+        this._emailReceipt(txn, items, payments, patient);
+      });
+    };
+
+    modal.querySelector('#fr-find').addEventListener('click', find);
+    input.addEventListener('keydown', e => { if (e.key === 'Enter') find(); });
+    setTimeout(() => input.focus(), 60);
+  }
+
+  /* ---- Print cart as a Quote / Estimate (no payment) ---- */
+  async _printQuote() {
+    if (!this._cart.length) { this._setStatus('error', 'Cart is empty — nothing to quote.'); return; }
+    const ph = await Config.getAll();
+    const totals = Tax.calcCartTotals(this._cart);
+    const esc = s => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    const logo = localStorage.getItem('pharmacy_logo_data') || '';
+    const now = new Date();
+
+    const itemRows = this._cart.map(i => {
+      const isDisc = i.item_type === 'DISCOUNT';
+      const qty = i.quantity || 1;
+      return `<tr>
+        <td style="padding:4px 6px;border-bottom:1px solid #eee;">${esc(i.description)}${i.rx_number?` <small>(Rx# ${esc(i.rx_number)})</small>`:''}</td>
+        <td style="padding:4px 6px;border-bottom:1px solid #eee;text-align:center;">${qty>1?qty:''}</td>
+        <td style="padding:4px 6px;border-bottom:1px solid #eee;text-align:right;${isDisc?'color:#b00;':''}">${Tax.fmt(i.line_total)}</td>
+      </tr>`;
+    }).join('');
+
+    const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><style>
+      @page{size:80mm auto;margin:0;}
+      body{font-family:Arial,sans-serif;font-size:12px;color:#000;width:280px;margin:0;padding:10px;}
+      .c{text-align:center;} h2{margin:4px 0;font-size:15px;} .muted{color:#555;font-size:11px;}
+      table{width:100%;border-collapse:collapse;margin:8px 0;}
+      .tot{display:flex;justify-content:space-between;font-weight:bold;font-size:14px;margin-top:6px;border-top:1px solid #000;padding-top:4px;}
+      .badge{display:inline-block;border:2px solid #000;border-radius:4px;padding:2px 10px;font-weight:bold;letter-spacing:1px;margin:6px 0;}
+    </style></head><body>
+      <div class="c">
+        ${logo?`<img src="${logo}" style="max-height:40px;max-width:90%;"><br>`:''}
+        <h2>${esc(ph.pharmacy_name||'Pharmacy')}</h2>
+        ${ph.pharmacy_phone?`<div class="muted">Tel: ${esc(ph.pharmacy_phone)}</div>`:''}
+        <div class="badge">QUOTE / ESTIMATE</div>
+        <div class="muted">${now.toLocaleString('en-CA')}</div>
+        ${this._patient?`<div class="muted">For: ${esc(this._patient.given_name)} ${esc(this._patient.surname)}</div>`:''}
+      </div>
+      <table>
+        <thead><tr>
+          <th style="text-align:left;border-bottom:1px solid #000;padding:3px 6px;">Item</th>
+          <th style="border-bottom:1px solid #000;padding:3px 6px;">Qty</th>
+          <th style="text-align:right;border-bottom:1px solid #000;padding:3px 6px;">Amount</th>
+        </tr></thead>
+        <tbody>${itemRows}</tbody>
+      </table>
+      <div style="display:flex;justify-content:space-between;font-size:12px;"><span>Subtotal</span><span>${Tax.fmt(totals.subtotal)}</span></div>
+      ${totals.gst_amount>0?`<div style="display:flex;justify-content:space-between;font-size:12px;"><span>GST</span><span>${Tax.fmt(totals.gst_amount)}</span></div>`:''}
+      ${totals.pst_amount>0?`<div style="display:flex;justify-content:space-between;font-size:12px;"><span>PST</span><span>${Tax.fmt(totals.pst_amount)}</span></div>`:''}
+      <div class="tot"><span>ESTIMATED TOTAL</span><span>${Tax.fmt(totals.total_amount)}</span></div>
+      <div class="c muted" style="margin-top:10px;">This is an estimate, not a receipt. Prices subject to change.</div>
+    </body></html>`;
+
+    // Print via hidden iframe (works in both desktop and browser)
+    const frame = document.createElement('iframe');
+    frame.style.cssText = 'position:fixed;left:-9999px;width:320px;height:600px;border:none;';
+    document.body.appendChild(frame);
+    frame.contentDocument.open(); frame.contentDocument.write(html); frame.contentDocument.close();
+    setTimeout(() => { frame.contentWindow.focus(); frame.contentWindow.print();
+      setTimeout(() => frame.remove(), 1000); }, 350);
+    this._setStatus('success', 'Quote printed');
   }
 
   _applyDiscountAction(action) {
@@ -2688,55 +3950,179 @@ class POSScreen {
       position:fixed;inset:0;background:rgba(0,0,0,.6);
       display:flex;align-items:center;justify-content:center;z-index:9500;`;
 
+    // Pre-fill RPh name + license from logged-in staff if they are a pharmacist
+    const currentStaff = Auth.current();
+    const prefilledName    = currentStaff?.name    || '';
+    const prefilledLicense = currentStaff?.license_number || '';
+
+    // Pharmacists who can sign (have a license #), with stored signature + mode
+    const pharmacists = (DB.getAllStaff ? DB.getAllStaff() : [])
+      .filter(p => p.active && (p.license_number || p.role === 'PHARMACIST'));
+    const pharmMap = {};
+    pharmacists.forEach(p => { pharmMap[p.staff_id] = {
+      name: p.name, lic: p.license_number || '', mode: p.signoff_mode || 'pin', signature: p.signature || '',
+    }; });
+
+    // Show allergy status for this patient
+    const allergyNote = patient?.allergies
+      ? `<div style="background:#fff3cd;border:1px solid #ffc107;border-radius:4px;
+                     padding:6px 10px;font-size:12px;color:#856404;margin-bottom:10px;">
+           ⚠️ <strong>Allergies on file:</strong> ${patient.allergies}
+         </div>`
+      : '';
+
     overlay.innerHTML = `
       <div style="background:var(--surface);border:1px solid var(--border);
-                  border-radius:var(--radius);width:480px;max-width:95vw;
-                  box-shadow:0 8px 32px rgba(0,0,0,.4);">
+                  border-radius:var(--radius);width:500px;max-width:96vw;max-height:92vh;
+                  overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,.4);">
+
         <div style="padding:16px 20px;border-bottom:1px solid var(--border);">
-          <div style="font-size:15px;font-weight:700;">Pick Up Confirmation</div>
+          <div style="font-size:15px;font-weight:700;">Pick Up Confirmation — RPh Sign-off</div>
           <div style="font-size:12px;color:var(--text-muted);margin-top:3px;">
-            RPh signature confirms counselling &amp; allergy check — saved to patient file.
+            Saved to patient file in WinRx.
           </div>
         </div>
+
         <div style="padding:16px 20px;">
-          <div style="font-size:12px;font-weight:600;margin-bottom:6px;color:var(--text-muted);">
-            Counselling and Allergy Checked by (RPh) — Signature:
+
+          ${allergyNote}
+
+          <!-- Counselling checkboxes -->
+          <div style="background:var(--surface2);border-radius:var(--radius);
+                      padding:12px 14px;margin-bottom:14px;">
+            <div style="font-size:12px;font-weight:700;text-transform:uppercase;
+                        letter-spacing:.04em;color:var(--text-muted);margin-bottom:10px;">
+              Counselling Checklist
+            </div>
+            <label style="display:flex;align-items:center;gap:10px;margin-bottom:8px;
+                          cursor:pointer;font-size:13px;">
+              <input type="checkbox" id="rph-chk-allergy" style="width:16px;height:16px;" />
+              Allergies reviewed with patient
+            </label>
+            <label style="display:flex;align-items:center;gap:10px;margin-bottom:8px;
+                          cursor:pointer;font-size:13px;">
+              <input type="checkbox" id="rph-chk-side-effects" style="width:16px;height:16px;" />
+              Side effects &amp; interactions discussed
+            </label>
+            <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:13px;">
+              <input type="checkbox" id="rph-chk-new-rx" style="width:16px;height:16px;" />
+              New medication — full counselling provided
+            </label>
           </div>
-          <div style="border:1px solid var(--border);border-radius:4px;background:#fff;
-                      position:relative;margin-bottom:8px;overflow:hidden;">
-            <canvas id="rph-canvas" width="436" height="110"
-                    style="display:block;cursor:crosshair;touch-action:none;width:100%;"></canvas>
+
+          <!-- Sign as (pharmacist picker) -->
+          <div style="margin-bottom:10px;">
+            <label style="font-size:12px;font-weight:600;color:var(--text-muted);display:block;margin-bottom:4px;">Sign as</label>
+            <select id="rph-select" style="width:100%;padding:8px 10px;border:1px solid var(--border);
+                    border-radius:var(--radius);font-size:13px;background:var(--surface2);color:var(--text);box-sizing:border-box;">
+              ${pharmacists.map(p => `<option value="${p.staff_id}" ${currentStaff&&currentStaff.staff_id===p.staff_id?'selected':''}>${p.name}${p.license_number?` — ${p.license_number}`:''}</option>`).join('')}
+              <option value="">Other / draw signature…</option>
+            </select>
           </div>
-          <div style="display:flex;justify-content:flex-end;margin-bottom:14px;">
-            <button id="rph-clear" style="font-size:11px;padding:3px 10px;
-              border:1px solid var(--border);border-radius:var(--radius);
-              background:var(--surface2);cursor:pointer;color:var(--text-muted);">
-              Clear signature
-            </button>
+
+          <!-- RPh name + license -->
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px;">
+            <div>
+              <label style="font-size:12px;font-weight:600;color:var(--text-muted);
+                             display:block;margin-bottom:4px;">Pharmacist Name *</label>
+              <input id="rph-name" type="text" value="${prefilledName}"
+                     placeholder="e.g. J. Smith, RPh" autocomplete="off"
+                     style="width:100%;padding:8px 10px;border:1px solid var(--border);
+                            border-radius:var(--radius);font-size:13px;
+                            background:var(--surface2);color:var(--text);box-sizing:border-box;" />
+            </div>
+            <div>
+              <label style="font-size:12px;font-weight:600;color:var(--text-muted);
+                             display:block;margin-bottom:4px;">License / Registration #</label>
+              <input id="rph-license" type="text" value="${prefilledLicense}"
+                     placeholder="e.g. 12345" autocomplete="off"
+                     style="width:100%;padding:8px 10px;border:1px solid var(--border);
+                            border-radius:var(--radius);font-size:13px;
+                            background:var(--surface2);color:var(--text);box-sizing:border-box;" />
+            </div>
           </div>
-          <label style="font-size:12px;font-weight:600;color:var(--text-muted);
-                         display:block;margin-bottom:5px;">Name / Initials</label>
-          <input id="rph-name" type="text" placeholder="e.g. J. Smith, RPh" autocomplete="off"
-                 style="width:100%;padding:9px 12px;border:1px solid var(--border);
-                        border-radius:var(--radius);font-size:14px;
-                        background:var(--surface2);color:var(--text);box-sizing:border-box;" />
+
+          <!-- Stored signature preview (when signing as a saved pharmacist) -->
+          <div id="rph-sig-stored" style="display:none;margin-bottom:8px;">
+            <div style="font-size:12px;font-weight:600;color:var(--text-muted);margin-bottom:6px;">Signature</div>
+            <img id="rph-sig-img" alt="" style="height:48px;max-width:280px;background:#fff;border:1px solid var(--border);border-radius:4px;" />
+          </div>
+
+          <!-- PIN re-entry (when the selected pharmacist uses PIN mode) -->
+          <div id="rph-pin-row" style="display:none;margin-bottom:8px;">
+            <label style="font-size:12px;font-weight:600;color:var(--text-muted);display:block;margin-bottom:4px;">Enter your PIN to sign</label>
+            <input id="rph-pin" type="password" inputmode="numeric" maxlength="8" placeholder="PIN" autocomplete="off"
+                   style="width:160px;padding:8px 10px;border:1px solid var(--border);border-radius:var(--radius);
+                          font-size:13px;background:var(--surface2);color:var(--text);box-sizing:border-box;" />
+          </div>
+
+          <!-- Signature pad (draw — manual fallback) -->
+          <div id="rph-draw-wrap">
+            <div style="font-size:12px;font-weight:600;color:var(--text-muted);margin-bottom:6px;">
+              Signature
+            </div>
+            <div style="border:1px solid var(--border);border-radius:4px;background:#fff;
+                        position:relative;margin-bottom:6px;overflow:hidden;">
+              <canvas id="rph-canvas" width="456" height="100"
+                      style="display:block;cursor:crosshair;touch-action:none;width:100%;"></canvas>
+            </div>
+            <div style="display:flex;justify-content:flex-end;margin-bottom:4px;">
+              <button id="rph-clear" style="font-size:11px;padding:3px 10px;
+                border:1px solid var(--border);border-radius:var(--radius);
+                background:var(--surface2);cursor:pointer;color:var(--text-muted);">
+                Clear signature
+              </button>
+            </div>
+          </div>
+
+          <div id="rph-signoff-error" style="display:none;color:#b02a37;font-size:12px;margin-top:4px;"></div>
+
         </div>
-        <div style="padding:12px 20px;border-top:1px solid #ddd;
-                    display:flex;flex-direction:row;gap:10px;justify-content:flex-end;align-items:center;">
-          <button id="rph-skip" style="padding:8px 18px;border:1px solid #ccc;
-            border-radius:6px;background:#f5f5f5;
-            cursor:pointer;font-size:13px;color:#333;">
+
+        <div style="padding:12px 20px;border-top:1px solid var(--border);
+                    display:flex;gap:10px;justify-content:flex-end;align-items:center;">
+          <button id="rph-skip" style="padding:8px 18px;border:1px solid var(--border);
+            border-radius:var(--radius);background:var(--surface2);
+            cursor:pointer;font-size:13px;">
             Skip
           </button>
           <button id="rph-confirm" style="padding:8px 24px;border:none;
-            border-radius:6px;background:#2563eb;color:#fff;
+            border-radius:var(--radius);background:var(--primary);color:#fff;
             cursor:pointer;font-size:13px;font-weight:600;">
-            Confirm &amp; Upload
+            Confirm &amp; Save to File
           </button>
         </div>
       </div>`;
 
     document.body.appendChild(overlay);
+
+    /* ── Pharmacist picker → stored signature + PIN/tick, or draw fallback ── */
+    const rphSelEl   = overlay.querySelector('#rph-select');
+    const rphNameEl  = overlay.querySelector('#rph-name');
+    const rphLicEl   = overlay.querySelector('#rph-license');
+    const drawWrap   = overlay.querySelector('#rph-draw-wrap');
+    const storedWrap = overlay.querySelector('#rph-sig-stored');
+    const storedImg  = overlay.querySelector('#rph-sig-img');
+    const rphPinRow  = overlay.querySelector('#rph-pin-row');
+    const applyRphSel = () => {
+      const p = pharmMap[rphSelEl.value];
+      if (p && p.signature) {
+        rphNameEl.value = p.name; rphLicEl.value = p.lic;
+        rphNameEl.readOnly = true; rphLicEl.readOnly = true;
+        storedImg.src = p.signature; storedWrap.style.display = 'block';
+        drawWrap.style.display = 'none';
+        rphPinRow.style.display = p.mode === 'pin' ? 'block' : 'none';
+      } else if (p) {
+        rphNameEl.value = p.name; rphLicEl.value = p.lic;
+        rphNameEl.readOnly = false; rphLicEl.readOnly = false;
+        storedWrap.style.display = 'none'; drawWrap.style.display = 'block'; rphPinRow.style.display = 'none';
+      } else {
+        rphNameEl.readOnly = false; rphLicEl.readOnly = false;
+        storedWrap.style.display = 'none'; drawWrap.style.display = 'block'; rphPinRow.style.display = 'none';
+      }
+    };
+    rphSelEl.addEventListener('change', applyRphSel);
+    applyRphSel();
 
     /* ── Canvas drawing ── */
     const canvas = overlay.querySelector('#rph-canvas');
@@ -2789,7 +4175,28 @@ class POSScreen {
 
     overlay.querySelector('#rph-confirm').addEventListener('click', async () => {
       const name             = overlay.querySelector('#rph-name').value.trim();
-      const signatureDataUrl = hasSignature ? canvas.toDataURL('image/png') : null;
+      const license          = overlay.querySelector('#rph-license').value.trim();
+      const chkAllergy       = overlay.querySelector('#rph-chk-allergy').checked;
+      const chkSideEffects   = overlay.querySelector('#rph-chk-side-effects').checked;
+      const chkNewRx         = overlay.querySelector('#rph-chk-new-rx').checked;
+      const sigErr           = overlay.querySelector('#rph-signoff-error');
+      const showSigErr       = (m) => { sigErr.textContent = m; sigErr.style.display = 'block'; };
+
+      // Resolve the signature: stored (selected pharmacist) or drawn
+      const selPh = pharmMap[rphSelEl.value] || null;
+      let signatureDataUrl;
+      if (selPh && selPh.signature) {
+        if (selPh.mode === 'pin') {
+          const pin = overlay.querySelector('#rph-pin').value.trim();
+          if (!pin) { showSigErr(`Enter ${selPh.name}'s PIN to sign.`); return; }
+          const ok = await Auth.verifyPin(parseInt(rphSelEl.value), pin);
+          if (!ok) { showSigErr('Incorrect PIN — could not verify the pharmacist.'); return; }
+        }
+        signatureDataUrl = selPh.signature;
+      } else {
+        signatureDataUrl = hasSignature ? canvas.toDataURL('image/png') : null;
+      }
+      sigErr.style.display = 'none';
 
       if (!name && !signatureDataUrl) {
         const nameInput = overlay.querySelector('#rph-name');
@@ -2803,9 +4210,18 @@ class POSScreen {
       const skipBtn = overlay.querySelector('#rph-skip');
       btn.disabled     = true;
       skipBtn.disabled = true;
-      btn.textContent  = 'Uploading…';
+      btn.textContent  = 'Saving…';
 
-      const rphInfo = { name, signatureDataUrl };
+      const rphInfo = {
+        name, license, signatureDataUrl,
+        counselledAllergies:   chkAllergy,
+        counselledSideEffects: chkSideEffects,
+        counselledNewRx:       chkNewRx,
+        signedAt:              new Date().toISOString(),
+      };
+
+      // Persist counselling record to transaction
+      try { DB.saveRphSignoff(txn.transaction_id, rphInfo); } catch(_) {}
       let folderOk  = false;
       let sqlOk     = false;
       let errorMsg  = '';
@@ -2919,32 +4335,21 @@ class POSScreen {
           <strong style="font-size:15px;">Other Prescriptions on File</strong>
           <label style="font-size:12px;color:var(--text-muted);cursor:pointer;">
             <input type="checkbox" id="pend-select-all" style="margin-right:5px;">
-            Select all
+            Select all shown
           </label>
         </div>
-        <div style="overflow-y:auto;flex:1;padding:8px 0;">
-          ${pending.map((r, i) => `
-            <label style="display:flex;align-items:center;gap:10px;padding:10px 20px;
-                          cursor:pointer;border-bottom:1px solid var(--border-faint,#333);">
-              <input type="checkbox" class="pend-cb" data-idx="${i}"
-                     style="flex-shrink:0;width:16px;height:16px;">
-              <div style="flex:1;min-width:0;">
-                <div style="font-size:13px;font-weight:600;white-space:nowrap;
-                             overflow:hidden;text-overflow:ellipsis;">${r.drug}</div>
-                <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">
-                  Rx #${r.rxNumber}
-                  ${r.qty ? ` · Qty: ${r.qty}` : ''}
-                  ${r.fillDate ? ` · Filled: ${fmtDate(r.fillDate)}` : ''}
-                </div>
-              </div>
-              <div style="font-size:13px;font-weight:600;color:var(--text-muted);white-space:nowrap;font-style:italic;">
-                ${r.copay > 0 ? fmt(r.copay) : 'price on add'}
-              </div>
-            </label>`).join('')}
+        <!-- Date filter -->
+        <div style="padding:10px 20px 0;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+          <span style="font-size:11px;color:var(--text-muted);margin-right:2px;">Show filled:</span>
+          <button class="pend-filter" data-range="today" style="font-size:12px;padding:4px 12px;border:1px solid var(--border);border-radius:14px;background:var(--primary);color:#fff;cursor:pointer;">Today</button>
+          <button class="pend-filter" data-range="week"  style="font-size:12px;padding:4px 12px;border:1px solid var(--border);border-radius:14px;background:var(--surface2);cursor:pointer;">This Week</button>
+          <button class="pend-filter" data-range="all"   style="font-size:12px;padding:4px 12px;border:1px solid var(--border);border-radius:14px;background:var(--surface2);cursor:pointer;">All</button>
+          <input type="date" id="pend-filter-date" style="font-size:12px;padding:3px 6px;margin-left:4px;" title="Pick a specific fill date" />
         </div>
+        <div id="pend-list" style="overflow-y:auto;flex:1;padding:8px 0;"></div>
         <div style="padding:14px 20px;border-top:1px solid var(--border);
                     display:flex;gap:10px;align-items:center;justify-content:space-between;">
-          <span style="font-size:11px;color:var(--text-muted);">Prices fetched from WinRx when added</span>
+          <span id="pend-total" style="font-size:11px;color:var(--text-muted);">Prices fetched from WinRx when added</span>
           <div style="display:flex;gap:8px;">
             <button id="pend-skip"
                     style="padding:8px 18px;border:1px solid var(--border);border-radius:var(--radius);
@@ -2953,7 +4358,7 @@ class POSScreen {
             </button>
             <button id="pend-add"
                     style="padding:8px 22px;border:none;border-radius:var(--radius);
-                           background:var(--accent);color:#fff;cursor:pointer;
+                           background:var(--primary);color:#fff;cursor:pointer;
                            font-size:13px;font-weight:600;min-width:110px;">
               Add to Cart
             </button>
@@ -2964,12 +4369,93 @@ class POSScreen {
     document.body.appendChild(overlay);
 
     const close = () => overlay.remove();
-
     overlay.querySelector('#pend-skip').addEventListener('click', close);
+
+    const listEl  = overlay.querySelector('#pend-list');
+    const totalEl = overlay.querySelector('#pend-total');
+
+    const toYmd = d => {
+      if (!d) return '';
+      const s = String(d);
+      if (/^\d{8}$/.test(s)) return `${s.slice(0,4)}-${s.slice(4,6)}-${s.slice(6,8)}`;
+      return s.slice(0, 10);
+    };
+    const todayYmd = (typeof localDateStr === 'function')
+      ? localDateStr(new Date()) : new Date().toISOString().slice(0,10);
+    const weekAgoYmd = new Date(Date.now() - 6*86400000).toISOString().slice(0,10);
+    let currentRange = 'today';
+
+    const matchesFilter = r => {
+      const ymd = toYmd(r.fillDate);
+      if (currentRange === 'all')   return true;
+      if (currentRange === 'today') return ymd === todayYmd;
+      if (currentRange === 'week')  return ymd >= weekAgoYmd && ymd <= todayYmd;
+      return ymd === currentRange;
+    };
+
+    const updateTotal = () => {
+      const checked = [...overlay.querySelectorAll('.pend-cb:checked')];
+      const sum = checked.reduce((s, cb) => s + (pending[parseInt(cb.dataset.idx)]?.copay || 0), 0);
+      totalEl.textContent = checked.length
+        ? `${checked.length} selected · ${fmt(sum)}`
+        : 'Prices fetched from WinRx when added';
+    };
+
+    const renderList = () => {
+      const visible = pending.filter(matchesFilter);
+      if (!visible.length) {
+        listEl.innerHTML = `<div style="text-align:center;padding:24px;color:var(--text-muted);font-size:13px;">
+          No prescriptions match this date filter.</div>`;
+        updateTotal();
+        return;
+      }
+      listEl.innerHTML = visible.map(r => {
+        const i = pending.indexOf(r);
+        return `
+          <label style="display:flex;align-items:center;gap:10px;padding:10px 20px;
+                        cursor:pointer;border-bottom:1px solid var(--border-faint,#333);">
+            <input type="checkbox" class="pend-cb" data-idx="${i}"
+                   style="flex-shrink:0;width:16px;height:16px;">
+            <div style="flex:1;min-width:0;">
+              <div style="font-size:13px;font-weight:600;white-space:nowrap;
+                           overflow:hidden;text-overflow:ellipsis;">Rx #${r.rxNumber}</div>
+              <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">
+                ${r.qty ? `Qty: ${r.qty}` : ''}
+                ${r.fillDate ? ` · Filled: ${fmtDate(r.fillDate)}` : ''}
+              </div>
+            </div>
+            <div style="font-size:13px;font-weight:600;color:var(--text-muted);white-space:nowrap;font-style:italic;">
+              ${r.copay > 0 ? fmt(r.copay) : 'price on add'}
+            </div>
+          </label>`;
+      }).join('');
+      listEl.querySelectorAll('.pend-cb').forEach(cb => cb.addEventListener('change', updateTotal));
+      overlay.querySelector('#pend-select-all').checked = false;
+      updateTotal();
+    };
+
+    overlay.querySelectorAll('.pend-filter').forEach(btn => {
+      btn.addEventListener('click', () => {
+        currentRange = btn.dataset.range;
+        overlay.querySelector('#pend-filter-date').value = '';
+        overlay.querySelectorAll('.pend-filter').forEach(b => { b.style.background='var(--surface2)'; b.style.color=''; });
+        btn.style.background = 'var(--primary)'; btn.style.color = '#fff';
+        renderList();
+      });
+    });
+    overlay.querySelector('#pend-filter-date').addEventListener('change', e => {
+      if (!e.target.value) return;
+      currentRange = e.target.value;
+      overlay.querySelectorAll('.pend-filter').forEach(b => { b.style.background='var(--surface2)'; b.style.color=''; });
+      renderList();
+    });
 
     overlay.querySelector('#pend-select-all').addEventListener('change', e => {
       overlay.querySelectorAll('.pend-cb').forEach(cb => { cb.checked = e.target.checked; });
+      updateTotal();
     });
+
+    renderList();  // initial render (defaults to Today)
 
     overlay.querySelector('#pend-add').addEventListener('click', async () => {
       const checked = [...overlay.querySelectorAll('.pend-cb:checked')];
@@ -2979,11 +4465,15 @@ class POSScreen {
       btn.disabled = true;
       btn.textContent = 'Loading prices…';
 
-      // Fetch real copay for each selected Rx via getRxTx (same as scanning a barcode)
+      // The popup already shows the authoritative copay (RECOPAY) for each Rx.
+      // Honor it directly; only call getRxTx for "price on add" rows whose
+      // displayed copay was 0/unknown (so we don't clobber good prices with a 0).
       const results = await Promise.allSettled(
-        checked.map(cb => {
+        checked.map(async cb => {
           const r = pending[parseInt(cb.dataset.idx)];
-          return PharmacyDashboardAPI.getRxTx(r.rxNumber, branchCode).then(rxData => ({ r, rxData }));
+          if (Number(r.copay) > 0) return { r, rxData: null };          // already known
+          const rxData = await PharmacyDashboardAPI.getRxTx(r.rxNumber, branchCode);
+          return { r, rxData };
         })
       );
 
@@ -2992,14 +4482,20 @@ class POSScreen {
         if (res.status !== 'fulfilled') return;
         const { r, rxData } = res.value;
         if (this._cart.some(c => String(c.rx_number) === r.rxNumber)) return;
-        const copay = rxData?.unit_price ?? r.copay ?? 0;
-        const desc  = rxData?.description || (r.qty ? `${r.drug} [Qty:${r.qty}]` : r.drug);
+        // Known copay wins; else use a real (>0) fetched price; else 0.
+        const fetched = Number(rxData?.unit_price);
+        const copay   = Number(r.copay) > 0
+          ? Number(r.copay)
+          : ((Number.isFinite(fetched) && fetched > 0) ? fetched : 0);
+        const drugName = rxData?.description || (r.qty ? `${r.drug} [Qty:${r.qty}]` : r.drug); // internal only
+        const desc = `Rx ${r.rxNumber}${r.qty ? ` [Qty:${r.qty}]` : ''}`;                      // patient-facing
         this._cart.push({
           item_type:      'RX',
           rx_number:      r.rxNumber,
           branch_code:    branchCode || null,
           din:            rxData?.din || r.din,
           description:    desc,
+          drug_name:      drugName,
           quantity:       1,
           unit_price:     copay,
           gst_applicable: false,

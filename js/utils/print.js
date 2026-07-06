@@ -65,11 +65,55 @@ const Print = (() => {
     return /^data:image\/(png|jpe?g|gif|webp);base64,/i.test(String(v||'')) ? v : '';
   }
 
-  /* Return the WinRx barcode value for the first Rx in items.
-     Format: RCPT{rxNumber}A  e.g. "RCPT60004A"              */
-  function getRxBarcodeValue(items) {
-    const rx = (items||[]).find(i => i.item_type === 'RX' && i.rx_number);
-    return rx ? ('RCPT' + rx.rx_number + 'A') : null;
+  /* ── Barcode helpers ──────────────────────────────────────────
+     WinRx uses TWO separate pieces of information:
+
+     BARS encode  → "RCPT{PHN}"  e.g. "RCPT9876543210"
+       Short machine-readable ID — what WinRx scans to match the patient.
+       Encoding the full label makes bars too wide and WinRx won't read it.
+
+     TEXT label   → "RCPT{PHN} - {GIVEN} {SURNAME} {DD-Mon-YYYY}"
+       Human-readable, printed above the bars for staff reference.
+  ─────────────────────────────────────────────────────────────── */
+  var MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+  /* What gets ENCODED in the barcode bars — RCPT + PHN only */
+  function getRxBarcodeEncoded(items, patient) {
+    if (patient && patient.phn) return 'RCPT' + String(patient.phn);
+    var rx = (items||[]).find(function(i){ return i.item_type === 'RX' && i.rx_number; });
+    return rx ? ('RCPT' + rx.rx_number) : null;
+  }
+
+  /* Human-readable TEXT LABEL shown above the bars */
+  function getRxBarcodeLabel(items, patient) {
+    if (patient && patient.phn) {
+      var phn  = String(patient.phn);
+      var giv  = String(patient.given_name || '').toUpperCase();
+      var sur  = String(patient.surname    || '').toUpperCase();
+      var name = [giv, sur].filter(Boolean).join(' ');
+      var dob  = '';
+      if (patient.dob) {
+        var dobStr = String(patient.dob).slice(0, 10);
+        var parts  = dobStr.split('-');
+        if (parts.length === 3) {
+          var yr = parseInt(parts[0]), mo = parseInt(parts[1]) - 1, dy = parseInt(parts[2]);
+          if (!isNaN(yr) && !isNaN(mo) && !isNaN(dy))
+            dob = ' ' + String(dy).padStart(2,'0') + '-' + MONTHS[mo] + '-' + yr;
+        }
+      }
+      return 'RCPT' + phn + (name ? ' - ' + name : '') + dob;
+    }
+    return getRxBarcodeEncoded(items, patient) || '';
+  }
+
+  /* Backward-compat alias used by filename generation */
+  function getRxBarcodeValue(items, patient) {
+    return getRxBarcodeLabel(items, patient);
+  }
+
+  /* Sanitised filename — uses full label so the PDF filename is meaningful */
+  function barcodeFilename(bcVal) {
+    return bcVal.replace(/[^a-zA-Z0-9_\-]/g, '_') + '.pdf';
   }
 
   /* ── Code 128B PNG (Canvas) ────────────────────────────────
@@ -79,7 +123,11 @@ const Print = (() => {
 
      mw   = module width in px (4 px ≈ 1 mm at 96 dpi)
      barH = bar height in px                                   */
-  function code128png(text, mw, barH) {
+  /* code128png(encodedText, mw, barH, displayText)
+     encodedText  — string that gets encoded into bars (keep short)
+     displayText  — human-readable label printed above bars (can be longer)
+                    defaults to encodedText if not supplied               */
+  function code128png(text, mw, barH, displayText) {
     mw   = mw   || 4;
     barH = barH || 100;
     try {
@@ -123,10 +171,10 @@ const Print = (() => {
       ctx.fillStyle = '#ffffff';
       ctx.fillRect(0, 0, totalW, totalH);
 
-      /* Text label ABOVE barcode, left-aligned (matches WinRx format) */
+      /* Text label ABOVE barcode — show displayText (full label) not just encoded value */
       ctx.fillStyle = '#000000';
       ctx.font = '14px Arial,Helvetica,sans-serif';
-      ctx.fillText(text, quiet * mw, 14);
+      ctx.fillText(displayText || text, quiet * mw, 14);
 
       /* Draw bars */
       ctx.fillStyle = '#000000';
@@ -154,8 +202,17 @@ const Print = (() => {
       'pharmacy_name','pharmacy_address','pharmacy_city','pharmacy_province',
       'pharmacy_postal','pharmacy_phone','pharmacy_website','pharmacy_gst_number',
       'receipt_header_msg','receipt_footer_msg',
+      // Receipt layout customisation
+      'receipt_paper_width','receipt_font','receipt_font_size','receipt_separator',
+      'receipt_title',
+      'receipt_show_logo','receipt_show_header_msg',
+      'receipt_show_patient_name','receipt_show_patient_phn',
+      'receipt_show_rx_number','receipt_show_din',
+      'receipt_show_tax_detail','receipt_show_staff','receipt_show_txn_id',
+      'receipt_show_footer_msg',
     ];
     var vals = await Promise.all(keys.map(function(k){ return Config.get(k); }));
+    var bool = function(v, def) { return v !== null && v !== undefined && v !== '' ? v === 'true' : def; };
     return {
       name:      vals[0] || 'Pharmacy POS',
       addrLine:  [vals[1],vals[2],vals[3],vals[4]].filter(Boolean).map(esc).join(', '),
@@ -165,20 +222,49 @@ const Print = (() => {
       headerMsg: vals[8] || '',
       footerMsg: vals[9] || '',
       logo:      safeImg(localStorage.getItem('pharmacy_logo_data') || ''),
+      brand:     (typeof window !== 'undefined' && window.BRAND_KIT) ? window.BRAND_KIT : { primary:'#1e4031' },
+      // Layout
+      paperWidth:      vals[10] || '80',
+      font:            vals[11] || 'courier',
+      fontSize:        parseInt(vals[12]) || 11,
+      separator:       vals[13] || 'dashed',
+      title:           vals[14] || 'RECEIPT',
+      showLogo:        bool(vals[15], true),
+      showHeaderMsg:   bool(vals[16], true),
+      showPatientName: bool(vals[17], true),
+      showPatientPhn:  bool(vals[18], false),
+      showRxNumber:    bool(vals[19], true),
+      showDin:         bool(vals[20], false),
+      showTaxDetail:   bool(vals[21], true),
+      showStaff:       bool(vals[22], true),
+      showTxnId:       bool(vals[23], true),
+      showFooterMsg:   bool(vals[24], true),
     };
+  }
+
+  /* Build the separator line based on pharmacy setting */
+  function buildSep(ph) {
+    var style = ph.separator || 'dashed';
+    if (style === 'stars')  return '<div style="text-align:center;letter-spacing:2px;margin:5px 0;font-size:9px;">* * * * * * * * * * * * * * * * *</div>';
+    if (style === 'equals') return '<div style="text-align:center;letter-spacing:2px;margin:5px 0;font-size:9px;">= = = = = = = = = = = = = = = = =</div>';
+    if (style === 'solid')  return '<hr class="rd" style="border-top:1px solid #000;"/>';
+    return '<hr class="rd"/>'; // dashed (default)
   }
 
   /* ── Shared HTML fragment builders ────────────────────────*/
 
-  function buildItemRows(items) {
+  // revealRx=true → show the real drug name (item.drug_name) on internal WinRx
+  // documents; default false → patient-facing privacy label (item.description).
+  function buildItemRows(items, revealRx) {
     var html = '';
     (items||[]).forEach(function(item) {
       var isRx  = item.item_type === 'RX';
       var isDsc = item.item_type === 'DISCOUNT';
       var badge = isRx ? '[Rx] ' : isDsc ? '[-] ' : '';
       var qty   = Number(item.quantity||1);
+      var label = (revealRx && item.drug_name) ? item.drug_name : item.description;
       html += '<div class="ri">' +
-        '<span class="rin">' + badge + esc(item.description) + (qty>1?' x'+qty:'') + '</span>' +
+        '<span class="rin">' + badge + esc(label) + (qty>1?' x'+qty:'') + '</span>' +
         '<span class="rip">' + Tax.fmt(Number(item.line_total||0)) + '</span>' +
         '</div>';
       if (isRx && item.rx_number) {
@@ -216,15 +302,20 @@ const Print = (() => {
 
   function buildRphBlock(rphInfo) {
     if (!rphInfo) return '';
-    var sig = safeImg(rphInfo.signatureDataUrl || '');
+    var sig  = safeImg(rphInfo.signatureDataUrl || '');
+    var chk  = function(v) { return v ? '☑' : '☐'; };
+    var counselling =
+      chk(rphInfo.counselledAllergies)   + ' Allergies reviewed &nbsp; ' +
+      chk(rphInfo.counselledSideEffects) + ' Side effects discussed &nbsp; ' +
+      chk(rphInfo.counselledNewRx)       + ' New Rx counselled';
     return '<hr class="rd"/>' +
       '<div style="font-size:10px;margin:4px 0 6px;">' +
-        '<div style="font-weight:bold;margin-bottom:' + (sig?'4px':'22px') + ';">' +
-          'Counselling &amp; Allergy Checked by (RPh):' +
-        '</div>' +
-        (sig ? '<img src="' + sig + '" style="height:38px;max-width:100%;display:block;"/>' : '') +
-        '<div style="border-top:1px solid #000;padding-top:2px;margin-top:' + (sig?'2px':'0') + ';">' +
-          (esc(rphInfo.name)||'&nbsp;') +
+        '<div style="font-weight:bold;margin-bottom:4px;">Counselling &amp; Allergy Check (RPh):</div>' +
+        '<div style="margin-bottom:6px;line-height:1.6;">' + counselling + '</div>' +
+        (sig ? '<img src="' + sig + '" style="height:36px;max-width:100%;display:block;margin-bottom:2px;"/>' : '<div style="height:22px;"></div>') +
+        '<div style="border-top:1px solid #000;padding-top:2px;">' +
+          esc(rphInfo.name || '') +
+          (rphInfo.license ? ' &nbsp;·&nbsp; Lic# ' + esc(rphInfo.license) : '') +
         '</div>' +
       '</div>';
   }
@@ -234,69 +325,130 @@ const Print = (() => {
      No barcode — clean counter receipt for the customer.
      ══════════════════════════════════════════════════════════*/
 
-  async function generateReceiptHTML(txn, items, payments, patient, rphInfo) {
+  async function generateReceiptHTML(txn, items, payments, patient, rphInfo, revealRx) {
     var ph   = await loadPharmacy();
     var date = new Date(txn.transaction_date).toLocaleString(navigator.language);
+    var sep  = buildSep(ph);
+    var title = (ph.title || 'RECEIPT').toUpperCase();
+
+    // Conditionally build item rows (respects showRxNumber / showDin)
+    var itemRows = '';
+    (items||[]).forEach(function(item) {
+      var isRx  = item.item_type === 'RX';
+      var isDsc = item.item_type === 'DISCOUNT';
+      var badge = isRx ? '[Rx] ' : isDsc ? '[-] ' : '';
+      var qty   = Number(item.quantity||1);
+      var label = (revealRx && item.drug_name) ? item.drug_name : item.description;
+      itemRows += '<div class="ri">' +
+        '<span class="rin">' + badge + esc(label) + (qty>1?' x'+qty:'') + '</span>' +
+        '<span class="rip">' + Tax.fmt(Number(item.line_total||0)) + '</span>' +
+        '</div>';
+      if (ph.showRxNumber && isRx && item.rx_number) {
+        itemRows += '<div class="rrx">Rx# ' + esc(item.rx_number) +
+          (item.branch_code ? '-'+esc(item.branch_code) : '') + '</div>';
+      }
+      if (ph.showDin && item.din) {
+        itemRows += '<div class="rrx">DIN: ' + esc(item.din) + '</div>';
+      }
+    });
+
+    // Conditionally build totals (respects showTaxDetail)
+    var gstPct  = (Tax.gstRate()*100).toFixed(1).replace(/\.0$/,'');
+    var pstPct  = (Tax.pstRate()*100).toFixed(1).replace(/\.0$/,'');
+    var paid    = (payments||[]).reduce(function(s,p){ return s+Number(p.amount||0); }, 0);
+    var hasCash = (payments||[]).some(function(p){ return String(p.method||'').toUpperCase()==='CASH'; });
+    var change  = Tax.round2(paid - Number(txn.total_amount||0));
+    var totalsHtml =
+      '<div class="rtl"><span>Subtotal</span><span>' + Tax.fmt(Number(txn.subtotal||0)) + '</span></div>' +
+      (ph.showTaxDetail && Number(txn.gst_amount||0)>0 ? '<div class="rtl"><span>GST (' + gstPct + '%)</span><span>' + Tax.fmt(Number(txn.gst_amount||0)) + '</span></div>' : '') +
+      (ph.showTaxDetail && Number(txn.pst_amount||0)>0 ? '<div class="rtl"><span>PST (' + pstPct + '%)</span><span>' + Tax.fmt(Number(txn.pst_amount||0)) + '</span></div>' : '') +
+      '<div class="rtl grand"><span>TOTAL</span><span>' + Tax.fmt(Number(txn.total_amount||0)) + '</span></div>' +
+      sep +
+      buildPaymentRows(payments) +
+      (hasCash && change > 0 ? '<div class="rtl"><span>Change</span><span>' + Tax.fmt(change) + '</span></div>' : '') +
+      (Number(txn.balance_owing||0) > 0 ? '<div class="rtl" style="color:red;"><span>BALANCE OWING</span><span>' + Tax.fmt(Number(txn.balance_owing||0)) + '</span></div>' : '');
+
     return (
       '<div class="receipt">' +
         '<div class="rh">' +
-          (ph.logo ? '<div><img src="' + ph.logo + '" style="max-width:100%;max-height:40px;height:auto;display:block;margin:0 auto 4px;" onerror="this.parentNode.style.display=\'none\'"/></div>' : '') +
-          '<div class="rpn">' + esc(ph.name).toUpperCase() + '</div>' +
+          (ph.showLogo && ph.logo ? '<div><img src="' + ph.logo + '" style="max-width:100%;max-height:40px;height:auto;display:block;margin:0 auto 4px;" onerror="this.parentNode.style.display=\'none\'"/></div>' : '') +
+          '<div class="rpn" style="color:' + ph.brand.primary + ';">' + esc(ph.name).toUpperCase() + '</div>' +
           (ph.addrLine  ? '<div>' + ph.addrLine + '</div>' : '') +
           (ph.phone     ? '<div>Tel: ' + esc(ph.phone) + '</div>' : '') +
           (ph.website   ? '<div>' + esc(ph.website) + '</div>' : '') +
           (ph.gstNum    ? '<div>GST#: ' + esc(ph.gstNum) + '</div>' : '') +
-          (ph.headerMsg ? '<div>' + esc(ph.headerMsg) + '</div>' : '') +
+          (ph.showHeaderMsg && ph.headerMsg ? '<div>' + esc(ph.headerMsg) + '</div>' : '') +
         '</div>' +
-        '<hr class="rd"/>' +
-        '<div style="font-size:11px;margin-bottom:6px;">' +
-          (patient ? '<div>' + esc(patient.given_name) + ' ' + esc(patient.surname) + '</div>' : '') +
+        sep +
+        '<div class="rtitle">' + esc(title) + '</div>' +
+        sep +
+        '<div style="font-size:' + (ph.fontSize-1) + 'px;margin-bottom:6px;">' +
+          (ph.showPatientName && patient ? '<div>' + esc(patient.given_name) + ' ' + esc(patient.surname) + '</div>' : '') +
+          (ph.showPatientPhn  && patient && patient.phn ? '<div>PHN: ' + esc(patient.phn) + '</div>' : '') +
           '<div>Date: ' + esc(date) + '</div>' +
-          '<div>Txn #' + esc(txn.transaction_id) + (txn.staff_pin ? ' &nbsp; Staff: ' + esc(txn.staff_pin) : '') + '</div>' +
+          (ph.showTxnId  ? '<div>Txn #' + esc(txn.transaction_id) + '</div>' : '') +
+          (ph.showStaff && txn.staff_pin ? '<div>Staff: ' + esc(txn.staff_pin) + '</div>' : '') +
         '</div>' +
-        '<hr class="rd"/>' +
-        buildItemRows(items) +
-        '<hr class="rd"/>' +
-        '<div class="rt">' + buildTotals(txn, payments) + '</div>' +
+        sep +
+        itemRows +
+        sep +
+        '<div class="rt">' + totalsHtml + '</div>' +
         buildRphBlock(rphInfo) +
-        '<hr class="rd"/>' +
+        sep +
         '<div class="rf">' +
-          (ph.footerMsg ? '<div>' + esc(ph.footerMsg) + '</div>' : '<div>Thank you for choosing ' + esc(ph.name) + '!</div>') +
+          (ph.showFooterMsg
+            ? (ph.footerMsg ? '<div>' + esc(ph.footerMsg) + '</div>' : '<div>Thank you for choosing ' + esc(ph.name) + '!</div>')
+            : '') +
         '</div>' +
       '</div>'
     );
   }
 
-  function wrapThermal(body) {
+  function wrapThermal(body, ph) {
+    // ph is optional — if not provided use sensible defaults (backward compat)
+    var paperMm  = parseInt((ph && ph.paperWidth) || '80') || 80;
+    // Thermal printers can't print the full paper width — there's an unprintable
+    // edge. Lay content out to the PRINTABLE width so silent printing doesn't clip
+    // the right side. (80mm paper ≈ 72mm printable, 58mm ≈ 48mm, etc.)
+    var printableMm = paperMm >= 80 ? 72 : paperMm >= 72 ? 64 : 48;
+    var paperPx  = Math.round(printableMm * 3.78);   // 96 dpi ≈ 3.78 px/mm
+    var innerPx  = paperPx - 12;                      // 6px padding each side
+    var fontMap  = { courier:'"Courier New",Courier,monospace', arial:'Arial,Helvetica,sans-serif', system:'system-ui,sans-serif' };
+    var fontFam  = fontMap[(ph && ph.font) || 'courier'] || fontMap.courier;
+    var fontSize = (ph && ph.fontSize) || 11;
+
     return '<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">' +
-      '<meta name="viewport" content="width=302,initial-scale=1.0,maximum-scale=1.0">' +
+      '<meta name="viewport" content="width=' + paperPx + ',initial-scale=1.0,maximum-scale=1.0">' +
       '<style>' +
-      '@page{size:80mm auto;margin:0;}' +
-      '*{box-sizing:border-box;}html{width:302px;}' +
-      'body{margin:0;padding:6px 8px;background:#fff;width:302px;overflow:hidden;}' +
-      '.receipt{font-family:"Courier New",Courier,monospace;font-size:11px;width:286px;color:#000;word-wrap:break-word;overflow-wrap:break-word;}' +
-      '.rh{text-align:center;margin-bottom:8px;}.rh div{font-size:10px;}.rpn{font-size:13px;font-weight:bold;letter-spacing:1px;}' +
+      '@page{size:' + printableMm + 'mm auto;margin:0;}' +
+      '*{box-sizing:border-box;}html{width:' + paperPx + 'px;}' +
+      'body{margin:0;padding:6px;background:#fff;width:' + paperPx + 'px;overflow:hidden;}' +
+      '.receipt{font-family:' + fontFam + ';font-size:' + fontSize + 'px;width:' + innerPx + 'px;color:#000;word-wrap:break-word;overflow-wrap:break-word;}' +
+      '.rh{text-align:center;margin-bottom:8px;}.rh div{font-size:' + (fontSize-1) + 'px;}.rpn{font-size:' + (fontSize+2) + 'px;font-weight:bold;letter-spacing:1px;}' +
+      '.rtitle{text-align:center;font-size:' + (fontSize+1) + 'px;font-weight:bold;letter-spacing:2px;margin:4px 0;}' +
       '.rd{border:none;border-top:1px dashed #000;margin:6px 0;}' +
       '.ri{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:3px;gap:4px;}' +
       '.rin{flex:1;white-space:normal;word-break:break-word;overflow-wrap:break-word;line-height:1.3;min-width:0;}' +
       '.rip{white-space:nowrap;flex-shrink:0;padding-left:4px;}' +
-      '.rrx{font-size:10px;color:#555;margin:-2px 0 3px 6px;}' +
+      '.rrx{font-size:' + (fontSize-1) + 'px;color:#555;margin:-2px 0 3px 6px;}' +
       '.rt{margin-top:4px;}.rtl{display:flex;justify-content:space-between;margin-bottom:2px;}' +
-      '.rtl.grand{font-weight:bold;font-size:12px;margin-top:3px;}' +
-      '.rf{text-align:center;margin-top:8px;font-size:10px;line-height:1.4;}' +
+      '.rtl.grand{font-weight:bold;font-size:' + (fontSize+1) + 'px;margin-top:3px;}' +
+      '.rf{text-align:center;margin-top:8px;font-size:' + (fontSize-1) + 'px;line-height:1.4;}' +
       '</style></head><body>' + body + '</body></html>';
   }
 
   /* Print thermal receipt at the counter */
   async function printReceipt(txn, items, payments, patient) {
+    var ph      = await loadPharmacy();
     var html    = await generateReceiptHTML(txn, items, payments, patient, null);
-    var fullDoc = wrapThermal(html);
+    var fullDoc = wrapThermal(html, ph);
 
     if (window.electronAPI && window.electronAPI.printReceiptHtml) {
       var printerName = await Config.get('receipt_printer');
       if (printerName) {
         try {
-          var result = await window.electronAPI.printReceiptHtml(fullDoc, printerName);
+          var paperMm = parseInt((ph && ph.paperWidth) || '80') || 80;
+          var result = await window.electronAPI.printReceiptHtml(fullDoc, printerName, paperMm);
           if (result && result.ok) return;
           console.warn('Silent print failed:', result && result.reason, '— falling back to dialog');
         } catch (e) {
@@ -323,13 +475,14 @@ const Print = (() => {
     }, 300);
   }
 
-  /* Generate 80 mm receipt as base64 PDF — for SQL INSERT into WinRx */
+  /* Generate receipt as base64 PDF — for SQL INSERT into WinRx */
   async function generateReceiptBase64(txn, items, payments, patient, rphInfo) {
     try {
-      var html    = await generateReceiptHTML(txn, items, payments, patient, rphInfo || null);
-      var fullDoc = wrapThermal(html);
-      var bcVal   = getRxBarcodeValue(items);
-      var fname   = bcVal ? (bcVal + '.pdf') : ('TXN' + txn.transaction_id + '.pdf');
+      var ph      = await loadPharmacy();
+      var html    = await generateReceiptHTML(txn, items, payments, patient, rphInfo || null, true); // WinRx doc → real drug name
+      var fullDoc = wrapThermal(html, ph);
+      var bcVal   = getRxBarcodeValue(items, patient);
+      var fname   = bcVal ? barcodeFilename(bcVal) : ('TXN' + txn.transaction_id + '.pdf');
 
       if (window.electronAPI && window.electronAPI.generateReceiptPdf) {
         var b64 = await window.electronAPI.generateReceiptPdf(fullDoc);
@@ -352,9 +505,10 @@ const Print = (() => {
   async function buildFolderDocHTML(txn, items, payments, patient, rphInfo) {
     var ph    = await loadPharmacy();
     var date  = new Date(txn.transaction_date).toLocaleString(navigator.language);
-    var bcVal = getRxBarcodeValue(items);
-    var bcImg = bcVal ? code128png(bcVal, 4, 100) : null;
-    var bc    = bcImg ? '<img src="' + bcImg + '" style="display:block;max-width:100%;height:auto;" />' : '';
+    var bcEncoded = getRxBarcodeEncoded(items, patient);   // short — goes into bars
+    var bcLabel   = getRxBarcodeLabel(items, patient);     // full  — shown as text label
+    var bcImg     = bcEncoded ? code128png(bcEncoded, 4, 100, bcLabel) : null;
+    var bc = bcImg ? '<img src="' + bcImg + '" style="display:block;max-width:100%;height:auto;" />' : '';
 
     return (
       '<div style="font-family:Arial,Helvetica,sans-serif;font-size:11pt;color:#000;">' +
@@ -362,7 +516,7 @@ const Print = (() => {
         /* Pharmacy header */
         '<div style="text-align:center;margin-bottom:12px;">' +
           (ph.logo ? '<img src="' + ph.logo + '" style="max-height:55px;margin-bottom:6px;" onerror="this.style.display=\'none\'"/><br/>' : '') +
-          '<div style="font-size:14pt;font-weight:bold;letter-spacing:1px;">' + esc(ph.name).toUpperCase() + '</div>' +
+          '<div style="font-size:14pt;font-weight:bold;letter-spacing:1px;color:' + ph.brand.primary + ';">' + esc(ph.name).toUpperCase() + '</div>' +
           (ph.addrLine ? '<div style="font-size:9pt;margin-top:2px;">' + ph.addrLine + '</div>' : '') +
           (ph.phone    ? '<div style="font-size:9pt;">Tel: ' + esc(ph.phone) + '</div>' : '') +
           (ph.gstNum   ? '<div style="font-size:9pt;">GST#: ' + esc(ph.gstNum) + '</div>' : '') +
@@ -370,9 +524,9 @@ const Print = (() => {
 
         /* Document title */
         '<div style="text-align:center;font-size:13pt;font-weight:bold;letter-spacing:.5px;' +
-             'margin:8px 0 10px;text-transform:uppercase;">Pick Up Confirmation</div>' +
+             'margin:8px 0 10px;text-transform:uppercase;color:' + ph.brand.primary + ';">Pick Up Confirmation</div>' +
 
-        '<hr style="border:1px solid #000;margin:8px 0;"/>' +
+        '<hr style="border:none;border-top:2px solid ' + ph.brand.primary + ';margin:8px 0;"/>' +
 
         /* Barcode — Canvas PNG raster so PDF/barcode scanners can read it */
         (bc ?
@@ -399,8 +553,8 @@ const Print = (() => {
 
         '<hr style="border-top:1px dashed #000;margin:6px 0;"/>' +
 
-        /* Items */
-        '<div class="ri-wrap">' + buildItemRows(items) + '</div>' +
+        /* Items (WinRx folder doc → real drug name) */
+        '<div class="ri-wrap">' + buildItemRows(items, true) + '</div>' +
 
         '<hr style="border-top:1px dashed #000;margin:6px 0;"/>' +
 
@@ -412,7 +566,9 @@ const Print = (() => {
 
         '<hr style="border:1px solid #000;margin:12px 0 8px;"/>' +
         '<div style="text-align:center;font-size:9pt;color:#444;">' +
-          (ph.footerMsg ? esc(ph.footerMsg) : 'No returns accepted as per CPBC ByLaws') +
+          (ph.showFooterMsg
+            ? (ph.footerMsg ? esc(ph.footerMsg) : 'Thank you for choosing ' + esc(ph.name))
+            : '') +
         '</div>' +
       '</div>'
     );
@@ -443,8 +599,8 @@ const Print = (() => {
     try {
       var html    = await buildFolderDocHTML(txn, items, payments, patient, rphInfo || null);
       var fullDoc = wrapA5(html);
-      var bcVal   = getRxBarcodeValue(items);
-      var fname   = bcVal ? (bcVal + '.pdf') : ('TXN' + txn.transaction_id + '.pdf');
+      var bcVal   = getRxBarcodeValue(items, patient);
+      var fname   = bcVal ? barcodeFilename(bcVal) : ('TXN' + txn.transaction_id + '.pdf');
 
       /* Use the dedicated A5 IPC handler — NOT generate-receipt-pdf which is hardcoded to 80mm */
       if (window.electronAPI && window.electronAPI.generateA5Pdf) {
@@ -467,6 +623,7 @@ const Print = (() => {
     generateReceiptBase64,
     generateFolderDocBase64,
     getRxBarcodeValue,
+    code128png,   // exposed for shelf-tags.js
   };
 
 })();

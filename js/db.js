@@ -21,7 +21,7 @@ const DB = (() => {
     });
   }
 
-  async function _loadFromIDB() {
+  async function _readRawFromIDB() {
     try {
       const idb  = await _openIDB();
       const tx   = idb.transaction(DB_IDB_STORE, 'readonly');
@@ -34,18 +34,64 @@ const DB = (() => {
     } catch { return null; }
   }
 
+  // Returns the DB bytes ready for sql.js. Decrypts if the stored blob is
+  // encrypted; if it's a legacy plaintext SQLite file it is returned as-is
+  // (it will be re-saved encrypted on the next _persist — automatic migration).
+  async function _loadFromIDB() {
+    const raw = await _readRawFromIDB();
+    if (!raw) return null;
+    const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+    if (!Config.isEncryptedBlob(bytes)) {
+      // Legacy plaintext DB — load directly; next save will encrypt it.
+      return bytes;
+    }
+    // Try the stable dedicated DB key first.
+    try {
+      return await Config.decryptBytes(bytes);
+    } catch (_) { /* fall through to recovery */ }
+
+    // Recovery: earlier builds encrypted the DB under the *config* key, which
+    // could be derived from any of these passphrases depending on login flow.
+    // (Notably a login path called Config.unlock(null) → passphrase "null".)
+    const candidates = ['null', 'pharmacy-pos-config-v1', 'default_pos_2024'];
+    for (const pass of candidates) {
+      try {
+        const key = await Config.deriveKeyFromPassphrase(pass);
+        const plain = await Config.decryptBytesWith(key, bytes);
+        console.warn(`DB recovered using legacy key ("${pass}"); will re-save under the stable key.`);
+        return plain;  // end-of-init _persist() re-encrypts under the stable DB key
+      } catch (_) { /* try next */ }
+    }
+    // Last resort: the currently-unlocked config key, if any.
+    try {
+      if (Config.isUnlocked()) {
+        const k = await Config.deriveKeyFromPassphrase('pharmacy-pos-config-v1');
+        return await Config.decryptBytesWith(k, bytes);
+      }
+    } catch (_) {}
+
+    console.error('DB decrypt failed with all known keys.');
+    throw new Error('Could not decrypt the database (wrong key/passphrase).');
+  }
+
   async function _saveToIDB(data) {
     try {
+      // Encrypt at rest when the config key is available (it always is after
+      // app startup unlock). Fall back to plaintext only if not yet unlocked.
+      let toStore = data;
+      if (Config.isUnlocked()) {
+        toStore = await Config.encryptBytes(data);
+      }
       const idb   = await _openIDB();
       const tx    = idb.transaction(DB_IDB_STORE, 'readwrite');
       const store = tx.objectStore(DB_IDB_STORE);
-      store.put(data, DB_IDB_KEY);
+      store.put(toStore, DB_IDB_KEY);
     } catch(e) { console.error('IDB save error', e); }
   }
 
   function _persist() {
     const data = _db.export();
-    _saveToIDB(data);
+    _saveToIDB(data); // fire-and-forget (async encrypt + write)
   }
 
   /* ---- Schema ---- */
@@ -202,11 +248,94 @@ const DB = (() => {
       "ALTER TABLE products ADD COLUMN notes         TEXT",
       "ALTER TABLE products ADD COLUMN price_override REAL",
       "ALTER TABLE products ADD COLUMN mckesson_ordered_at DATETIME",
-      "ALTER TABLE custom_products ADD COLUMN qty_on_hand  REAL",
+      "ALTER TABLE custom_products ADD COLUMN qty_on_hand   REAL",
       "ALTER TABLE custom_products ADD COLUMN qty_threshold REAL",
       "ALTER TABLE custom_products ADD COLUMN location      TEXT",
       "ALTER TABLE custom_products ADD COLUMN notes         TEXT",
+      // Phase 2 additions
+      "ALTER TABLE staff ADD COLUMN license_number TEXT",
+      "ALTER TABLE transactions ADD COLUMN rph_signoff TEXT",
+      // Phase 3 additions — Schedule flags + BTC log
+      "ALTER TABLE products ADD COLUMN schedule_flag TEXT",
+      "ALTER TABLE custom_products ADD COLUMN schedule_flag TEXT",
+      // Staff designation/title (for name badges; independent of role)
+      "ALTER TABLE staff ADD COLUMN designation TEXT",
+      // Sign-off personalization: stored signature (PNG data-URL), sign-off mode
+      // ('tick' | 'pin'), and per-staff checklist default-checks (JSON map of item id → true)
+      "ALTER TABLE staff ADD COLUMN signature TEXT",
+      "ALTER TABLE staff ADD COLUMN signoff_mode TEXT",
+      "ALTER TABLE staff ADD COLUMN checklist_defaults TEXT",
+      // Real drug name kept internally (BTC log + WinRx pickup doc); `description`
+      // holds the patient-facing privacy label ("Rx #...") for Rx items.
+      "ALTER TABLE transaction_items ADD COLUMN drug_name TEXT",
+      // Unique human-friendly AR account number per patient (e.g. AR-0001)
+      "ALTER TABLE patients ADD COLUMN ar_account_no TEXT",
     ].forEach(sql => { try { _db.run(sql); } catch(_) {} });
+
+    // BTC / Schedule II dispensing log
+    _db.run(`CREATE TABLE IF NOT EXISTS btc_log (
+      log_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      log_type        TEXT NOT NULL DEFAULT 'sale',  -- 'sale' or 'received'
+      sale_date       DATETIME NOT NULL,
+      drug_name       TEXT NOT NULL,
+      din             TEXT,
+      quantity        INTEGER DEFAULT 1,
+      price           REAL,
+      pharmacist_name TEXT,
+      counselled      INTEGER DEFAULT 1,
+      patient_name    TEXT,
+      patient_phone   TEXT,
+      transaction_id  INTEGER,
+      schedule_flag   TEXT DEFAULT 'btc',
+      supplier        TEXT,                          -- for 'received' entries
+      lot_number      TEXT,                          -- for 'received' entries
+      notes           TEXT,
+      created_at      DATETIME DEFAULT (datetime('now'))
+    )`);
+    // Add columns to existing installs
+    [
+      "ALTER TABLE btc_log ADD COLUMN log_type TEXT DEFAULT 'sale'",
+      "ALTER TABLE btc_log ADD COLUMN supplier TEXT",
+      "ALTER TABLE btc_log ADD COLUMN lot_number TEXT",
+      "ALTER TABLE btc_log ADD COLUMN notes TEXT",
+    ].forEach(sql => { try { _db.run(sql); } catch(_) {} });
+
+    // Shift checklists (Start-of-Day / End-of-Day sign-offs)
+    _db.run(`CREATE TABLE IF NOT EXISTS shift_checklists (
+      checklist_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+      kind           TEXT NOT NULL,                 -- 'open' or 'close'
+      checklist_date DATETIME NOT NULL,
+      shift_id       INTEGER,
+      completed_by   TEXT,
+      rph_name       TEXT,
+      rph_license    TEXT,
+      data           TEXT,                          -- JSON: checked items, temps, metrics, notes
+      pdf_path       TEXT,
+      created_at     DATETIME DEFAULT (datetime('now'))
+    )`);
+
+    // Accounts Receivable entries — patient-side credits that didn't come through
+    // the POS till (online / payment link / e-transfer / cheque), plus typed
+    // adjustments. "Paid" for AR = POS payments + these entries.
+    //   entry_type: 'payment' | 'write_off' | 'correction' | 'credit'
+    //   amount: positive reduces what the patient owes; a negative entry reverses a prior one.
+    _db.run(`CREATE TABLE IF NOT EXISTS ar_entries (
+      ar_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+      patient_id   INTEGER REFERENCES patients(patient_id),
+      entry_date   DATETIME NOT NULL,
+      amount       REAL NOT NULL,
+      entry_type   TEXT NOT NULL DEFAULT 'payment',
+      method       TEXT,                          -- online / payment_link / etransfer / cheque / cash / other
+      reference    TEXT,                          -- external confirmation/ref (for de-dup)
+      rx_number    TEXT,                          -- optional: targeted fill
+      branch_code  TEXT,
+      reason       TEXT,                          -- required for write_off (bad-debt reason)
+      note         TEXT,
+      staff_name   TEXT,
+      created_at   DATETIME DEFAULT (datetime('now'))
+    )`);
+    _db.run(`CREATE INDEX IF NOT EXISTS idx_ar_patient ON ar_entries(patient_id)`);
+
     _persist();
     return _db;
   }
@@ -245,13 +374,24 @@ const DB = (() => {
   function getAllStaff() {
     return all('SELECT * FROM staff ORDER BY name');
   }
+  function getStaff(staffId) {
+    return get('SELECT * FROM staff WHERE staff_id=?', [staffId]);
+  }
   function createStaff(name, hashedPin, role) {
     run('INSERT INTO staff(name,pin,role) VALUES(?,?,?)', [name, hashedPin, role]);
     return lastInsertId();
   }
   function updateStaff(staffId, fields) {
-    run(`UPDATE staff SET name=?,role=?,emp_id=?,email=?,phone=? WHERE staff_id=?`,
-      [fields.name, fields.role, fields.emp_id||null, fields.email||null, fields.phone||null, staffId]);
+    // Build a dynamic UPDATE so optional columns (designation, license_number) are included when present
+    const cols = ['name=?','role=?','emp_id=?','email=?','phone=?'];
+    const vals = [fields.name, fields.role, fields.emp_id||null, fields.email||null, fields.phone||null];
+    if (fields.designation !== undefined)    { cols.push('designation=?');    vals.push(fields.designation||null); }
+    if (fields.license_number !== undefined) { cols.push('license_number=?'); vals.push(fields.license_number||null); }
+    if (fields.signature !== undefined)          { cols.push('signature=?');          vals.push(fields.signature||null); }
+    if (fields.signoff_mode !== undefined)       { cols.push('signoff_mode=?');       vals.push(fields.signoff_mode||null); }
+    if (fields.checklist_defaults !== undefined) { cols.push('checklist_defaults=?'); vals.push(fields.checklist_defaults||null); }
+    vals.push(staffId);
+    run(`UPDATE staff SET ${cols.join(',')} WHERE staff_id=?`, vals);
   }
   function updateStaffPin(staffId, hashedPin) {
     run('UPDATE staff SET pin=? WHERE staff_id=?', [hashedPin, staffId]);
@@ -328,13 +468,93 @@ const DB = (() => {
   function reverseTransaction(txnId) {
     run("UPDATE transactions SET status='REVERSED' WHERE transaction_id=?", [txnId]);
   }
+  function saveRphSignoff(txnId, rphInfo) {
+    run("UPDATE transactions SET rph_signoff=? WHERE transaction_id=?",
+      [JSON.stringify(rphInfo), txnId]);
+  }
+
+  /* ---- BTC / Controlled Substance Log ---- */
+  function addBtcLog(entry) {
+    run(`INSERT INTO btc_log(sale_date,drug_name,din,quantity,price,pharmacist_name,
+         counselled,patient_name,patient_phone,transaction_id,schedule_flag)
+         VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+      [entry.sale_date||localISOStr(), entry.drug_name, entry.din||null,
+       entry.quantity||1, entry.price||null, entry.pharmacist_name||null,
+       entry.counselled?1:0, entry.patient_name||null, entry.patient_phone||null,
+       entry.transaction_id||null, entry.schedule_flag||'btc']);
+    return lastInsertId();
+  }
+  function getBtcLog(fromDate, toDate) {
+    return all(`SELECT * FROM btc_log
+      WHERE date(sale_date) BETWEEN date(?) AND date(?)
+      ORDER BY sale_date ASC`, [fromDate, toDate]);
+  }
+  function getBtcLogAll() {
+    return all('SELECT * FROM btc_log ORDER BY sale_date ASC');
+  }
+  /* ---- Shift checklists (SOD / EOD) ---- */
+  function addShiftChecklist(c) {
+    run(`INSERT INTO shift_checklists(kind,checklist_date,shift_id,completed_by,rph_name,rph_license,data,pdf_path)
+         VALUES(?,?,?,?,?,?,?,?)`,
+      [c.kind, c.checklist_date||localISOStr(), c.shift_id||null, c.completed_by||null,
+       c.rph_name||null, c.rph_license||null, JSON.stringify(c.data||{}), c.pdf_path||null]);
+    return lastInsertId();
+  }
+  function getShiftChecklists(fromDate, toDate) {
+    return all(`SELECT * FROM shift_checklists
+      WHERE date(checklist_date) BETWEEN date(?) AND date(?)
+      ORDER BY checklist_date DESC`, [fromDate, toDate]);
+  }
+
+  function addBtcReceived(entry) {
+    run(`INSERT INTO btc_log(log_type,sale_date,drug_name,din,quantity,pharmacist_name,
+         supplier,lot_number,notes,schedule_flag)
+         VALUES('received',?,?,?,?,?,?,?,?,?)`,
+      [entry.received_date||localISOStr(), entry.drug_name, entry.din||null,
+       entry.quantity, entry.received_by||null,
+       entry.supplier||null, entry.lot_number||null,
+       entry.notes||null, entry.schedule_flag||'btc']);
+    return lastInsertId();
+  }
+
+  /* ---- Partial Refund ---- */
+  function createRefundTransaction(originalTxnId, items, staffName) {
+    const orig = getTransaction(originalTxnId);
+    if (!orig) return null;
+    const now      = localISOStr();
+    const subtotal = -Math.abs(items.reduce((s,i)=>s+(i.line_total||0),0));
+    const txnId    = createTransaction({
+      patient_id:       orig.patient_id,
+      transaction_date: now,
+      transaction_type: 'REFUND',
+      status:           'PAID',
+      subtotal,
+      gst_amount:       0,
+      pst_amount:       0,
+      total_amount:     subtotal,
+      amount_paid:      subtotal,
+      balance_owing:    0,
+      staff_pin:        staffName||null,
+      notes:            `Refund for Txn #${originalTxnId}`,
+    });
+    items.forEach(item => {
+      addTransactionItem({
+        ...item,
+        transaction_id: txnId,
+        quantity:       -(Math.abs(item.quantity||1)),
+        unit_price:     -Math.abs(item.unit_price||0),
+        line_total:     -Math.abs(item.line_total||0),
+      });
+    });
+    return txnId;
+  }
 
   /* ---- Transaction Items ---- */
   function addTransactionItem(i) {
-    run(`INSERT INTO transaction_items(transaction_id,item_type,rx_number,branch_code,din,upc,description,quantity,unit_price,gst_applicable,pst_applicable,line_total)
-         VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+    run(`INSERT INTO transaction_items(transaction_id,item_type,rx_number,branch_code,din,upc,description,drug_name,quantity,unit_price,gst_applicable,pst_applicable,line_total)
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [i.transaction_id,i.item_type,i.rx_number||null,i.branch_code||null,
-       i.din||null,i.upc||null,i.description,i.quantity||1,
+       i.din||null,i.upc||null,i.description,i.drug_name||null,i.quantity||1,
        i.unit_price,i.gst_applicable?1:0,i.pst_applicable?1:0,i.line_total]);
     return lastInsertId();
   }
@@ -378,13 +598,18 @@ const DB = (() => {
     if (p.upc) {
       const existing = findCustomProductByBarcode(p.upc);
       if (existing) {
-        run('UPDATE custom_products SET description=?,price=?,gst_applicable=?,pst_applicable=? WHERE upc=?',
-          [p.description,p.price,p.gst_applicable?1:0,p.pst_applicable?1:0,p.upc]);
+        run(`UPDATE custom_products SET description=?,price=?,gst_applicable=?,pst_applicable=?,
+             schedule_flag=? WHERE upc=?`,
+          [p.description, p.price, p.gst_applicable?1:0, p.pst_applicable?1:0,
+           p.schedule_flag||null, p.upc]);
         return existing.custom_product_id;
       }
     }
-    run('INSERT INTO custom_products(description,upc,price,gst_applicable,pst_applicable,created_by) VALUES(?,?,?,?,?,?)',
-      [p.description,p.upc||null,p.price,p.gst_applicable?1:0,p.pst_applicable?1:0,p.created_by||null]);
+    run(`INSERT INTO custom_products
+         (description,upc,price,gst_applicable,pst_applicable,created_by,schedule_flag)
+         VALUES(?,?,?,?,?,?,?)`,
+      [p.description, p.upc||null, p.price, p.gst_applicable?1:0, p.pst_applicable?1:0,
+       p.created_by||null, p.schedule_flag||null]);
     return lastInsertId();
   }
   function getAllCustomProducts() {
@@ -492,16 +717,18 @@ const DB = (() => {
   }
   function updateCustomProduct(id, p) {
     run(`UPDATE custom_products SET description=?,upc=?,price=?,gst_applicable=?,pst_applicable=?,
-         qty_on_hand=?,qty_threshold=?,location=?,notes=? WHERE custom_product_id=?`,
+         qty_on_hand=?,qty_threshold=?,location=?,notes=?,schedule_flag=? WHERE custom_product_id=?`,
       [p.description, p.upc||null, p.price, p.gst_applicable?1:0, p.pst_applicable?1:0,
-       p.qty_on_hand??null, p.qty_threshold??null, p.location||null, p.notes||null, id]);
+       p.qty_on_hand??null, p.qty_threshold??null, p.location||null, p.notes||null,
+       p.schedule_flag??null, id]);
   }
 
   function updateCatalogProduct(id, p) {
     const sets = ['price_override=?','gst_applicable=?','pst_applicable=?',
-                  'qty_on_hand=?','qty_threshold=?','location=?','notes=?'];
+                  'qty_on_hand=?','qty_threshold=?','location=?','notes=?','schedule_flag=?'];
     const vals = [p.price_override??null, p.gst_applicable?1:0, p.pst_applicable?1:0,
-                  p.qty_on_hand??null, p.qty_threshold??null, p.location||null, p.notes||null];
+                  p.qty_on_hand??null, p.qty_threshold??null, p.location||null, p.notes||null,
+                  p.schedule_flag??null];
     if (p.description !== undefined) { sets.push('description=?'); vals.push(p.description||null); }
     if (p.upc_unit    !== undefined) { sets.push('upc_unit=?');    vals.push(p.upc_unit||null); }
     vals.push(id);
@@ -545,6 +772,29 @@ const DB = (() => {
       COUNT(CASE WHEN status='REVERSED' THEN 1 END) as voided_count
       FROM transactions WHERE date(transaction_date) BETWEEN date(?) AND date(?)`,
       [fromDate, toDate]);
+  }
+
+  // Inventory value on hand. No acquisition-cost column exists, so this is a
+  // RETAIL valuation (qty × selling price). Labelled as such in the report.
+  function getInventoryValuation() {
+    const cat = get(`SELECT COUNT(*) AS c,
+        COALESCE(SUM(COALESCE(price_override, regular_unit_price, suggested_retail, 0) * COALESCE(qty_on_hand,0)),0) AS v
+        FROM products WHERE COALESCE(qty_on_hand,0) > 0`);
+    const cus = get(`SELECT COUNT(*) AS c,
+        COALESCE(SUM(COALESCE(price,0) * COALESCE(qty_on_hand,0)),0) AS v
+        FROM custom_products WHERE COALESCE(qty_on_hand,0) > 0`);
+    return { items: (cat?.c||0) + (cus?.c||0), retailValue: (cat?.v||0) + (cus?.v||0) };
+  }
+
+  // Total collected (POS payments + manual AR entries) within a date range.
+  function getTotalCollectedInRange(fromDate, toDate) {
+    const pos = get(`SELECT COALESCE(SUM(p.amount),0) AS t
+        FROM payments p JOIN transactions tr ON p.transaction_id = tr.transaction_id
+        WHERE tr.status != 'REVERSED' AND date(p.payment_date) BETWEEN date(?) AND date(?)`,
+      [fromDate, toDate])?.t || 0;
+    const man = get(`SELECT COALESCE(SUM(amount),0) AS t FROM ar_entries
+        WHERE date(entry_date) BETWEEN date(?) AND date(?)`, [fromDate, toDate])?.t || 0;
+    return { pos, manual: man, total: pos + man };
   }
   function getSalesByMethod(fromDate, toDate) {
     return all(`SELECT p.method, COALESCE(SUM(p.amount),0) as total, COUNT(*) as count
@@ -595,6 +845,120 @@ const DB = (() => {
     const outstanding = get('SELECT COALESCE(SUM(balance_owing),0) as total FROM transactions WHERE patient_id=? AND status IN (?,?)',
       [patientId, 'PENDING', 'PARTIAL'])?.total || 0;
     return { billed, paid, outstanding };
+  }
+
+  /* ---- Accounts Receivable (patient copay reconciliation) ----
+     Billed comes from WinRx (REFILL.RECOPAY) via the API layer; this module owns
+     the LOCAL "paid" side: POS payments + manual ar_entries. */
+
+  // Total collected through the POS for a patient (excludes reversed sales).
+  // asOf (optional ISO date) → only payments on/before that date (point-in-time balance).
+  function getPosPaidForPatient(patientId, asOf) {
+    const dc = asOf ? ' AND date(p.payment_date) <= date(?)' : '';
+    const params = asOf ? [patientId, asOf] : [patientId];
+    return get(`SELECT COALESCE(SUM(p.amount),0) AS total
+                FROM payments p JOIN transactions t ON p.transaction_id = t.transaction_id
+                WHERE t.patient_id = ? AND t.status != 'REVERSED'${dc}`, params)?.total || 0;
+  }
+
+  // Rx numbers the patient has paid for through the POS (PAID transactions only).
+  function getPosPaidRxForPatient(patientId) {
+    return all(`SELECT DISTINCT ti.rx_number AS rx
+                FROM transaction_items ti JOIN transactions t ON ti.transaction_id = t.transaction_id
+                WHERE t.patient_id = ? AND t.status = 'PAID' AND ti.rx_number IS NOT NULL`,
+               [patientId]).map(r => String(r.rx));
+  }
+
+  function addArEntry(e) {
+    run(`INSERT INTO ar_entries(patient_id,entry_date,amount,entry_type,method,reference,rx_number,branch_code,reason,note,staff_name)
+         VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+      [e.patient_id, e.entry_date || localISOStr(), e.amount, e.entry_type || 'payment',
+       e.method || null, e.reference || null, e.rx_number || null, e.branch_code || null,
+       e.reason || null, e.note || null, e.staff_name || null]);
+    return lastInsertId();
+  }
+
+  function getArEntries(patientId) {
+    return all('SELECT * FROM ar_entries WHERE patient_id=? ORDER BY entry_date DESC, ar_id DESC', [patientId]);
+  }
+  function getArEntry(arId) {
+    return get('SELECT * FROM ar_entries WHERE ar_id=?', [arId]);
+  }
+  function updateArEntry(arId, f) {
+    const cols = [], vals = [];
+    ['entry_date','amount','entry_type','method','reference','rx_number','reason','note'].forEach(k => {
+      if (f[k] !== undefined) { cols.push(`${k}=?`); vals.push(f[k] === '' ? null : f[k]); }
+    });
+    if (!cols.length) return;
+    vals.push(arId);
+    run(`UPDATE ar_entries SET ${cols.join(',')} WHERE ar_id=?`, vals);
+  }
+  function deleteArEntry(arId) {
+    run('DELETE FROM ar_entries WHERE ar_id=?', [arId]);
+  }
+
+  // Sum of manual entries that reduce what the patient owes (all types count;
+  // reversals are stored as negative amounts so they net out).
+  // Rx copay dollars actually collected at the POS for a patient — only RX line
+  // items on non-reversed sales (excludes OTC + tax, which aren't part of AR).
+  function getPosRxPaidAmount(patientId, asOf) {
+    const dc = asOf ? ' AND date(t.transaction_date) <= date(?)' : '';
+    const params = asOf ? [patientId, asOf] : [patientId];
+    return get(`SELECT COALESCE(SUM(ti.line_total),0) AS total
+                FROM transaction_items ti JOIN transactions t ON ti.transaction_id = t.transaction_id
+                WHERE t.patient_id = ? AND t.status != 'REVERSED'
+                  AND ti.item_type = 'RX' AND ti.line_total > 0${dc}`, params)?.total || 0;
+  }
+
+  // POS Rx-copay collected, grouped by Rx number → { rx_number: amount }.
+  // Lets AR show per-Rx paid vs billed (e.g. billed $10, collected $9 → $1 owing).
+  function getPosRxPaidByRx(patientId, asOf) {
+    const dc = asOf ? ' AND date(t.transaction_date) <= date(?)' : '';
+    const params = asOf ? [patientId, asOf] : [patientId];
+    const rows = all(`SELECT ti.rx_number AS rx, COALESCE(SUM(ti.line_total),0) AS amt
+        FROM transaction_items ti JOIN transactions t ON ti.transaction_id = t.transaction_id
+        WHERE t.patient_id = ? AND t.status != 'REVERSED'
+          AND ti.item_type = 'RX' AND ti.rx_number IS NOT NULL${dc}
+        GROUP BY ti.rx_number`, params);
+    const map = {};
+    rows.forEach(r => { map[String(r.rx)] = r.amt || 0; });
+    return map;
+  }
+
+  function getArManualPaid(patientId, asOf) {
+    const dc = asOf ? ' AND date(entry_date) <= date(?)' : '';
+    const params = asOf ? [patientId, asOf] : [patientId];
+    return get(`SELECT COALESCE(SUM(amount),0) AS total FROM ar_entries WHERE patient_id=?${dc}`, params)?.total || 0;
+  }
+
+  // De-dup guard for external payments (online/e-transfer reference numbers).
+  function getArEntryByReference(reference) {
+    if (!reference) return null;
+    return get('SELECT * FROM ar_entries WHERE reference=?', [reference]);
+  }
+
+  /* ---- AR account numbers (human-friendly per-patient ID) ---- */
+  function setPatientArAccount(patientId, acct) {
+    run('UPDATE patients SET ar_account_no=? WHERE patient_id=?', [acct || null, patientId]);
+  }
+  function getPatientByArAccount(acct) {
+    if (!acct) return null;
+    return get('SELECT * FROM patients WHERE ar_account_no=?', [String(acct).trim()]);
+  }
+  // Next sequential account number, format AR-0001.
+  function getNextArAccountNo() {
+    const rows = all("SELECT ar_account_no AS a FROM patients WHERE ar_account_no LIKE 'AR-%'");
+    let max = 0;
+    rows.forEach(r => { const n = parseInt(String(r.a).replace(/\D/g, '')); if (n > max) max = n; });
+    return 'AR-' + String(max + 1).padStart(4, '0');
+  }
+
+  // Bad-debt write-offs in a date range — for the year-end accountant report.
+  function getArWriteOffs(fromDate, toDate) {
+    return all(`SELECT a.*, p.given_name, p.surname, p.phn
+                FROM ar_entries a LEFT JOIN patients p ON p.patient_id = a.patient_id
+                WHERE a.entry_type='write_off' AND date(a.entry_date) BETWEEN date(?) AND date(?)
+                ORDER BY a.entry_date`, [fromDate, toDate]);
   }
 
   /* ---- Shifts ---- */
@@ -657,19 +1021,25 @@ const DB = (() => {
 
   return {
     init, run, all, get, lastInsertId,
-    getStaffByPin, getAllStaff, createStaff, updateStaff, updateStaffPin, deactivateStaff, reactivateStaff, hasAnyStaff,
+    getStaffByPin, getAllStaff, getStaff, createStaff, updateStaff, updateStaffPin, deactivateStaff, reactivateStaff, hasAnyStaff,
     upsertPatient, getPatient, getPatientByPhn, searchPatients,
     createTransaction, updateTransactionStatus, getTransaction,
-    getTransactionsForPatient, getTransactionsForDate, reverseTransaction,
+    getTransactionsForPatient, getTransactionsForDate, reverseTransaction, saveRphSignoff,
+    addBtcLog, getBtcLog, getBtcLogAll, addBtcReceived, createRefundTransaction,
+    addShiftChecklist, getShiftChecklists,
     addTransactionItem, getItemsForTransaction,
     addPayment, getPaymentsForTransaction,
     findProductByBarcode, findCustomProductByBarcode, saveCustomProduct,
     getAllCustomProducts, deleteCustomProduct, updateCustomProduct,
     exportDb, updateCatalogProduct, adjustStock, getLowStockProducts, searchProducts,
     upsertProducts, upsertProductsSelective, getProductCount, getLastSyncTime,
-    getSalesSummary, getSalesByMethod, getSoldProducts, getTransactionsInRange,
+    getSalesSummary, getInventoryValuation, getTotalCollectedInRange, getSalesByMethod, getSoldProducts, getTransactionsInRange,
     searchTransactionsByRx, linkPatientToTransaction,
-    getPatientARSummary, logEvent,
+    getPatientARSummary,
+    getPosPaidForPatient, getPosRxPaidAmount, getPosRxPaidByRx, getPosPaidRxForPatient, addArEntry, getArEntries,
+    getArManualPaid, getArEntryByReference, getArEntry, updateArEntry, deleteArEntry, getArWriteOffs,
+    setPatientArAccount, getPatientByArAccount, getNextArAccountNo,
+    logEvent,
     openShift, closeShift, getActiveShift, getShiftHistory,
     recordCashMovement, getCashMovements, getShiftSummary,
   };

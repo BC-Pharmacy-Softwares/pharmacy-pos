@@ -37,24 +37,40 @@ class SettingsScreen {
       <div class="topbar">
         <button class="btn btn-outline btn-sm" id="btn-back">&#8592; Back</button>
         <span style="font-weight:600;font-size:15px;margin-left:8px;">${roleTitle}</span>
+        <span style="margin-left:auto;font-size:12px;color:var(--text-muted);">v${window.APP_VERSION || '?'}</span>
       </div>
       <div class="settings-body">
         <div class="settings-nav">
           ${[
+            ['__hdr__',      'Pharmacy Setup'],
             ['pharmacy',     'Pharmacy Details',  false, false],
             ['datetime',     'Date & Time',       false, false],
-            ['api',          'API Credentials',   false, true ],  // Admin only
-            ['sql',          'SQL Connection',    true,  false],  // desktop only
             ['staff',        'Staff Management',  false, true ],  // Admin only
+            ['__hdr__',      'Connections'],
+            ['sql',          'SQL Connection',    true,  false],  // desktop only
+            ['api',          'API Credentials',   false, true ],  // Admin only
+            ['catalog',      'Catalog Sync',      false, false],
+            ['__hdr__',      'Products & Pricing'],
             ['products',     'Products',          false, false],
             ['quickactions', 'Quick Actions',     false, false],
-            ['catalog',      'Catalog Sync',      false, false],
             ['barcode',      'Barcode Profiles',  false, false],
+            ['__hdr__',      'Printing & Labels'],
             ['printer',      'Receipt Printer',   true,  false],  // desktop only
+            ['receipt',      'Receipt Layout',    false, false],
+            ['shelftags',    'Shelf Tags',        false, false],
+            ['nametags',     'Name Tags',         false, false],
+            ['__hdr__',      'Records & Reports'],
+            ['btcfolder',    'BTC Records',       true,  false],  // desktop only
             ['emailreports', 'Email Reports',     false, false],
             ['backup',       'Backup',            false, true ],  // Admin only
-          ].filter(([, , desktopOnly]) => !desktopOnly || !!window.electronAPI)
-           .map(([id, label, , adminOnly]) => {
+          ].filter(row => row[0] === '__hdr__' || !row[2] || !!window.electronAPI)
+           .map(row => {
+             if (row[0] === '__hdr__') {
+               return `<div style="font-size:10px;font-weight:700;text-transform:uppercase;
+                           letter-spacing:.05em;color:var(--text-muted);opacity:.65;
+                           padding:14px 12px 4px;">${row[1]}</div>`;
+             }
+             const [id, label, , adminOnly] = row;
              const locked = adminOnly && !Auth.isAdmin();
              return `<div class="settings-nav-item${id === this._activeTab ? ' active' : ''}"
                          data-tab="${id}" data-locked="${locked}"
@@ -91,6 +107,21 @@ class SettingsScreen {
       });
     });
 
+    // Delegated handler for all "📁 Browse" folder-picker buttons (any tab)
+    this._el.querySelector('#settings-content').addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-browse]');
+      if (!btn) return;
+      const input = this._el.querySelector(btn.dataset.browse);
+      if (!input) return;
+      if (!window.electronAPI?.pickFolder) {
+        alert('Folder browsing is only available in the desktop app. Type the path manually.');
+        return;
+      }
+      window.electronAPI.pickFolder(input.value.trim()).then(res => {
+        if (res && res.ok && res.path) input.value = res.path;
+      });
+    });
+
     this._renderTab(this._activeTab);
     return this._el;
   }
@@ -99,15 +130,19 @@ class SettingsScreen {
     const content = this._el.querySelector('#settings-content');
     switch (tab) {
       case 'pharmacy':     this._renderPharmacy(content);     break;
+      case 'receipt':      this._renderReceipt(content);      break;
       case 'datetime':     this._renderDateTime(content);     break;
       case 'api':          this._renderAPI(content);          break;
       case 'staff':        this._renderStaff(content);        break;
       case 'products':     this._renderProducts(content);     break;
+      case 'shelftags':    this._renderShelfTags(content);    break;
+      case 'nametags':     this._renderNameTags(content);     break;
       case 'quickactions': this._renderQuickActions(content); break;
       case 'catalog':      this._renderCatalog(content);      break;
       case 'sql':     if (window.electronAPI) this._renderSQL(content);     break;
       case 'barcode':      this._renderBarcode(content);      break;
-      case 'printer': if (window.electronAPI) this._renderPrinter(content); break;
+      case 'printer':    if (window.electronAPI) this._renderPrinter(content);   break;
+      case 'btcfolder':  if (window.electronAPI) this._renderBtcFolder(content); break;
       case 'emailreports': this._renderEmailReports(content);  break;
       case 'backup':       this._renderBackup(content);       break;
     }
@@ -118,6 +153,11 @@ class SettingsScreen {
     const logo      = localStorage.getItem('pharmacy_logo_data') || '';
     const headerMsg = cfg.receipt_header_msg || '';
     const footerMsg = cfg.receipt_footer_msg || '';
+
+    // Brand Kit (defaults = the brand palette baked into the CSS)
+    const BK_DEFAULT = { background:'#f4f3ee', primary:'#1e4031', danger:'#c62f25', warning:'#e9a93c' };
+    let bk = { ...BK_DEFAULT };
+    try { if (cfg.brand_kit) bk = { ...BK_DEFAULT, ...(typeof cfg.brand_kit === 'string' ? JSON.parse(cfg.brand_kit) : cfg.brand_kit) }; } catch(_) {}
 
     content.innerHTML = `
       <div class="settings-section">
@@ -133,7 +173,7 @@ class SettingsScreen {
         <div style="display:grid;grid-template-columns:1fr auto;gap:12px;align-items:end;">
           <div class="form-group" style="margin:0;">
             <label>Pharmacy Name</label>
-            <input type="text" id="ph-name" value="${cfg.pharmacy_name||''}" placeholder="e.g. Pill4Me Pharmacy" />
+            <input type="text" id="ph-name" value="${cfg.pharmacy_name||''}" placeholder="e.g. Your Pharmacy Name" />
           </div>
           <div class="form-group" style="margin:0;width:110px;">
             <label>Branch Code</label>
@@ -171,7 +211,7 @@ class SettingsScreen {
           </div>
           <div class="form-group">
             <label>Province</label>
-            <input type="text" id="ph-province" value="${cfg.pharmacy_province||'BC'}" maxlength="2" placeholder="BC" />
+            <input type="text" id="ph-province" value="${cfg.pharmacy_province||''}" maxlength="2" placeholder="e.g. BC, ON, AB" />
           </div>
           <div class="form-group">
             <label>Postal Code</label>
@@ -267,33 +307,32 @@ class SettingsScreen {
                     placeholder="e.g. Thank you! Follow us @pharmacy or call (604) 555-0100">${footerMsg}</textarea>
         </div>
 
-        <!-- Appearance -->
-        <div class="settings-section-title" style="margin-top:28px;">Appearance</div>
-        <div class="form-row">
-          <div class="form-group" style="flex:1;">
-            <label>App Colour Theme</label>
-            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:4px;" id="colour-presets">
-              ${[
-                ['#0d6efd','Blue (default)'],['#198754','Green'],['#6f42c1','Purple'],
-                ['#dc3545','Red'],['#0dcaf0','Teal'],['#fd7e14','Orange'],['#212529','Dark'],
-              ].map(([c,label]) => `
-                <button type="button" data-colour="${c}" title="${label}"
-                  style="width:30px;height:30px;border-radius:50%;background:${c};border:3px solid transparent;
-                  cursor:pointer;transition:border-color .15s;"
-                  class="colour-preset-btn"></button>
-              `).join('')}
-              <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
-                <input type="color" id="ph-colour-custom" value="${cfg.theme_colour||'#0d6efd'}"
-                  style="width:30px;height:30px;border:none;padding:0;cursor:pointer;border-radius:50%;" />
-                Custom
-              </label>
-            </div>
-            <div style="margin-top:10px;display:flex;align-items:center;gap:10px;">
-              <span style="font-size:13px;color:var(--text-muted);">Preview:</span>
-              <button class="btn btn-primary" id="colour-preview-btn" style="pointer-events:none;">Button</button>
-              <span id="colour-preview-hex" style="font-size:12px;color:var(--text-muted);font-family:monospace;">${cfg.theme_colour||'#0d6efd'}</span>
-            </div>
-          </div>
+        <!-- Brand Kit -->
+        <div class="settings-section-title" style="margin-top:28px;">🎨 Brand Kit</div>
+        <p style="font-size:13px;color:var(--text-muted);margin:-6px 0 12px;">
+          Your brand colours are applied across the app and to print templates (name tags, shelf tags, receipts).
+        </p>
+        <div style="display:flex;gap:18px;flex-wrap:wrap;" id="brand-kit">
+          ${[
+            ['background','Background','Page background'],
+            ['primary','Color 1 — Primary','Buttons, links, highlights'],
+            ['danger','Color 2 — Alerts','Refunds, delete, warnings'],
+            ['warning','Color 3 — Accent','Badges, accents'],
+          ].map(([key,label,hint]) => `
+            <label style="display:flex;flex-direction:column;align-items:center;gap:6px;cursor:pointer;width:96px;text-align:center;">
+              <input type="color" class="bk-swatch" data-key="${key}" value="${bk[key]}"
+                     style="width:64px;height:64px;border:1px solid var(--border);border-radius:14px;padding:0;cursor:pointer;background:none;" />
+              <span style="font-size:12px;font-weight:500;">${label}</span>
+              <span style="font-size:10px;color:var(--text-muted);line-height:1.3;">${hint}</span>
+              <span class="bk-hex" style="font-size:10px;color:var(--text-muted);font-family:monospace;">${bk[key]}</span>
+            </label>`).join('')}
+        </div>
+        <div style="margin-top:14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+          <span style="font-size:13px;color:var(--text-muted);">Live preview:</span>
+          <button type="button" class="btn btn-primary" style="pointer-events:none;">Primary</button>
+          <button type="button" class="btn btn-danger"  style="pointer-events:none;">Alert</button>
+          <span class="badge badge-otc" style="pointer-events:none;">Badge</span>
+          <button type="button" class="btn btn-outline btn-sm" id="bk-reset">Reset to brand defaults</button>
         </div>
 
         <div style="margin-top:20px;">
@@ -375,31 +414,30 @@ class SettingsScreen {
       refreshLogoPreview('');
     });
 
-    /* ── Colour theme picker ─────────────────────────────────── */
-    const colourInput   = content.querySelector('#ph-colour-custom');
-    const previewBtn    = content.querySelector('#colour-preview-btn');
-    const previewHex    = content.querySelector('#colour-preview-hex');
-
-    const applyPreview = (hex) => {
-      colourInput.value = hex;
-      previewHex.textContent = hex;
-      previewBtn.style.background = hex;
-      // Highlight selected preset
-      content.querySelectorAll('.colour-preset-btn').forEach(b => {
-        b.style.borderColor = b.dataset.colour === hex ? '#000' : 'transparent';
-      });
+    /* ── Brand Kit ───────────────────────────────────────────── */
+    const readBrandKit = () => {
+      const kit = {};
+      content.querySelectorAll('.bk-swatch').forEach(s => { kit[s.dataset.key] = s.value; });
+      return kit;
     };
-
-    // Preset colour buttons
-    content.querySelectorAll('.colour-preset-btn').forEach(btn => {
-      btn.addEventListener('click', () => applyPreview(btn.dataset.colour));
+    const liveApplyBrand = () => {
+      if (typeof applyBrandKit === 'function') applyBrandKit(readBrandKit());
+    };
+    content.querySelectorAll('.bk-swatch').forEach(s => {
+      s.addEventListener('input', () => {
+        const hex = s.closest('label').querySelector('.bk-hex');
+        if (hex) hex.textContent = s.value;
+        liveApplyBrand();   // preview the whole app instantly
+      });
     });
-
-    // Custom colour picker
-    colourInput.addEventListener('input', () => applyPreview(colourInput.value));
-
-    // Highlight current colour on load
-    applyPreview(cfg.theme_colour || '#0d6efd');
+    content.querySelector('#bk-reset')?.addEventListener('click', () => {
+      content.querySelectorAll('.bk-swatch').forEach(s => {
+        s.value = BK_DEFAULT[s.dataset.key];
+        const hex = s.closest('label').querySelector('.bk-hex');
+        if (hex) hex.textContent = s.value;
+      });
+      liveApplyBrand();
+    });
 
     /* ── Save ────────────────────────────────────────────────── */
     content.querySelector('#btn-save-pharmacy').addEventListener('click', async () => {
@@ -429,10 +467,10 @@ class SettingsScreen {
         tax_pst_rate:         content.querySelector('#tax-pst-rate').value.trim(),
         receipt_header_msg:   content.querySelector('#ph-receipt-header').value.trim(),
         receipt_footer_msg:   content.querySelector('#ph-receipt-footer').value.trim(),
-        theme_colour:         colourInput.value,
+        brand_kit:            JSON.stringify(readBrandKit()),
       });
-      // Apply theme immediately without page reload
-      if (typeof applyThemeColour === 'function') applyThemeColour(colourInput.value);
+      // Apply brand kit immediately without page reload
+      if (typeof applyBrandKit === 'function') applyBrandKit(readBrandKit());
       await Tax.loadRates();
       Audit.configChange('Pharmacy details updated');
       const status = content.querySelector('#pharmacy-save-status');
@@ -440,6 +478,320 @@ class SettingsScreen {
       status.style.color = 'var(--success)';
       setTimeout(() => { status.textContent = ''; }, 3000);
     });
+  }
+
+  /* ════════════════════════════════════════════════════════════
+     Receipt Layout — full customisation with live preview
+     ════════════════════════════════════════════════════════════ */
+  async _renderReceipt(content) {
+    const cfg = await Config.getAll();
+
+    // Helper: get a setting with a default
+    const get = (key, def) => (cfg[key] !== undefined && cfg[key] !== '') ? cfg[key] : def;
+
+    content.innerHTML = `
+      <div class="settings-section">
+        <h3>Receipt Layout</h3>
+        <p style="color:var(--text-muted);font-size:13px;margin-bottom:20px;">
+          Customise how receipts look for your pharmacy. Changes apply to all future receipts.
+        </p>
+
+        <div style="display:grid;grid-template-columns:1fr 260px;gap:24px;align-items:start;">
+
+          <!-- ── Left: controls ── -->
+          <div>
+
+            <!-- Paper & Font -->
+            <div style="background:var(--surface2);border-radius:var(--radius);padding:16px;margin-bottom:16px;">
+              <div style="font-weight:700;font-size:13px;margin-bottom:12px;text-transform:uppercase;
+                          letter-spacing:.04em;color:var(--text-muted);">Paper & Font</div>
+
+              <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;">
+                <div class="form-group" style="margin:0;">
+                  <label style="font-size:12px;">Paper Width</label>
+                  <select id="rc-paper-width" style="margin-top:4px;">
+                    <option value="58"  ${get('receipt_paper_width','80')==='58'  ? 'selected':''}>58 mm (narrow)</option>
+                    <option value="72"  ${get('receipt_paper_width','80')==='72'  ? 'selected':''}>72 mm</option>
+                    <option value="80"  ${get('receipt_paper_width','80')==='80'  ? 'selected':''}>80 mm (standard)</option>
+                  </select>
+                </div>
+                <div class="form-group" style="margin:0;">
+                  <label style="font-size:12px;">Font Style</label>
+                  <select id="rc-font" style="margin-top:4px;">
+                    <option value="courier" ${get('receipt_font','courier')==='courier' ? 'selected':''}>Courier (monospace)</option>
+                    <option value="arial"   ${get('receipt_font','courier')==='arial'   ? 'selected':''}>Arial (clean)</option>
+                    <option value="system"  ${get('receipt_font','courier')==='system'  ? 'selected':''}>System default</option>
+                  </select>
+                </div>
+                <div class="form-group" style="margin:0;">
+                  <label style="font-size:12px;">Font Size</label>
+                  <select id="rc-font-size" style="margin-top:4px;">
+                    <option value="10" ${get('receipt_font_size','11')==='10' ? 'selected':''}>Small (10px)</option>
+                    <option value="11" ${get('receipt_font_size','11')==='11' ? 'selected':''}>Medium (11px)</option>
+                    <option value="12" ${get('receipt_font_size','11')==='12' ? 'selected':''}>Large (12px)</option>
+                  </select>
+                </div>
+              </div>
+
+              <div class="form-group" style="margin-top:12px;margin-bottom:0;">
+                <label style="font-size:12px;">Separator Style</label>
+                <select id="rc-separator" style="margin-top:4px;max-width:220px;">
+                  <option value="dashed" ${get('receipt_separator','dashed')==='dashed'  ? 'selected':''}>- - - - - (dashed)</option>
+                  <option value="solid"  ${get('receipt_separator','dashed')==='solid'   ? 'selected':''}>────── (solid)</option>
+                  <option value="stars"  ${get('receipt_separator','dashed')==='stars'   ? 'selected':''}>* * * * * (stars)</option>
+                  <option value="equals" ${get('receipt_separator','dashed')==='equals'  ? 'selected':''}>= = = = = (equals)</option>
+                </select>
+              </div>
+            </div>
+
+            <!-- Header section -->
+            <div style="background:var(--surface2);border-radius:var(--radius);padding:16px;margin-bottom:16px;">
+              <div style="font-weight:700;font-size:13px;margin-bottom:12px;text-transform:uppercase;
+                          letter-spacing:.04em;color:var(--text-muted);">Header</div>
+              <div style="display:flex;flex-direction:column;gap:10px;">
+                <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:13px;">
+                  <input type="checkbox" id="rc-show-logo" ${get('receipt_show_logo','true')==='true' ? 'checked':''} />
+                  Show pharmacy logo
+                </label>
+                <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:13px;">
+                  <input type="checkbox" id="rc-show-header-msg" ${get('receipt_show_header_msg','true')==='true' ? 'checked':''} />
+                  Show custom header message
+                </label>
+              </div>
+              <div class="form-group" style="margin-top:12px;margin-bottom:0;">
+                <label style="font-size:12px;">Receipt Title <span style="font-weight:400;color:var(--text-muted);">(blank = "RECEIPT")</span></label>
+                <input type="text" id="rc-title" value="${get('receipt_title','')}"
+                       placeholder="RECEIPT" maxlength="40" style="margin-top:4px;max-width:240px;" />
+              </div>
+            </div>
+
+            <!-- Items & patient -->
+            <div style="background:var(--surface2);border-radius:var(--radius);padding:16px;margin-bottom:16px;">
+              <div style="font-weight:700;font-size:13px;margin-bottom:12px;text-transform:uppercase;
+                          letter-spacing:.04em;color:var(--text-muted);">Items & Patient</div>
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+                <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:13px;">
+                  <input type="checkbox" id="rc-show-patient-name" ${get('receipt_show_patient_name','true')==='true' ? 'checked':''} />
+                  Patient name
+                </label>
+                <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:13px;">
+                  <input type="checkbox" id="rc-show-patient-phn" ${get('receipt_show_patient_phn','false')==='true' ? 'checked':''} />
+                  Patient PHN / ID <small style="color:var(--text-muted);">(privacy)</small>
+                </label>
+                <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:13px;">
+                  <input type="checkbox" id="rc-show-rx-number" ${get('receipt_show_rx_number','true')==='true' ? 'checked':''} />
+                  Rx number on each line
+                </label>
+                <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:13px;">
+                  <input type="checkbox" id="rc-show-din" ${get('receipt_show_din','false')==='true' ? 'checked':''} />
+                  DIN number
+                </label>
+              </div>
+            </div>
+
+            <!-- Totals & footer -->
+            <div style="background:var(--surface2);border-radius:var(--radius);padding:16px;margin-bottom:16px;">
+              <div style="font-weight:700;font-size:13px;margin-bottom:12px;text-transform:uppercase;
+                          letter-spacing:.04em;color:var(--text-muted);">Totals & Footer</div>
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+                <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:13px;">
+                  <input type="checkbox" id="rc-show-tax-detail" ${get('receipt_show_tax_detail','true')==='true' ? 'checked':''} />
+                  GST / PST breakdown
+                </label>
+                <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:13px;">
+                  <input type="checkbox" id="rc-show-staff" ${get('receipt_show_staff','true')==='true' ? 'checked':''} />
+                  Staff name
+                </label>
+                <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:13px;">
+                  <input type="checkbox" id="rc-show-txn-id" ${get('receipt_show_txn_id','true')==='true' ? 'checked':''} />
+                  Transaction ID
+                </label>
+                <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:13px;">
+                  <input type="checkbox" id="rc-show-footer-msg" ${get('receipt_show_footer_msg','true')==='true' ? 'checked':''} />
+                  Show footer message
+                </label>
+              </div>
+            </div>
+
+            <button class="btn btn-primary" id="btn-save-receipt">Save Receipt Settings</button>
+            <div id="receipt-save-status" style="margin-top:8px;font-size:13px;"></div>
+          </div>
+
+          <!-- ── Right: live preview ── -->
+          <div style="position:sticky;top:16px;">
+            <div style="font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.05em;
+                        color:var(--text-muted);margin-bottom:8px;">Live Preview</div>
+            <div style="border:2px solid var(--border);border-radius:var(--radius);overflow:hidden;
+                        background:#fff;box-shadow:0 2px 8px rgba(0,0,0,.1);">
+              <iframe id="receipt-preview-frame"
+                      style="width:100%;height:480px;border:none;display:block;
+                             transform-origin:top left;"
+                      scrolling="auto"></iframe>
+            </div>
+            <div style="font-size:11px;color:var(--text-muted);margin-top:6px;text-align:center;">
+              Sample preview — real data will vary
+            </div>
+          </div>
+
+        </div>
+      </div>`;
+
+    /* ── Save ─────────────────────────────────────────────────── */
+    const saveBtn  = content.querySelector('#btn-save-receipt');
+    const statusEl = content.querySelector('#receipt-save-status');
+
+    const getChecked = id => content.querySelector(id).checked ? 'true' : 'false';
+    const getVal     = id => content.querySelector(id).value;
+
+    const saveSettings = async () => {
+      // Single atomic write — Config.set called 15× concurrently would race
+      // (each does load-modify-save), so only the last would persist.
+      await Config.setMany({
+        receipt_paper_width:       getVal('#rc-paper-width'),
+        receipt_font:              getVal('#rc-font'),
+        receipt_font_size:         getVal('#rc-font-size'),
+        receipt_separator:         getVal('#rc-separator'),
+        receipt_title:             getVal('#rc-title'),
+        receipt_show_logo:         getChecked('#rc-show-logo'),
+        receipt_show_header_msg:   getChecked('#rc-show-header-msg'),
+        receipt_show_patient_name: getChecked('#rc-show-patient-name'),
+        receipt_show_patient_phn:  getChecked('#rc-show-patient-phn'),
+        receipt_show_rx_number:    getChecked('#rc-show-rx-number'),
+        receipt_show_din:          getChecked('#rc-show-din'),
+        receipt_show_tax_detail:   getChecked('#rc-show-tax-detail'),
+        receipt_show_staff:        getChecked('#rc-show-staff'),
+        receipt_show_txn_id:       getChecked('#rc-show-txn-id'),
+        receipt_show_footer_msg:   getChecked('#rc-show-footer-msg'),
+      });
+      statusEl.textContent = '✓ Saved';
+      statusEl.style.color = 'var(--success)';
+      setTimeout(() => { statusEl.textContent = ''; }, 2500);
+    };
+
+    saveBtn.addEventListener('click', saveSettings);
+
+    /* ── Live preview ─────────────────────────────────────────── */
+    const frame = content.querySelector('#receipt-preview-frame');
+
+    const buildPreviewHtml = () => {
+      const paperMm   = parseInt(getVal('#rc-paper-width')) || 80;
+      const paperPx   = Math.round(paperMm * 3.78); // 96dpi approx
+      const fontMap   = { courier: '"Courier New",Courier,monospace', arial: 'Arial,Helvetica,sans-serif', system: 'system-ui,sans-serif' };
+      const fontFam   = fontMap[getVal('#rc-font')] || fontMap.courier;
+      const fontSize  = parseInt(getVal('#rc-font-size')) || 11;
+      const sepStyle  = getVal('#rc-separator');
+      const sepMap    = { dashed:'border-top:1px dashed #000', solid:'border-top:1px solid #000', stars:'border-top:none', equals:'border-top:none' };
+      const sepContent= { dashed:'', solid:'', stars:'* * * * * * * * * * * * * *', equals:'= = = = = = = = = = = = = =' };
+      const sepCss    = sepMap[sepStyle] || sepMap.dashed;
+      const sepTxt    = sepContent[sepStyle] || '';
+
+      const title     = getVal('#rc-title').trim() || 'RECEIPT';
+      const showLogo      = content.querySelector('#rc-show-logo').checked;
+      const showHeaderMsg = content.querySelector('#rc-show-header-msg').checked;
+      const showPatName   = content.querySelector('#rc-show-patient-name').checked;
+      const showPatPhn    = content.querySelector('#rc-show-patient-phn').checked;
+      const showRxNum     = content.querySelector('#rc-show-rx-number').checked;
+      const showTax       = content.querySelector('#rc-show-tax-detail').checked;
+      const showStaff     = content.querySelector('#rc-show-staff').checked;
+      const showTxnId     = content.querySelector('#rc-show-txn-id').checked;
+      const showFooter    = content.querySelector('#rc-show-footer-msg').checked;
+
+      const logo = localStorage.getItem('pharmacy_logo_data') || '';
+
+      const sep = sepTxt
+        ? `<div style="text-align:center;font-size:${fontSize-2}px;letter-spacing:2px;margin:5px 0;color:#555;">${sepTxt}</div>`
+        : `<div style="margin:5px 0;border:none;${sepCss};"></div>`;
+
+      return `<!DOCTYPE html><html><head><meta charset="UTF-8">
+        <style>
+          @page{size:${paperMm}mm auto;margin:0;}
+          *{box-sizing:border-box;}
+          html{width:${paperPx}px;}
+          body{margin:0;padding:6px 8px;background:#fff;width:${paperPx}px;font-family:${fontFam};font-size:${fontSize}px;color:#000;}
+          .rh{text-align:center;margin-bottom:6px;}
+          .rpn{font-size:${fontSize+2}px;font-weight:bold;letter-spacing:1px;}
+          .rhn{font-size:${fontSize-1}px;}
+          .rtitle{text-align:center;font-size:${fontSize+1}px;font-weight:bold;letter-spacing:2px;margin:6px 0;}
+          .ri{display:flex;justify-content:space-between;margin-bottom:3px;gap:4px;}
+          .rin{flex:1;word-break:break-word;}
+          .rip{white-space:nowrap;padding-left:4px;}
+          .rrx{font-size:${fontSize-1}px;color:#555;margin:-2px 0 3px 6px;}
+          .rt{margin-top:4px;}
+          .rtl{display:flex;justify-content:space-between;margin-bottom:2px;}
+          .rtl.grand{font-weight:bold;}
+          .rf{text-align:center;margin-top:8px;font-size:${fontSize-1}px;line-height:1.5;}
+          .dim{font-size:${fontSize-1}px;color:#555;}
+        </style></head><body>
+        <div>
+          <div class="rh">
+            ${showLogo && logo ? `<img src="${logo}" style="max-width:100%;max-height:36px;display:block;margin:0 auto 4px;" />` : ''}
+            <div class="rpn">YOUR PHARMACY NAME</div>
+            <div class="rhn">123 Main Street, City, Province</div>
+            <div class="rhn">Tel: (555) 123-4567</div>
+            <div class="rhn">GST#: 123456789 RT 0001</div>
+            ${showHeaderMsg ? `<div class="rhn" style="margin-top:3px;font-style:italic;">Free delivery available!</div>` : ''}
+          </div>
+          ${sep}
+          <div class="rtitle">${title}</div>
+          ${sep}
+          <div class="dim">
+            ${showPatName ? '<div>Patient: <strong>John Smith</strong></div>' : ''}
+            ${showPatPhn  ? '<div>PHN: 9876543210</div>' : ''}
+            <div>Date: ${new Date().toLocaleString()}</div>
+            ${showTxnId   ? '<div>Txn #1042</div>' : ''}
+            ${showStaff   ? '<div>Staff: Sarah</div>' : ''}
+          </div>
+          ${sep}
+          <div class="ri"><span class="rin">[Rx] Metformin 500mg [Qty:90]</span><span class="rip">$0.00</span></div>
+          ${showRxNum ? '<div class="rrx">Rx# 60004-A</div>' : ''}
+          <div class="ri"><span class="rin">Vitamin D 1000IU (x2)</span><span class="rip">$18.99</span></div>
+          <div class="ri"><span class="rin">Saline Nasal Spray</span><span class="rip">$8.49</span></div>
+          ${sep}
+          <div class="rt">
+            <div class="rtl"><span>Subtotal</span><span>$27.48</span></div>
+            ${showTax ? '<div class="rtl"><span>GST (5%)</span><span>$1.37</span></div>' : ''}
+            ${showTax ? '<div class="rtl"><span>PST (7%)</span><span>$1.92</span></div>' : ''}
+            <div class="rtl grand"><span>TOTAL</span><span>$30.77</span></div>
+            ${sep}
+            <div class="rtl"><span>Paid (CASH)</span><span>$35.00</span></div>
+            <div class="rtl"><span>Change</span><span>$4.23</span></div>
+          </div>
+          ${sep}
+          <div class="rf">
+            ${showFooter ? 'Thank you for choosing our pharmacy!<br>Follow us on social media.' : ''}
+          </div>
+        </div>
+      </body></html>`;
+    };
+
+    const updatePreview = () => {
+      const html = buildPreviewHtml();
+      const paperMm = parseInt(getVal('#rc-paper-width')) || 80;
+      const paperPx = Math.round(paperMm * 3.78);
+      // Scale the preview to fit the 260px-wide panel
+      const scale = Math.min(1, 248 / paperPx);
+      frame.style.transform = `scale(${scale})`;
+      frame.style.transformOrigin = 'top left';
+      frame.style.width  = (248 / scale) + 'px';
+      frame.style.height = '480px';
+      const doc = frame.contentDocument || frame.contentWindow.document;
+      doc.open(); doc.write(html); doc.close();
+    };
+
+    // Debounce preview updates
+    let _previewTimer = null;
+    const schedulePreview = () => {
+      clearTimeout(_previewTimer);
+      _previewTimer = setTimeout(updatePreview, 200);
+    };
+
+    content.querySelectorAll('select, input[type=checkbox], input[type=text]')
+      .forEach(el => el.addEventListener('change', schedulePreview));
+    content.querySelectorAll('input[type=text]')
+      .forEach(el => el.addEventListener('input', schedulePreview));
+
+    // Initial preview
+    updatePreview();
   }
 
   _renderDateTime(content) {
@@ -581,15 +933,63 @@ class SettingsScreen {
           <label>Password</label>
           <input type="password" id="mk-pass" value="${cfg.mckesson_password||''}" />
         </div>
+        <div class="form-row" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+          <div class="form-group">
+            <label>Account # <span style="font-weight:400;color:var(--text-muted);">(for orders)</span></label>
+            <input type="text" id="mk-account" value="${cfg.mckesson_account||''}"
+                   placeholder="e.g. 123456" autocomplete="off" />
+            <div style="font-size:11px;color:var(--text-muted);margin-top:3px;">
+              WinRx → Supplier → <strong>Acct#</strong>
+            </div>
+          </div>
+          <div class="form-group">
+            <label>Customer # <span style="font-weight:400;color:var(--text-muted);">(for invoices &amp; catalog)</span></label>
+            <input type="text" id="mk-customer" value="${cfg.mckesson_customer||''}"
+                   placeholder="e.g. 1234567" autocomplete="off" />
+            <div style="font-size:11px;color:var(--text-muted);margin-top:3px;">
+              WinRx → Supplier → <strong>Customer#</strong>
+            </div>
+          </div>
+        </div>
 
         <h4 style="margin:16px 0 10px;font-size:14px;color:var(--text-muted);">Clover — Network Pay Display</h4>
         <div class="alert alert-info" style="font-size:13px;">
-          Start the <strong>clover-local-pay</strong> service first:<br/>
-          <code style="user-select:all;">cd pharmacy-pos/clover-local-pay &amp;&amp; npm install &amp;&amp; npm start</code><br/>
-          Then use the <strong>Pair with Device</strong> button below — no OAuth token needed.
+          Enter your Clover device details below and click <strong>Save Clover Device</strong>.
+          The payment bridge starts automatically inside the app — no separate service to run.
+          Then use <strong>Pair with Device</strong>.
         </div>
+
+        <div class="form-row" style="display:grid;grid-template-columns:2fr 1fr;gap:12px;">
+          <div class="form-group">
+            <label>Clover Device IP <span style="font-weight:400;color:var(--text-muted);">(from Network Pay Display screen)</span></label>
+            <input type="text" id="cl-device-ip" value="${cfg.clover_device_ip||''}"
+                   placeholder="e.g. 192.168.0.155" style="font-family:monospace;" />
+          </div>
+          <div class="form-group">
+            <label>Device Port</label>
+            <input type="text" id="cl-device-port" value="${cfg.clover_device_port||'12345'}"
+                   placeholder="12345" style="font-family:monospace;" />
+          </div>
+        </div>
+        <div class="form-row" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+          <div class="form-group">
+            <label>POS Station Name</label>
+            <input type="text" id="cl-pos-id" value="${cfg.clover_pos_id||'PharmacyPOS'}"
+                   placeholder="PharmacyPOS" />
+          </div>
+          <div class="form-group">
+            <label>Service Port <span style="font-weight:400;color:var(--text-muted);">(default 3001)</span></label>
+            <input type="text" id="cl-service-port" value="${cfg.clover_service_port||'3001'}"
+                   placeholder="3001" style="font-family:monospace;" />
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;">
+          <button class="btn btn-primary btn-sm" id="btn-save-clover-device">💾 Save Clover Device</button>
+          <span id="clover-device-status" style="font-size:13px;"></span>
+        </div>
+
         <div class="form-group">
-          <label>Local Pay Service URL</label>
+          <label>Local Pay Service URL <span style="font-weight:400;color:var(--text-muted);">(auto-set from Service Port)</span></label>
           <div style="display:flex;gap:8px;align-items:flex-start;">
             <input type="text" id="cl-local-url" value="${cfg.clover_local_url||'http://localhost:3001'}"
                    placeholder="http://localhost:3001" style="flex:1;" />
@@ -615,8 +1015,11 @@ class SettingsScreen {
         </div>
         <div class="form-group">
           <label>WinRx Document Inbox Folder</label>
-          <input type="text" id="doc-folder-path" value="${cfg.doc_folder_path||''}"
-                 placeholder="e.g. C:\\WinRx\\Documents\\Inbox" style="font-family:monospace;width:100%;" />
+          <div style="display:flex;gap:8px;">
+            <input type="text" id="doc-folder-path" value="${cfg.doc_folder_path||''}"
+                   placeholder="e.g. C:\\WinRx\\Documents\\Inbox" style="font-family:monospace;flex:1;" />
+            <button class="btn btn-outline" data-browse="#doc-folder-path" style="white-space:nowrap;">📁 Browse</button>
+          </div>
           <div style="font-size:11px;color:var(--text-muted);margin-top:3px;">
             PDF files named <code>RCPT{RxNum}A.pdf</code> will be written here after each payment.
             The folder must exist and WinRx must be configured to watch it.
@@ -626,6 +1029,57 @@ class SettingsScreen {
         <button class="btn btn-primary" id="btn-save-api">Save Settings</button>
         <div id="api-save-status" style="margin-top:8px;font-size:13px;"></div>
       </div>`;
+
+    /* Save Clover device config → writes .env + restarts the in-app bridge */
+    content.querySelector('#btn-save-clover-device')?.addEventListener('click', async () => {
+      const statusEl = content.querySelector('#clover-device-status');
+      const ip       = content.querySelector('#cl-device-ip').value.trim();
+      const dport    = content.querySelector('#cl-device-port').value.trim() || '12345';
+      const posId    = content.querySelector('#cl-pos-id').value.trim() || 'PharmacyPOS';
+      const sport    = content.querySelector('#cl-service-port').value.trim() || '3001';
+
+      if (!/^\d+\.\d+\.\d+\.\d+$/.test(ip)) {
+        statusEl.textContent = 'Enter a valid device IP (e.g. 192.168.0.155).';
+        statusEl.style.color = 'var(--danger)';
+        return;
+      }
+
+      // Save to app config + keep the service URL in sync
+      const svcUrl = `http://localhost:${sport}`;
+      await Config.setMany({
+        clover_device_ip:   ip,
+        clover_device_port: dport,
+        clover_pos_id:      posId,
+        clover_service_port: sport,
+        clover_local_url:   svcUrl,
+      });
+      content.querySelector('#cl-local-url').value = svcUrl;
+
+      // Write .env + restart the bridge (desktop only)
+      if (window.electronAPI?.saveCloverEnv) {
+        statusEl.textContent = 'Saving & restarting payment bridge…';
+        statusEl.style.color = 'var(--text-muted)';
+        try {
+          const res = await window.electronAPI.saveCloverEnv({
+            CLOVER_DEVICE_IP: ip, CLOVER_DEVICE_PORT: dport,
+            CLOVER_POS_ID: posId, PORT: sport,
+          });
+          if (res?.ok) {
+            statusEl.textContent = '✓ Saved. Bridge restarting — wait ~5 s, then Pair with Device.';
+            statusEl.style.color = 'var(--success)';
+          } else {
+            statusEl.textContent = '⚠ Saved config, but bridge restart failed: ' + (res?.error || 'unknown');
+            statusEl.style.color = 'var(--warning)';
+          }
+        } catch(e) {
+          statusEl.textContent = '⚠ Saved config, but: ' + e.message;
+          statusEl.style.color = 'var(--warning)';
+        }
+      } else {
+        statusEl.textContent = '✓ Saved (browser mode — start the bridge manually).';
+        statusEl.style.color = 'var(--success)';
+      }
+    });
 
     content.querySelector('#btn-ping-clover').addEventListener('click', async () => {
       const resultEl = content.querySelector('#clover-ping-result');
@@ -654,6 +1108,8 @@ class SettingsScreen {
       await Config.setMany({
         mckesson_username: content.querySelector('#mk-user').value.trim(),
         mckesson_password: content.querySelector('#mk-pass').value,
+        mckesson_account:  content.querySelector('#mk-account').value.trim(),
+        mckesson_customer: content.querySelector('#mk-customer').value.trim(),
         clover_local_url:  content.querySelector('#cl-local-url').value.trim(),
         doc_folder_path:   content.querySelector('#doc-folder-path').value.trim(),
       });
@@ -787,11 +1243,382 @@ class SettingsScreen {
 
       } catch(e) {
         startErr.style.display = 'block';
-        startErr.textContent   = 'Cannot reach the clover-local-pay service. Make sure it is running (npm start).';
+        startErr.textContent   = 'Cannot reach the Clover payment bridge. Enter the device IP above and click "Save Clover Device" first (that starts the bridge). If it still fails, the app may need a rebuild.';
         actionBtn.disabled     = false;
         actionBtn.textContent  = 'Start Pairing';
       }
     });
+  }
+
+  /* ════════════════════════════════════════════════════════════
+     Shelf Tags — printable price stickers / shelf labels
+     ════════════════════════════════════════════════════════════ */
+  /* ════════════════════════════════════════════════════════════
+     Staff Name Tags / Badges — pharmacy name + employee + designation
+     Two presets: name-badge label (2⅓×3⅜) and credit-card (3.375×2.125)
+     ════════════════════════════════════════════════════════════ */
+  async _renderNameTags(content) {
+    const cfg   = await Config.getAll();
+    const phName = cfg.pharmacy_name || 'Your Pharmacy';
+    const logo   = localStorage.getItem('pharmacy_logo_data') || '';
+    const staff  = DB.getAllStaff().filter(s => s.active);
+
+    // Badge presets (mm)
+    const PRESETS = {
+      namebadge:  { name: 'Name-badge label (2⅓" × 3⅜")', w: 85.7, h: 59.3 },
+      creditcard: { name: 'Credit-card (3.375" × 2.125")', w: 85.7, h: 54.0 },
+    };
+
+    content.innerHTML = `
+      <div class="settings-section">
+        <h3>Staff Name Tags</h3>
+        <p style="color:var(--text-muted);font-size:13px;margin-bottom:16px;">
+          Print staff badges with the pharmacy name, employee name, and designation.
+          Set each person's designation/title in <strong>Staff Management</strong>.
+        </p>
+
+        <div style="display:grid;grid-template-columns:1fr 300px;gap:24px;align-items:start;">
+          <div>
+            <div style="background:var(--surface2);border-radius:var(--radius);padding:14px;margin-bottom:14px;">
+              <div style="font-weight:700;font-size:12px;text-transform:uppercase;color:var(--text-muted);margin-bottom:10px;">Badge Size</div>
+              <select id="nt-preset" style="width:100%;">
+                ${Object.entries(PRESETS).map(([k,v]) => `<option value="${k}">${v.name}</option>`).join('')}
+              </select>
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px;">
+                <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;">
+                  <input type="checkbox" id="nt-logo" ${logo?'checked':''} ${logo?'':'disabled'}/> Show logo
+                </label>
+                <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;">
+                  <input type="checkbox" id="nt-license" checked/> Show license # (if any)
+                </label>
+              </div>
+            </div>
+
+            <div style="background:var(--surface2);border-radius:var(--radius);padding:14px;margin-bottom:14px;">
+              <div style="font-weight:700;font-size:12px;text-transform:uppercase;color:var(--text-muted);margin-bottom:10px;">Staff</div>
+              ${staff.length ? staff.map(s => `
+                <label style="display:flex;align-items:center;gap:10px;padding:6px 0;cursor:pointer;font-size:13px;border-bottom:1px solid var(--border);">
+                  <input type="checkbox" class="nt-staff" data-id="${s.staff_id}" />
+                  <span style="flex:1;">${s.name}
+                    <span style="color:var(--text-muted);font-size:11px;">— ${s.designation || Auth.roleLabel(s.role)}${s.license_number?` · Lic# ${s.license_number}`:''}</span>
+                  </span>
+                </label>`).join('')
+                : '<div style="color:var(--text-muted);font-size:13px;">No staff found.</div>'}
+              <div style="font-size:11px;color:var(--text-muted);margin-top:8px;">
+                Tip: set the <strong>Designation / Title</strong> for each person in Staff Management.
+              </div>
+            </div>
+
+            <div style="display:flex;gap:8px;">
+              <button class="btn btn-primary" id="nt-print">🖨 Print Selected</button>
+              <span id="nt-count" style="align-self:center;font-size:13px;color:var(--text-muted);"></span>
+            </div>
+          </div>
+
+          <div style="position:sticky;top:16px;">
+            <div style="font-weight:600;font-size:12px;text-transform:uppercase;color:var(--text-muted);margin-bottom:8px;">Preview</div>
+            <div id="nt-preview" style="border:2px solid var(--border);border-radius:var(--radius);
+                 background:#fff;padding:10px;display:flex;align-items:center;justify-content:center;min-height:120px;"></div>
+          </div>
+        </div>
+      </div>`;
+
+    const esc = s => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+    // Build one badge's inner HTML
+    const brand = window.BRAND_KIT || { primary:'#1e4031' };
+    const badgeHtml = (s, fields, p) => {
+      const desig = s.designation || Auth.roleLabel(s.role);
+      const showLic = fields.license && s.license_number;
+      const nameSize = p.h < 56 ? '17px' : '20px';
+      return `
+        <div style="height:100%;box-sizing:border-box;display:flex;flex-direction:column;
+                    border:2px solid ${brand.primary};border-radius:6px;overflow:hidden;">
+          <div style="background:${brand.primary};color:#fff;padding:5px 8px;display:flex;align-items:center;
+                      justify-content:center;gap:6px;">
+            ${fields.logo && logo ? `<img src="${logo}" style="max-height:16px;max-width:36px;">` : ''}
+            <span style="font-size:11px;font-weight:700;letter-spacing:.5px;">${esc(phName).toUpperCase()}</span>
+          </div>
+          <div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;
+                      text-align:center;padding:6px 10px;">
+            <div style="font-size:${nameSize};font-weight:800;line-height:1.1;color:#111;">${esc(s.name)}</div>
+            <div style="font-size:13px;color:${brand.primary};margin-top:2px;font-weight:600;">${esc(desig)}</div>
+            ${showLic ? `<div style="font-size:10px;color:#666;margin-top:1px;">Lic# ${esc(s.license_number)}</div>` : ''}
+          </div>
+        </div>`;
+    };
+
+    const getFields = () => ({
+      logo:    content.querySelector('#nt-logo').checked,
+      license: content.querySelector('#nt-license').checked,
+    });
+
+    const refreshPreview = () => {
+      const p = PRESETS[content.querySelector('#nt-preset').value];
+      const sample = staff[0] || { name:'Jane Smith', designation:'Pharmacist', role:'MANAGER', license_number:'12345' };
+      const scale = 3.0;
+      content.querySelector('#nt-preview').innerHTML =
+        `<div style="width:${p.w*scale}px;height:${p.h*scale}px;">${badgeHtml(sample, getFields(), p)}</div>`;
+    };
+
+    const updateCount = () => {
+      const n = content.querySelectorAll('.nt-staff:checked').length;
+      content.querySelector('#nt-count').textContent = n ? `${n} selected` : '';
+    };
+
+    content.querySelectorAll('input').forEach(el => el.addEventListener('change', () => { refreshPreview(); updateCount(); }));
+    content.querySelector('#nt-preset').addEventListener('change', refreshPreview);
+
+    content.querySelector('#nt-print').addEventListener('click', () => {
+      const ids = [...content.querySelectorAll('.nt-staff:checked')].map(c => parseInt(c.dataset.id));
+      if (!ids.length) { alert('Select at least one staff member.'); return; }
+      const fields = getFields();
+      const p = PRESETS[content.querySelector('#nt-preset').value];
+      const chosen = staff.filter(s => ids.includes(s.staff_id));
+
+      // One badge per page, sized exactly to the label — same model as Shelf Tags
+      // so it prints correctly on a thermal label printer (one label per feed).
+      const pages = chosen.map(s =>
+        `<div style="width:${p.w}mm;height:${p.h}mm;overflow:hidden;page-break-after:always;">${badgeHtml(s, fields, p)}</div>`
+      ).join('');
+      const doc = `<!DOCTYPE html><html><head><meta charset="UTF-8"><style>
+        @page{size:${p.w}mm ${p.h}mm;margin:0;}
+        *{box-sizing:border-box;}
+        html,body{margin:0;padding:0;font-family:Arial,sans-serif;color:#000;}
+      </style></head><body>${pages}</body></html>`;
+
+      const frame = document.createElement('iframe');
+      frame.style.cssText = 'position:fixed;left:-9999px;width:600px;height:800px;border:none;';
+      document.body.appendChild(frame);
+      frame.contentDocument.open(); frame.contentDocument.write(doc); frame.contentDocument.close();
+      setTimeout(() => { frame.contentWindow.focus(); frame.contentWindow.print();
+        setTimeout(() => frame.remove(), 1000); }, 400);
+    });
+
+    refreshPreview();
+  }
+
+  async _renderShelfTags(content) {
+    const presetOpts = Object.entries(ShelfTags.PRESETS)
+      .map(([k,v]) => `<option value="${k}">${v.name}</option>`).join('');
+
+    content.innerHTML = `
+      <div class="settings-section">
+        <h3>Shelf Tags / Price Stickers</h3>
+        <p style="color:var(--text-muted);font-size:13px;margin-bottom:16px;">
+          Generate printable shelf tags with price, barcode, and product info.
+          Works on any printer — use Avery label sheets or a thermal label printer.
+        </p>
+
+        <div style="display:grid;grid-template-columns:1fr 300px;gap:24px;align-items:start;">
+
+          <!-- LEFT: controls -->
+          <div>
+            <!-- Label size -->
+            <div style="background:var(--surface2);border-radius:var(--radius);padding:14px;margin-bottom:14px;">
+              <div style="font-weight:700;font-size:12px;text-transform:uppercase;color:var(--text-muted);margin-bottom:10px;">Label Size</div>
+              <select id="st-preset" style="width:100%;">${presetOpts}</select>
+              <div style="font-size:11px;color:var(--text-muted);margin-top:6px;">
+                Avery sheets print on a normal printer. Thermal = single label on a roll printer.
+              </div>
+            </div>
+
+            <!-- Fields to show -->
+            <div style="background:var(--surface2);border-radius:var(--radius);padding:14px;margin-bottom:14px;">
+              <div style="font-weight:700;font-size:12px;text-transform:uppercase;color:var(--text-muted);margin-bottom:10px;">Show on Tag</div>
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;">
+                ${[
+                  ['name','Product name',true],['price','Price',true],
+                  ['barcode','Barcode',true],['unitPrice','Unit price ($/ea)',false],
+                  ['sku','SKU / McKesson #',false],['din','DIN',false],
+                  ['date','Date printed',false],['border','Border outline',true],
+                ].map(([id,label,def]) => `
+                  <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;">
+                    <input type="checkbox" id="st-f-${id}" ${def?'checked':''} /> ${label}
+                  </label>`).join('')}
+              </div>
+              <div style="margin-top:10px;">
+                <label style="font-size:12px;">Barcode type</label>
+                <select id="st-barcode-type" style="max-width:240px;margin-top:4px;">
+                  <option value="auto">Auto (UPC/EAN if numeric, else Code 128)</option>
+                  <option value="code128">Always Code 128</option>
+                </select>
+              </div>
+            </div>
+
+            <!-- Product selection -->
+            <div style="background:var(--surface2);border-radius:var(--radius);padding:14px;margin-bottom:14px;">
+              <div style="font-weight:700;font-size:12px;text-transform:uppercase;color:var(--text-muted);margin-bottom:10px;">Products</div>
+              <div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap;">
+                <button class="btn btn-outline btn-sm" id="st-add-all">+ All custom products</button>
+                <button class="btn btn-outline btn-sm" id="st-add-low">+ Low stock items</button>
+                <button class="btn btn-outline btn-sm" id="st-clear">Clear</button>
+              </div>
+              <input type="text" id="st-search" placeholder="Search to add a product…" style="width:100%;" autocomplete="off" />
+              <div id="st-search-results" style="display:none;max-height:160px;overflow-y:auto;
+                   border:1px solid var(--border);border-radius:var(--radius);margin-top:6px;"></div>
+              <div id="st-selected" style="margin-top:10px;max-height:220px;overflow-y:auto;"></div>
+            </div>
+
+            <div style="display:flex;gap:8px;">
+              <button class="btn btn-primary" id="st-print">🖨 Print Tags</button>
+              <button class="btn btn-outline" id="st-pdf">⬇ Save PDF</button>
+              <span id="st-count" style="align-self:center;font-size:13px;color:var(--text-muted);"></span>
+            </div>
+          </div>
+
+          <!-- RIGHT: live preview -->
+          <div style="position:sticky;top:16px;">
+            <div style="font-weight:600;font-size:12px;text-transform:uppercase;color:var(--text-muted);margin-bottom:8px;">Tag Preview</div>
+            <div id="st-preview" style="border:2px solid var(--border);border-radius:var(--radius);
+                 background:#fff;padding:10px;min-height:120px;display:flex;align-items:center;justify-content:center;">
+              <span style="color:var(--text-muted);font-size:12px;">Add a product to preview</span>
+            </div>
+          </div>
+
+        </div>
+      </div>`;
+
+    const selected = []; // {description, price, barcode, sku, din, packSize}
+
+    const getFields = () => ({
+      name:      content.querySelector('#st-f-name').checked,
+      price:     content.querySelector('#st-f-price').checked,
+      barcode:   content.querySelector('#st-f-barcode').checked,
+      unitPrice: content.querySelector('#st-f-unitPrice').checked,
+      sku:       content.querySelector('#st-f-sku').checked,
+      din:       content.querySelector('#st-f-din').checked,
+      date:      content.querySelector('#st-f-date').checked,
+      border:    content.querySelector('#st-f-border').checked,
+      barcodeType: content.querySelector('#st-barcode-type').value,
+    });
+
+    const toTag = p => ({
+      description: p.description,
+      price:       p.price != null ? p.price
+                  : (p.price_override != null ? p.price_override
+                  : (p.suggested_retail || p.regular_unit_price || 0)),
+      barcode:     p.upc || p.upc_unit || p.gtin_unit || '',
+      sku:         p.mckesson_item_no || '',
+      din:         p.din || '',
+      packSize:    p.pack_size || null,
+    });
+
+    const refreshPreview = () => {
+      const preview = content.querySelector('#st-preview');
+      const presetKey = content.querySelector('#st-preset').value;
+      const p = ShelfTags.PRESETS[presetKey];
+      const sample = selected[0] || { description:'Sample Product Name 500mg', price:9.99, barcode:'064589001926', sku:'123456', din:'02246789' };
+      const fields = getFields();
+      if (fields.unitPrice && sample.packSize) sample.unitPrice = ShelfTags.unitPriceStr(sample.price, sample.packSize, 'unit');
+      // Render at ~3.5px/mm scale
+      const scale = 3.5;
+      preview.innerHTML = `<div style="width:${p.labelW*scale}px;height:${p.labelH*scale}px;
+        border:1px dashed #bbb;background:#fff;">${ShelfTags.buildTagHtml(sample, fields, p)}</div>`;
+    };
+
+    const refreshSelected = () => {
+      const el = content.querySelector('#st-selected');
+      content.querySelector('#st-count').textContent =
+        selected.length ? `${selected.length} tag${selected.length!==1?'s':''}` : '';
+      if (!selected.length) { el.innerHTML = ''; refreshPreview(); return; }
+      el.innerHTML = selected.map((s,i) => `
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;
+             padding:5px 8px;border-bottom:1px solid var(--border);font-size:13px;">
+          <span style="flex:1;">${s.description}</span>
+          <span style="color:var(--text-muted);">$${Number(s.price||0).toFixed(2)}</span>
+          <button class="btn btn-sm st-rm" data-i="${i}" style="color:var(--danger);background:none;border:none;cursor:pointer;">✕</button>
+        </div>`).join('');
+      el.querySelectorAll('.st-rm').forEach(b => b.addEventListener('click', () => {
+        selected.splice(parseInt(b.dataset.i),1); refreshSelected();
+      }));
+      refreshPreview();
+    };
+
+    // Add all / low / clear
+    content.querySelector('#st-add-all').addEventListener('click', () => {
+      DB.getAllCustomProducts().forEach(p => selected.push(toTag(p)));
+      refreshSelected();
+    });
+    content.querySelector('#st-add-low').addEventListener('click', () => {
+      DB.getLowStockProducts().forEach(p => selected.push(toTag(p)));
+      refreshSelected();
+    });
+    content.querySelector('#st-clear').addEventListener('click', () => {
+      selected.length = 0; refreshSelected();
+    });
+
+    // Search
+    const searchEl = content.querySelector('#st-search');
+    const resEl    = content.querySelector('#st-search-results');
+    let _t = null;
+    searchEl.addEventListener('input', () => {
+      clearTimeout(_t);
+      _t = setTimeout(() => {
+        const term = searchEl.value.trim();
+        if (!term) { resEl.style.display='none'; return; }
+        const customs = DB.getAllCustomProducts().filter(p =>
+          (p.description||'').toLowerCase().includes(term.toLowerCase()) || (p.upc||'').includes(term));
+        const catalog = (DB.searchProducts ? DB.searchProducts(term) : []).slice(0,10);
+        const all = [...customs, ...catalog].slice(0,12);
+        if (!all.length) { resEl.innerHTML = '<div style="padding:8px;color:var(--text-muted);font-size:13px;">No matches.</div>'; resEl.style.display='block'; return; }
+        resEl.innerHTML = all.map((p,i) => `
+          <div class="st-res" data-i="${i}" style="padding:7px 10px;cursor:pointer;font-size:13px;
+               ${i<all.length-1?'border-bottom:1px solid var(--border);':''}">
+            ${p.description} <span style="color:var(--text-muted);">$${Number(p.price ?? p.price_override ?? p.suggested_retail ?? 0).toFixed(2)}</span>
+          </div>`).join('');
+        resEl.style.display = 'block';
+        resEl.querySelectorAll('.st-res').forEach(d => d.addEventListener('click', () => {
+          selected.push(toTag(all[parseInt(d.dataset.i)]));
+          searchEl.value=''; resEl.style.display='none'; refreshSelected();
+        }));
+      }, 200);
+    });
+
+    // Field toggles refresh preview
+    content.querySelectorAll('input[type=checkbox], #st-preset, #st-barcode-type')
+      .forEach(el => el.addEventListener('change', refreshPreview));
+
+    // Print / PDF
+    const buildDoc = () => {
+      const fields = getFields();
+      const tags = selected.map(s => ({
+        ...s,
+        unitPrice: fields.unitPrice && s.packSize ? ShelfTags.unitPriceStr(s.price, s.packSize, 'unit') : '',
+      }));
+      return ShelfTags.buildSheet(tags, fields, content.querySelector('#st-preset').value);
+    };
+
+    content.querySelector('#st-print').addEventListener('click', () => {
+      if (!selected.length) { alert('Add at least one product first.'); return; }
+      const doc = buildDoc();
+      const frame = document.createElement('iframe');
+      frame.style.cssText = 'position:fixed;left:-9999px;width:900px;height:1200px;border:none;';
+      document.body.appendChild(frame);
+      frame.contentDocument.open(); frame.contentDocument.write(doc); frame.contentDocument.close();
+      setTimeout(() => { frame.contentWindow.focus(); frame.contentWindow.print();
+        setTimeout(() => frame.remove(), 1000); }, 400);
+    });
+
+    content.querySelector('#st-pdf').addEventListener('click', async () => {
+      if (!selected.length) { alert('Add at least one product first.'); return; }
+      const doc = buildDoc();
+      if (window.electronAPI?.generateA5Pdf) {
+        const b64 = await window.electronAPI.generateA5Pdf(doc);
+        if (b64) {
+          const a = document.createElement('a');
+          a.href = 'data:application/pdf;base64,' + b64;
+          a.download = `shelf_tags_${new Date().toISOString().slice(0,10)}.pdf`;
+          a.click();
+          return;
+        }
+      }
+      // Browser fallback — open print dialog
+      const w = window.open('', '_blank');
+      w.document.write(doc); w.document.close();
+    });
+
+    refreshPreview();
   }
 
   _renderProducts(content) {
@@ -969,6 +1796,33 @@ class SettingsScreen {
                 placeholder="Supplier info, storage instructions…">${p?.notes||''}</textarea>
             </div>
 
+            <!-- Schedule / Controlled flag -->
+            <div class="form-group" style="background:var(--surface2);border-radius:var(--radius);padding:12px 14px;">
+              <label style="font-weight:700;display:block;margin-bottom:8px;">
+                Schedule / Dispensing Category
+              </label>
+              <div style="display:flex;gap:10px;flex-wrap:wrap;">
+                ${[
+                  ['none',     'None (Regular)',                     '',        'Regular OTC product'],
+                  ['btc',      '🟡 BTC — Schedule II',               '#856404', 'Patient name optional'],
+                  ['btc_ctrl', '🟠 Controlled BTC',                  '#a04000', 'Patient name required'],
+                ].map(([val, label, color, hint]) => `
+                  <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;
+                                font-size:13px;margin-bottom:6px;">
+                    <input type="radio" name="mp-schedule" value="${val}"
+                      ${(p?.schedule_flag||'none')===val?'checked':''} style="margin-top:2px;" />
+                    <span>
+                      <span style="${color?`color:${color};font-weight:600;`:''}">${label}</span>
+                      <span style="color:var(--text-muted);font-size:11px;margin-left:6px;">${hint}</span>
+                    </span>
+                  </label>`).join('')}
+              </div>
+              <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">
+                BTC = sold without Rx, pharmacist counsels patient.
+                Controlled BTC = same but patient name is mandatory for every sale.
+              </div>
+            </div>
+
             <div id="mp-err" class="alert alert-danger" style="display:none;"></div>
           </div>
           <div class="modal-footer" style="justify-content:space-between;">
@@ -990,8 +1844,10 @@ class SettingsScreen {
         const threshold= modal.querySelector('#mp-threshold').value !== '' ? parseFloat(modal.querySelector('#mp-threshold').value) : null;
         const gst      = modal.querySelector('#mp-gst').checked;
         const pst      = modal.querySelector('#mp-pst').checked;
-        const location = modal.querySelector('#mp-location').value.trim();
-        const notes    = modal.querySelector('#mp-notes').value.trim();
+        const location     = modal.querySelector('#mp-location').value.trim();
+        const notes        = modal.querySelector('#mp-notes').value.trim();
+        const scheduleFlag = modal.querySelector('input[name="mp-schedule"]:checked')?.value || 'none';
+        const scheduleSave = scheduleFlag === 'none' ? null : scheduleFlag;
 
         if (isCatalog) {
           const desc = modal.querySelector('#mp-desc').value.trim();
@@ -1000,6 +1856,7 @@ class SettingsScreen {
             description: desc || p.description, upc_unit: upc || null,
             price_override: price, gst_applicable: gst, pst_applicable: pst,
             qty_on_hand: qty, qty_threshold: threshold, location, notes,
+            schedule_flag: scheduleSave,
           });
         } else {
           const desc = modal.querySelector('#mp-desc').value.trim();
@@ -1009,9 +1866,11 @@ class SettingsScreen {
             DB.updateCustomProduct(p.custom_product_id, {
               description: desc, upc, price: price ?? 0, gst_applicable: gst, pst_applicable: pst,
               qty_on_hand: qty, qty_threshold: threshold, location, notes,
+              schedule_flag: scheduleSave,
             });
           } else {
-            DB.saveCustomProduct({ description: desc, upc, price: price ?? 0, gst_applicable: gst, pst_applicable: pst, created_by: Auth.current()?.name });
+            DB.saveCustomProduct({ description: desc, upc, price: price ?? 0, gst_applicable: gst,
+              pst_applicable: pst, created_by: Auth.current()?.name, schedule_flag: scheduleSave });
           }
         }
         close();
@@ -1213,15 +2072,21 @@ class SettingsScreen {
   }
 
   _showEditStaffModal(s) {
+    const sigMode  = s.signoff_mode || 'pin';
+    let   sigDefaults = {};
+    try { sigDefaults = JSON.parse(s.checklist_defaults || '{}') || {}; } catch(_) {}
+    const eligible = (typeof Checklists !== 'undefined' && Checklists.eligibleDefaultItems)
+      ? Checklists.eligibleDefaultItems() : [];
+
     const modal = document.createElement('div');
     modal.className = 'modal-overlay';
     modal.innerHTML = `
-      <div class="modal" style="max-width:460px;">
+      <div class="modal" style="max-width:520px;max-height:92vh;display:flex;flex-direction:column;">
         <div class="modal-header">
           <h3>&#9998; Edit Staff — ${s.name}</h3>
           <button class="modal-close">&times;</button>
         </div>
-        <div class="modal-body">
+        <div class="modal-body" style="overflow-y:auto;">
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
             <div class="form-group" style="grid-column:span 2;">
               <label>Full Name <span style="color:var(--danger);">*</span></label>
@@ -1243,7 +2108,56 @@ class SettingsScreen {
               <label>Email</label>
               <input id="es-email" type="email" value="${s.email||''}" placeholder="staff@example.com" />
             </div>
+            <div class="form-group">
+              <label>Designation / Title <span style="font-weight:400;color:var(--text-muted);">(for name badge)</span></label>
+              <input id="es-designation" type="text" value="${s.designation||''}" placeholder="e.g. Pharmacist, Pharmacy Assistant" />
+            </div>
+            <div class="form-group">
+              <label>License # <span style="font-weight:400;color:var(--text-muted);">(pharmacists)</span></label>
+              <input id="es-license" type="text" value="${s.license_number||''}" placeholder="e.g. 12345" />
+            </div>
           </div>
+
+          <hr style="margin:14px 0;border:none;border-top:1px solid var(--border);" />
+          <div style="font-weight:700;font-size:13px;text-transform:uppercase;letter-spacing:.03em;color:var(--text-muted);margin-bottom:8px;">
+            Pharmacist Sign-Off <span style="font-weight:400;text-transform:none;">(for SOD/EOD &amp; counselling sign-offs)</span>
+          </div>
+
+          <div class="form-group">
+            <label>Saved Signature <span style="font-weight:400;color:var(--text-muted);">— draw once; stamped on sign-off documents</span></label>
+            <div style="border:1px dashed var(--border);border-radius:var(--radius);background:#fff;">
+              <canvas id="es-sig" style="width:100%;height:120px;display:block;touch-action:none;cursor:crosshair;"></canvas>
+            </div>
+            <div style="margin-top:6px;">
+              <button type="button" class="btn btn-outline btn-sm" id="es-sig-clear">Clear</button>
+              <span style="font-size:12px;color:var(--text-muted);margin-left:6px;">You won't redraw this each time — it's stored on the profile.</span>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label>Sign-off mode</label>
+            <label style="display:flex;gap:8px;font-size:13px;align-items:flex-start;cursor:pointer;margin-bottom:4px;">
+              <input type="radio" name="es-mode" value="tick" ${sigMode==='tick'?'checked':''} style="margin-top:2px;" />
+              <span><b>Tick to attest</b> — fastest. Use when you're signed in as yourself.</span>
+            </label>
+            <label style="display:flex;gap:8px;font-size:13px;align-items:flex-start;cursor:pointer;">
+              <input type="radio" name="es-mode" value="pin" ${sigMode!=='tick'?'checked':''} style="margin-top:2px;" />
+              <span><b>Require my PIN</b> — enter your login PIN at sign-off. Use on a shared terminal.</span>
+            </label>
+          </div>
+
+          <div class="form-group">
+            <label>Always pre-check these routine items
+              <span style="font-weight:400;color:var(--text-muted);">— regulatory items always start unchecked</span></label>
+            <div style="max-height:170px;overflow:auto;border:1px solid var(--border);border-radius:var(--radius);padding:8px;">
+              ${eligible.length ? eligible.map(it => `
+                <label style="display:flex;gap:8px;font-size:12px;padding:3px 0;cursor:pointer;">
+                  <input type="checkbox" class="es-default" data-id="${it.id}" ${sigDefaults[it.id]?'checked':''} />
+                  <span>${it.label} <span style="color:var(--text-muted);">(${it.kind==='open'?'SOD':'EOD'})</span></span>
+                </label>`).join('') : '<div style="font-size:12px;color:var(--text-muted);">No eligible items.</div>'}
+            </div>
+          </div>
+
           <div id="es-error" style="display:none;" class="alert alert-danger"></div>
         </div>
         <div class="modal-footer" style="justify-content:space-between;">
@@ -1258,15 +2172,32 @@ class SettingsScreen {
     modal.querySelector('#es-cancel').addEventListener('click', close);
     modal.querySelector('#es-name').focus();
 
+    // Signature pad
+    const sigPad = (typeof SignaturePad !== 'undefined')
+      ? SignaturePad.attach(modal.querySelector('#es-sig')) : null;
+    if (sigPad && s.signature) setTimeout(() => sigPad.load(s.signature), 30);
+    modal.querySelector('#es-sig-clear')?.addEventListener('click', () => sigPad && sigPad.clear());
+
     modal.querySelector('#es-save').addEventListener('click', () => {
       const name  = modal.querySelector('#es-name').value.trim();
       const errEl = modal.querySelector('#es-error');
       if (!name) { errEl.textContent = 'Name is required.'; errEl.style.display='block'; return; }
+
+      const signature = sigPad ? (sigPad.toDataURL() || null) : (s.signature || null);
+      const signoff_mode = (modal.querySelector('input[name="es-mode"]:checked')?.value) || 'pin';
+      const defaults = {};
+      modal.querySelectorAll('.es-default:checked').forEach(c => { defaults[c.dataset.id] = true; });
+
       DB.updateStaff(s.staff_id, {
         name,
-        role:   modal.querySelector('#es-role').value,
-        emp_id: modal.querySelector('#es-empid').value.trim() || null,
-        email:  modal.querySelector('#es-email').value.trim() || null,
+        role:           modal.querySelector('#es-role').value,
+        emp_id:         modal.querySelector('#es-empid').value.trim() || null,
+        email:          modal.querySelector('#es-email').value.trim() || null,
+        designation:    modal.querySelector('#es-designation').value.trim() || null,
+        license_number: modal.querySelector('#es-license').value.trim() || null,
+        signature,
+        signoff_mode,
+        checklist_defaults: JSON.stringify(defaults),
       });
       Audit.configChange(`Staff updated: ${name} (ID ${s.staff_id})`);
       close();
@@ -1772,6 +2703,89 @@ class SettingsScreen {
     });
   }
 
+  async _renderBtcFolder(content) {
+    const saved = await Config.get('btc_records_folder') || '';
+    content.innerHTML = `
+      <div class="settings-section">
+        <h3>BTC / Schedule II Records Folder</h3>
+        <p style="color:var(--text-muted);font-size:13px;margin-bottom:20px;">
+          After each BTC (Behind the Counter) sale, a PDF record is automatically saved to this folder.
+          Use it for your internal records and NAPRA audits. Patient name is optional and for your records only.
+        </p>
+
+        <div class="form-group" style="max-width:540px;">
+          <label>Records Folder Path</label>
+          <div style="display:flex;gap:8px;">
+            <input type="text" id="btc-folder-path" value="${saved}"
+                   placeholder="e.g. C:\\Pharmacy Records\\BTC"
+                   style="font-family:monospace;font-size:13px;flex:1;" />
+            <button class="btn btn-outline" data-browse="#btc-folder-path" style="white-space:nowrap;">📁 Browse</button>
+          </div>
+          <div style="font-size:12px;color:var(--text-muted);margin-top:4px;">
+            The folder must already exist. Monthly subfolders are created automatically.
+            Leave blank to disable auto-save.
+          </div>
+        </div>
+
+        <div style="background:var(--surface2);border-radius:var(--radius);padding:14px;
+                    max-width:540px;margin-bottom:20px;">
+          <div style="font-weight:700;font-size:13px;margin-bottom:8px;">📁 File naming format</div>
+          <code style="font-size:12px;color:var(--text-muted);">
+            2026-06-14-14-30-22_DrugName_PharmacistRPh.pdf
+          </code>
+          <div style="font-size:12px;color:var(--text-muted);margin-top:6px;">
+            Each PDF contains: date/time, drug name, DIN, quantity, price, pharmacist, counselling confirmation, patient name/phone (if entered).
+          </div>
+        </div>
+
+        <button class="btn btn-primary" id="btn-save-btc-folder">Save Folder Path</button>
+        <div id="btc-folder-status" style="margin-top:8px;font-size:13px;"></div>
+
+        <hr style="margin:24px 0;" />
+
+        <h3>Shift Sign-Off Records (Opening / EOD)</h3>
+        <p style="color:var(--text-muted);font-size:13px;margin-bottom:16px;">
+          Start-of-Day and End-of-Day checklists are saved as PDFs here and emailed to the
+          recipients below. Leave blank to disable.
+        </p>
+        <div class="form-group" style="max-width:540px;">
+          <label>Shift Records Folder Path</label>
+          <div style="display:flex;gap:8px;">
+            <input type="text" id="shift-folder-path" value="${(await Config.get('shift_records_folder'))||''}"
+                   placeholder="e.g. C:\\Pharmacy Records\\Shift" style="font-family:monospace;font-size:13px;flex:1;" />
+            <button class="btn btn-outline" data-browse="#shift-folder-path" style="white-space:nowrap;">📁 Browse</button>
+          </div>
+        </div>
+        <div class="form-group" style="max-width:540px;">
+          <label>Email Recipients <span style="font-weight:400;color:var(--text-muted);">(comma-separated; blank = use Sales recipients)</span></label>
+          <input type="text" id="shift-recipients" value="${(await Config.get('shift_records_recipients'))||''}"
+                 placeholder="owner@pharmacy.ca, rph@pharmacy.ca" />
+        </div>
+        <button class="btn btn-primary" id="btn-save-shift-records">Save Shift Records Settings</button>
+        <div id="shift-records-status" style="margin-top:8px;font-size:13px;"></div>
+      </div>`;
+
+    content.querySelector('#btn-save-btc-folder').addEventListener('click', async () => {
+      const path   = content.querySelector('#btc-folder-path').value.trim();
+      const status = content.querySelector('#btc-folder-status');
+      await Config.set('btc_records_folder', path);
+      status.textContent  = path ? `✓ Saved — PDFs will be saved to: ${path}` : '✓ Saved — auto-save disabled.';
+      status.style.color  = 'var(--success)';
+      setTimeout(() => { status.textContent = ''; }, 3000);
+    });
+
+    content.querySelector('#btn-save-shift-records').addEventListener('click', async () => {
+      const status = content.querySelector('#shift-records-status');
+      await Config.setMany({
+        shift_records_folder:     content.querySelector('#shift-folder-path').value.trim(),
+        shift_records_recipients: content.querySelector('#shift-recipients').value.trim(),
+      });
+      status.textContent = '✓ Shift records settings saved.';
+      status.style.color = 'var(--success)';
+      setTimeout(() => { status.textContent = ''; }, 3000);
+    });
+  }
+
   async _renderPrinter(content) {
     content.innerHTML = `
       <h2>Receipt Printer</h2>
@@ -2117,6 +3131,33 @@ class SettingsScreen {
           Sales &amp; Tax recipients above if the field is left blank.
         </p>
 
+        <!-- Which report sections to include -->
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+                    padding:14px 16px;margin-bottom:16px;">
+          <div style="font-weight:700;font-size:12px;text-transform:uppercase;color:var(--text-muted);margin-bottom:10px;">
+            Report Sections to Include
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+            ${[
+              ['summary',   'Sales Summary',          true,  true ],
+              ['methods',   'By Payment Method',      true,  false],
+              ['tax',       'Tax Breakdown',          true,  false],
+              ['products',  'Top Products Sold',      false, false],
+              ['btc',       'BTC / Controlled Log',   false, false],
+              ['lowstock',  'Low Stock Alert',        false, false],
+            ].map(([id,label,def,locked]) => `
+              <label style="display:flex;align-items:center;gap:8px;cursor:${locked?'not-allowed':'pointer'};font-size:13px;${locked?'opacity:.7;':''}">
+                <input type="checkbox" id="auto-rpt-${id}"
+                  ${(autoCfg['auto_rpt_'+id]==='true' || (autoCfg['auto_rpt_'+id]===undefined && def))?'checked':''}
+                  ${locked?'disabled checked':''} />
+                ${label}${locked?' <span style="font-size:10px;color:var(--text-muted);">(always)</span>':''}
+              </label>`).join('')}
+          </div>
+          <div style="font-size:11px;color:var(--text-muted);margin-top:8px;">
+            These sections apply to both daily and monthly emails.
+          </div>
+        </div>
+
         <!-- Daily -->
         <div style="border:1px solid var(--border);border-radius:var(--radius);padding:14px 16px;margin-bottom:14px;">
           <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">
@@ -2213,6 +3254,12 @@ class SettingsScreen {
         auto_monthly_enabled:   content.querySelector('#auto-monthly-on').checked ? 'true' : 'false',
         auto_monthly_day:       content.querySelector('#auto-monthly-day').value,
         auto_monthly_recipients: content.querySelector('#auto-monthly-recipients').value.trim(),
+        // Report section selection
+        auto_rpt_methods:  content.querySelector('#auto-rpt-methods').checked  ? 'true' : 'false',
+        auto_rpt_tax:      content.querySelector('#auto-rpt-tax').checked      ? 'true' : 'false',
+        auto_rpt_products: content.querySelector('#auto-rpt-products').checked ? 'true' : 'false',
+        auto_rpt_btc:      content.querySelector('#auto-rpt-btc').checked      ? 'true' : 'false',
+        auto_rpt_lowstock: content.querySelector('#auto-rpt-lowstock').checked ? 'true' : 'false',
       });
       showAutoMsg('✓ Schedule saved.');
     });
@@ -2295,7 +3342,7 @@ class SettingsScreen {
         <div class="form-group">
           <label>SQL Server <span style="font-weight:400;color:var(--text-muted);">(e.g. HOSTNAME\\SQLEXPRESS)</span></label>
           <input type="text" id="sql-server" value="${cfg.server || ''}"
-                 placeholder="PILL4ME-PCY\\SQLEXPRESS" />
+                 placeholder="SERVER-PC\\SQLEXPRESS" />
         </div>
         <div class="form-group">
           <label>Database</label>
@@ -2400,6 +3447,34 @@ class SettingsScreen {
           <button class="btn btn-outline" id="btn-export-json">&#8659; Export All Data (.json)</button>
         </div>
         <hr style="margin:16px 0;" />
+
+        <h4 style="margin-bottom:10px;font-size:14px;">Automatic Nightly Backup</h4>
+        <p class="text-muted" style="font-size:13px;margin-bottom:12px;">
+          Saves a <code>.sqlite</code> copy of the database to a folder every night.
+          Point this at a OneDrive / network / external-drive folder (ideally on an
+          encrypted/BitLocker location) so a copy lives off this PC.
+        </p>
+        <div class="form-group" style="display:flex;align-items:center;gap:8px;">
+          <input type="checkbox" id="auto-backup-enabled" style="width:auto;" />
+          <label for="auto-backup-enabled" style="margin:0;">Enable automatic nightly backup</label>
+        </div>
+        <div class="form-group" style="max-width:160px;">
+          <label>Time</label>
+          <input type="time" id="auto-backup-time" value="23:30" />
+        </div>
+        <div class="form-group">
+          <label>Backup folder</label>
+          <div style="display:flex;gap:8px;">
+            <input type="text" id="auto-backup-folder" placeholder="e.g. D:\\PharmacyBackups" style="flex:1;" />
+            <button class="btn btn-outline" data-browse="#auto-backup-folder">&#128193; Browse</button>
+          </div>
+        </div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:6px;">
+          <button class="btn btn-primary" id="btn-save-backup">Save Backup Settings</button>
+          <button class="btn btn-outline" id="btn-backup-now">&#128190; Back Up Now</button>
+        </div>
+        <div id="auto-backup-msg" style="margin-top:4px;font-size:13px;"></div>
+        <hr style="margin:16px 0;" />
         <h4 style="margin-bottom:10px;font-size:14px;">Import / Restore</h4>
         <div class="alert alert-danger">
           <strong>Warning:</strong> Importing will overwrite your current database.
@@ -2411,6 +3486,56 @@ class SettingsScreen {
         <button class="btn btn-danger" id="btn-import">Import & Restore</button>
         <div id="backup-msg" style="margin-top:8px;font-size:13px;"></div>
       </div>`;
+
+    // ── Automatic nightly backup: load saved settings + wire controls ──
+    (async () => {
+      const enabled = (await Config.get('auto_backup_enabled')) === 'true';
+      const time    = (await Config.get('auto_backup_time')) || '23:30';
+      const folder  = (await Config.get('auto_backup_folder')) || '';
+      const cb = content.querySelector('#auto-backup-enabled');
+      const tm = content.querySelector('#auto-backup-time');
+      const fd = content.querySelector('#auto-backup-folder');
+      if (cb) cb.checked = enabled;
+      if (tm) tm.value = time;
+      if (fd) fd.value = folder;
+    })();
+
+    const backupMsg = content.querySelector('#auto-backup-msg');
+    content.querySelector('#btn-save-backup')?.addEventListener('click', async () => {
+      const enabled = content.querySelector('#auto-backup-enabled').checked;
+      const time    = content.querySelector('#auto-backup-time').value || '23:30';
+      const folder  = content.querySelector('#auto-backup-folder').value.trim();
+      if (enabled && !folder) {
+        backupMsg.textContent = 'Choose a backup folder first.'; backupMsg.style.color = 'var(--danger)'; return;
+      }
+      await Config.setMany({
+        auto_backup_enabled: enabled ? 'true' : 'false',
+        auto_backup_time:    time,
+        auto_backup_folder:  folder,
+      });
+      Audit.configChange('Automatic backup settings updated');
+      backupMsg.textContent = enabled
+        ? `Saved. Nightly backup at ${time} → ${folder}`
+        : 'Saved. Automatic backup is off.';
+      backupMsg.style.color = 'var(--success)';
+    });
+
+    content.querySelector('#btn-backup-now')?.addEventListener('click', async () => {
+      const folder = content.querySelector('#auto-backup-folder').value.trim();
+      if (!folder) { backupMsg.textContent = 'Choose a backup folder first.'; backupMsg.style.color = 'var(--danger)'; return; }
+      backupMsg.textContent = 'Backing up…'; backupMsg.style.color = 'var(--text-muted)';
+      try {
+        const res = await Scheduler.runBackupNow(folder);
+        if (res && res.ok) {
+          Audit.configChange('Manual database backup');
+          backupMsg.textContent = `✓ Backed up to ${res.path}`; backupMsg.style.color = 'var(--success)';
+        } else {
+          backupMsg.textContent = 'Backup failed: ' + (res?.error || 'unknown error'); backupMsg.style.color = 'var(--danger)';
+        }
+      } catch(e) {
+        backupMsg.textContent = 'Backup failed: ' + e.message; backupMsg.style.color = 'var(--danger)';
+      }
+    });
 
     content.querySelector('#btn-export').addEventListener('click', () => {
       try {
