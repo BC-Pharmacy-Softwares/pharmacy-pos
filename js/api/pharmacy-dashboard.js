@@ -281,11 +281,29 @@ const PharmacyDashboardAPI = (() => {
 
   /* Save a receipt PDF to the WinRx document inbox folder.
      filename: e.g. "RCPT60004A.pdf"
-     base64:   PDF as base64 string */
+     base64:   PDF as base64 string
+     Uses IPC directly — does NOT require WinRx SQL to be connected. */
   async function savePdfToFolder(base64, filename) {
-    if (!_localApi()) return { ok: false, reason: 'no-local-api' };
     const folderPath = await Config.get('doc_folder_path');
     if (!folderPath) return { ok: false, reason: 'no-folder-configured' };
+
+    // Prefer direct IPC (always available in Electron, no SQL dependency)
+    if (window.electronAPI?.savePdfFile) {
+      try {
+        const result = await window.electronAPI.savePdfFile({ base64, filename, folderPath });
+        if (result?.ok) {
+          console.log(`savePdfToFolder: saved ${filename} → ${result.path}`);
+          return { ok: true, path: result.path };
+        }
+        throw new Error(result?.error || 'save failed');
+      } catch (e) {
+        console.warn('savePdfToFolder IPC error:', e.message);
+        return { ok: false, reason: e.message };
+      }
+    }
+
+    // Fallback: HTTP API (only if local SQL API is running)
+    if (!_localApi()) return { ok: false, reason: 'no-local-api' };
     try {
       const resp = await fetch(`${_localApi()}/save-pdf-file`, {
         method:  'POST',
