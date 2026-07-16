@@ -77,33 +77,29 @@ const Print = (() => {
   ─────────────────────────────────────────────────────────────── */
   var MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
-  /* What gets ENCODED in the barcode bars — RCPT + PHN only */
+  /* What gets ENCODED in the barcode bars — RCPT{RxNumber}{BranchCode}
+     e.g. "RCPT60004A"  — this is what WinRx BatchScan reads to auto-attach.
+     Falls back to PHN-based code only when there is no Rx item (OTC-only txn). */
   function getRxBarcodeEncoded(items, patient) {
-    if (patient && patient.phn) return 'RCPT' + String(patient.phn);
     var rx = (items||[]).find(function(i){ return i.item_type === 'RX' && i.rx_number; });
-    return rx ? ('RCPT' + rx.rx_number) : null;
+    if (rx) return 'RCPT' + String(rx.rx_number) + String(rx.branch_code || 'A');
+    // OTC-only fallback — no Rx number, use PHN
+    if (patient && patient.phn) return 'RCPT' + String(patient.phn).trim();
+    return null;
   }
 
   /* Human-readable TEXT LABEL shown above the bars */
   function getRxBarcodeLabel(items, patient) {
-    if (patient && patient.phn) {
-      var phn  = String(patient.phn);
-      var giv  = String(patient.given_name || '').toUpperCase();
-      var sur  = String(patient.surname    || '').toUpperCase();
+    var encoded = getRxBarcodeEncoded(items, patient);
+    if (!encoded) return '';
+    // Append patient name for staff readability
+    if (patient && (patient.given_name || patient.surname)) {
+      var giv = String(patient.given_name || '').toUpperCase();
+      var sur = String(patient.surname    || '').toUpperCase();
       var name = [giv, sur].filter(Boolean).join(' ');
-      var dob  = '';
-      if (patient.dob) {
-        var dobStr = String(patient.dob).slice(0, 10);
-        var parts  = dobStr.split('-');
-        if (parts.length === 3) {
-          var yr = parseInt(parts[0]), mo = parseInt(parts[1]) - 1, dy = parseInt(parts[2]);
-          if (!isNaN(yr) && !isNaN(mo) && !isNaN(dy))
-            dob = ' ' + String(dy).padStart(2,'0') + '-' + MONTHS[mo] + '-' + yr;
-        }
-      }
-      return 'RCPT' + phn + (name ? ' - ' + name : '') + dob;
+      if (name) return encoded + ' - ' + name;
     }
-    return getRxBarcodeEncoded(items, patient) || '';
+    return encoded;
   }
 
   /* Backward-compat alias used by filename generation */
@@ -111,7 +107,7 @@ const Print = (() => {
     return getRxBarcodeLabel(items, patient);
   }
 
-  /* Sanitised filename — uses full label so the PDF filename is meaningful */
+  /* Filename: RCPT{RxNum}{Branch}.pdf — e.g. RCPT60004A.pdf */
   function barcodeFilename(bcVal) {
     return bcVal.replace(/[^a-zA-Z0-9_\-]/g, '_') + '.pdf';
   }
