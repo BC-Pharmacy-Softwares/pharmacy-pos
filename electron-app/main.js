@@ -403,14 +403,8 @@ function registerIpcHandlers() {
       return { ok: false, error: 'base64, filename, and folderPath are all required' };
     }
     try {
-      // Build monthly subfolder: folderPath\2026-06\
-      const now        = new Date();
-      const monthDir   = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
-      const targetDir  = path.join(folderPath, monthDir);
-      fs.mkdirSync(targetDir, { recursive: true });   // creates all missing directories
-
       const safeName  = path.basename(filename).replace(/[^a-zA-Z0-9._\-]/g, '_');
-      const fullPath  = path.join(targetDir, safeName);
+      const fullPath  = path.join(folderPath, safeName);
       const buf       = Buffer.from(base64, 'base64');
       fs.writeFileSync(fullPath, buf);
       console.log('[save-pdf-file] Saved:', fullPath, `(${buf.length} bytes)`);
