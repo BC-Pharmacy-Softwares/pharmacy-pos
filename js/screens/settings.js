@@ -3612,29 +3612,10 @@ class SettingsScreen {
         <div id="update-status" style="font-size:13px;color:var(--text-muted);min-height:24px;"></div>
         <div id="update-action" style="margin-top:14px;display:none;"></div>
       </div>
-      <div style="margin-top:24px;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:18px;max-width:520px;">
-        <h4 style="margin:0 0 10px;font-size:14px;">How to publish an update</h4>
-        <ol style="margin:0;padding-left:18px;font-size:13px;line-height:1.9;color:var(--text-muted);">
-          <li>Bump the version in <code>js/version.js</code> and <code>electron-app/package.json</code></li>
-          <li>Run <code>BUILD-WINDOWS.bat</code> to create the new installer</li>
-          <li>Go to <a href="#" id="link-releases" style="color:var(--primary);">GitHub → Releases</a> → <strong>Draft a new release</strong></li>
-          <li>Set the tag to <code>v1.4.2</code> (matching the version number)</li>
-          <li>Attach the <code>Pharmacy POS Setup *.exe</code> file</li>
-          <li>Click <strong>Publish release</strong></li>
-        </ol>
-        <p style="margin:10px 0 0;font-size:12px;color:var(--text-muted);">
-          The app checks this GitHub repo for new releases. Staff will see an update notification here.
-        </p>
-      </div>`;
+      `;
 
     const statusEl = content.querySelector('#update-status');
     const actionEl = content.querySelector('#update-action');
-
-    content.querySelector('#link-releases').addEventListener('click', e => {
-      e.preventDefault();
-      if (window.electronAPI?.openExternal) window.electronAPI.openExternal(`https://github.com/${REPO}/releases`);
-      else window.open(`https://github.com/${REPO}/releases`, '_blank');
-    });
 
     content.querySelector('#btn-check-update').addEventListener('click', async () => {
       statusEl.textContent = 'Checking for updates…';
@@ -3645,6 +3626,13 @@ class SettingsScreen {
         const resp = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`, {
           headers: { Accept: 'application/vnd.github+json' }
         });
+        // GitHub answers 404 when the repo simply has no releases yet — that's a
+        // normal state, not a failure. (It also 404s on a private repo, but this
+        // one is public, so 404 here always means "nothing published yet".)
+        if (resp.status === 404) {
+          statusEl.textContent = 'No releases published yet — this is the newest build.';
+          return;
+        }
         if (!resp.ok) throw new Error(`GitHub API returned ${resp.status}`);
         const data = await resp.json();
 
