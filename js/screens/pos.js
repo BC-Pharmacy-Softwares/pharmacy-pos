@@ -1930,7 +1930,11 @@ class POSScreen {
       const isCash        = selectedMethod === 'CASH';
       const isManualEntry = selectedMethod === 'MANUAL_ENTRY';
       const isCloverAny   = selectedMethod === 'DEBIT' || selectedMethod === 'CREDIT' || isManualEntry;
-      const cardEntryMethods = isManualEntry ? 8 : 15;
+      // Must be a full CloverAPI.CARD_ENTRY value — the bare base bits (8 / 15) are
+      // discarded by the terminal in kiosk mode, which is why manual entry never showed.
+      const cardEntryMethods = isManualEntry
+        ? CloverAPI.CARD_ENTRY.MANUAL
+        : CloverAPI.CARD_ENTRY.ALL;
       const recordMethod     = isManualEntry ? 'CREDIT' : selectedMethod;
 
       if (isCloverAny) {
@@ -2002,7 +2006,8 @@ class POSScreen {
      In split-payment mode (onSuccess callback provided): opens a second overlay,
      calls onSuccess(result) when approved, and returns control to the payment modal.
      In single-payment mode (no callback): takes over the whole modal and closes on success. */
-  async _runCloverPayment(modal, totals, method, close, onSuccess = null, cardEntryMethods = 15) {
+  async _runCloverPayment(modal, totals, method, close, onSuccess = null,
+                          cardEntryMethods = CloverAPI.CARD_ENTRY.ALL) {
     const configured = await CloverAPI.isConfigured();
     const errTarget  = modal.querySelector('#pm-error') || modal.querySelector('#payment-error');
 
@@ -2051,7 +2056,7 @@ class POSScreen {
       try {
         setMsg('Showing order on terminal…');
         await CloverAPI.displayOrder(this._cart, totals, externalId).catch(() => {});
-        setMsg(cardEntryMethods === 8
+        setMsg(cardEntryMethods === CloverAPI.CARD_ENTRY.MANUAL
           ? 'Enter card number on the Clover device…'
           : 'Waiting for customer — tap, insert, or swipe…');
         const result = await CloverAPI.sale(Math.round(totals.total_amount * 100), externalId, controller.signal, cardEntryMethods);
@@ -2107,7 +2112,7 @@ class POSScreen {
       try {
         setMsg('Showing order on terminal…');
         await CloverAPI.displayOrder(this._cart, totals, externalId).catch(() => {});
-        setMsg(cardEntryMethods === 8
+        setMsg(cardEntryMethods === CloverAPI.CARD_ENTRY.MANUAL
           ? 'Enter card number on the Clover device…'
           : 'Waiting for customer — tap, insert, or swipe…');
         const result = await CloverAPI.sale(Math.round(totals.total_amount * 100), externalId, controller.signal, cardEntryMethods);

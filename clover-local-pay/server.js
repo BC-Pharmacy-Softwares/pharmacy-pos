@@ -28,16 +28,39 @@ const {
   PORT               = '3001',
 } = process.env;
 
-// Clover SDK card entry method constants (must include KIOSK bit 0x8000 = 32768)
-// Source: clover/remote-pay-cloud CardEntryMethods
+// Clover card entry method constants.
+// Source: clover-android-sdk Intents.java + remote-pay-cloud CardEntryMethods.
+//
+// The value is THREE masks OR'd together — not a simple 4-bit flag:
+//   bits 0-3   base methods            mag=1  chip=2  tap=4  manual=8
+//   bits 8-11  KIOSK-mode mask         mag=256 chip=512 tap=1024 manual=2048
+//   bit  15    KIOSK_MASK_SUPPLIED     32768  ("a kiosk mask is present")
+//
+// Network Pay Display runs the terminal in customer-facing (kiosk) mode, so the
+// device reads the KIOSK mask. Send the base bit alone (e.g. 8 for manual) and
+// bit 15 is absent → the device discards the whole mask and falls back to its
+// own defaults, which do NOT include manual entry. That was the "manual entry
+// screen never appears" bug: always send base | kiosk | 32768.
+const KIOSK_MASK_SUPPLIED = 1 << 15;                       // 32768
+const _entry = (base, kiosk) => base | kiosk | KIOSK_MASK_SUPPLIED;
+
 const CLOVER_CARD_ENTRY = {
-  MAG:    34817,  // swipe
-  ICC:    34818,  // chip/insert
-  NFC:    34820,  // tap/contactless
-  MANUAL: 34824,  // keyed card number entry
-  DEFAULT: 34823, // swipe + chip + tap (no manual)
-  ALL:    34831,  // swipe + chip + tap + manual
+  MAG:     _entry(1,  256),   // 33025 — swipe
+  ICC:     _entry(2,  512),   // 33282 — chip/insert
+  NFC:     _entry(4, 1024),   // 33796 — tap/contactless
+  MANUAL:  _entry(8, 2048),   // 34824 — keyed card number entry
+  DEFAULT: _entry(7, 1792),   // 34567 — swipe + chip + tap (no manual)
+  ALL:     _entry(15, 3840),  // 36623 — swipe + chip + tap + manual
 };
+
+/* Accept any card-entry value and return one the device will actually honour:
+   derive the KIOSK mask from the base bits and set the supplied-flag. */
+function normalizeCardEntry(v) {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return CLOVER_CARD_ENTRY.ALL;
+  const base = v & 0b1111;                       // mag/chip/tap/manual
+  if (!base) return CLOVER_CARD_ENTRY.ALL;
+  return _entry(base, base << 8);
+}
 
 if (!CLOVER_DEVICE_IP) {
   console.log('[clover] CLOVER_DEVICE_IP not set — starting in offline mode (payment terminal not connected).');
@@ -495,6 +518,11 @@ app.post('/clover/sale', (req, res) => {
     return res.status(409).json({ ok: false, message: 'A payment is already in progress on the terminal.' });
   }
 
+  // Normalize the requested entry methods. A caller that sends only the base bits
+  // (an older POS build sent 8 for manual / 15 for all) gets the KIOSK mask and the
+  // supplied-flag added here, so the device can't silently fall back to its defaults.
+  const entryMethods = normalizeCardEntry(cardEntryMethods);
+
   const timer = setTimeout(() => {
     pendingSale = null;
     wsSend('CANCEL_PAYMENT', {});
@@ -518,7 +546,9 @@ app.post('/clover/sale', (req, res) => {
       tippableAmount:    amount,
       taxAmount:         0,
       externalPaymentId,
-      cardEntryMethods:  typeof cardEntryMethods === 'number' ? cardEntryMethods : CLOVER_CARD_ENTRY.ALL,
+      // Deprecated on PayIntent (TransactionSettings below is authoritative) —
+      // kept for older device firmware that still reads it.
+      cardEntryMethods:  entryMethods,
       disableCashback:   true,
       tipMode:           'NO_TIP',
       transactionSettings: {
@@ -530,14 +560,17 @@ app.post('/clover/sale', (req, res) => {
         // Suppress Clover's own receipt prompt — POS prints the receipt instead
         disablePrinting:                    true,
         disableReceiptSelection:            true,
-        // Allow cashier to key in card number manually (e.g. phone orders, unreadable cards)
-        allowManualCardEntry:               true,
-        cardEntryMethods:                   typeof cardEntryMethods === 'number' ? cardEntryMethods : 15,
+        // Manual (keyed) entry is enabled ONLY through cardEntryMethods — there is
+        // no allowManualCardEntry field in TransactionSettings (an earlier build set
+        // one; the device silently ignored it).
+        cardEntryMethods:                   entryMethods,
       },
     },
   });
 
-  console.log(`[clover] TX_START → ${amount}¢  id:${externalPaymentId}  cardEntryMethods:${cardEntryMethods}`);
+  const manualOn = (entryMethods & 8) ? 'manual ON' : 'manual off';
+  console.log(`[clover] TX_START → ${amount}¢  id:${externalPaymentId}  ` +
+              `cardEntryMethods:${entryMethods} (requested ${cardEntryMethods}, ${manualOn})`);
 });
 
 // ── Cancel ────────────────────────────────────────────────────────────────

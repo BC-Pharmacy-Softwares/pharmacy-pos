@@ -46,6 +46,6 @@ echo.
 echo [4/4] Done!
 echo.
 echo Installer is in:  electron-app\dist\
-echo File to share:    Pharmacy POS Setup 1.2.0.exe
+echo File to share:    Pharmacy POS Setup ^<version^>.exe  (see the dist folder)
 echo.
 pause
