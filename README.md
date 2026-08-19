@@ -4,7 +4,7 @@ A point-of-sale system for pharmacies. It rings up prescriptions and OTC product
 takes payments, keeps compliance records, tracks patient accounts, talks to WinRx and
 McKesson, and prints receipts, shelf tags, and reports — all from one Windows app.
 
-> **Version 1.4.3.** The installed version is shown on the login screen and at the
+> **Version 1.4.4.** The installed version is shown on the login screen and at the
 > top-right of Settings. Check it before reporting a problem.
 
 ---
@@ -59,7 +59,7 @@ Patients also never see drug cost or markup — only their copay and quantity.
 
 ## 2. Installing on a New Computer
 
-You only need **one file**: `Pharmacy POS Setup 1.4.3.exe` (the installer).
+You only need **one file**: `Pharmacy POS Setup 1.4.4.exe` (the installer).
 
 ### Steps
 1. Copy the installer to the new PC (USB or network share)
@@ -373,9 +373,22 @@ report as bad debt.
 ## 9. Refunds & Voids
 
 **History** (top bar) → find the transaction:
-- **Void** — reverses a whole transaction (today's only, Admin)
-- **↩ Return** — partial refund: tick which items to return → refund receipt prints.
-  If the original payment was a Clover card, the refund is sent to the terminal automatically.
+- **Void** — reverses a whole transaction (today's only, Admin). Does **not** touch the card terminal.
+- **↩ Return** — partial refund: tick which items to return, give a reason → **Process Refund**.
+
+### What happens on a Return
+1. If the original sale was paid by card, the refund is sent to the **Clover terminal automatically**
+2. The refund record is created
+3. A refund receipt prints
+
+Cancelling on the terminal aborts the whole thing — no record is created, nothing is refunded.
+
+> **Split payments across two cards:** only the **first** card is refunded to the terminal.
+> If a customer paid with two cards, refund the remainder on the Clover device yourself.
+
+> **If the terminal reports an error**, the refund record is still saved so the paperwork isn't
+> lost — but the money has *not* moved. Check the Clover device before refunding again, so the
+> customer isn't refunded twice.
 
 ---
 
@@ -599,6 +612,12 @@ scheduled time, that run is skipped — it does not catch up later.
 A 404 means no release has been published yet, which is normal. Any other error is
 usually no internet or a firewall blocking `api.github.com`.
 
+### Refund seems to hang, then says it failed
+Check the Clover device **before** retrying — if the terminal shows the refund went through,
+the customer has already been refunded and running it again will refund them twice.
+A 90-second stall followed by a failure message was a bug fixed in **1.4.4**; if you still
+see it, the PC is on an older build and needs updating.
+
 ### Barcode scanned twice
 The scanner is adding an extra Enter. Disable the "suffix" in the scanner's settings.
 
@@ -627,4 +646,4 @@ Copy it from the old account to the new one.
 
 ---
 
-*Pharmacy POS — User & Setup Guide · v1.4.3*
+*Pharmacy POS — User & Setup Guide · v1.4.4*
