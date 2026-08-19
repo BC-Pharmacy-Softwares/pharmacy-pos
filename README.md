@@ -4,7 +4,7 @@ A point-of-sale system for pharmacies. It rings up prescriptions and OTC product
 takes payments, keeps compliance records, tracks patient accounts, talks to WinRx and
 McKesson, and prints receipts, shelf tags, and reports — all from one Windows app.
 
-> **Version 1.4.4.** The installed version is shown on the login screen and at the
+> **Version 1.4.5.** The installed version is shown on the login screen and at the
 > top-right of Settings. Check it before reporting a problem.
 
 ---
@@ -59,7 +59,7 @@ Patients also never see drug cost or markup — only their copay and quantity.
 
 ## 2. Installing on a New Computer
 
-You only need **one file**: `Pharmacy POS Setup 1.4.4.exe` (the installer).
+You only need **one file**: `Pharmacy POS Setup 1.4.5.exe` (the installer).
 
 ### Steps
 1. Copy the installer to the new PC (USB or network share)
@@ -646,4 +646,4 @@ Copy it from the old account to the new one.
 
 ---
 
-*Pharmacy POS — User & Setup Guide · v1.4.4*
+*Pharmacy POS — User & Setup Guide · v1.4.5*

@@ -36,7 +36,7 @@ is a Mac (this repo). **Claude cannot run the app** — the user tests on Window
 - **Must stay in sync with** `electron-app/package.json` `"version"` (that names the installer `.exe`).
 - Shown in-app on the **login screen** and **Settings top-right**.
 - Scheme: `MAJOR.MINOR.PATCH`. Most builds = PATCH bump.
-- **Current version: 1.4.4**
+- **Current version: 1.4.5**
 - When making a build, bump both files and note it in the Work Log below.
 
 ---
@@ -147,7 +147,32 @@ pharmacy-pos/
 
 ## Work Log (newest first — append new entries here)
 
-### 1.4.4 — (current)
+### 1.4.5 — (current)
+- **CRITICAL — an unlinked Clover refund CHARGED the customer instead of refunding them.**
+  Reported from the floor: "I needed to refund $1, it pushed $1 to the device instead of -$1."
+  Exactly right, and there were **two** faults in the same payload:
+  1. **`amount` was positive.** Clover's SDK sends `setAmount(-Math.abs(amount))` for a manual refund.
+  2. **`transactionType` was missing entirely.** This is the field the device switches on:
+     `PAYMENT` = charge the card, `CREDIT` = refund it. With it absent the device defaults to
+     **PAYMENT**, so the "refund" ran as a plain sale and took another $1 off the customer.
+  The old payload sent **`action: 'MANUAL_REFUND'`** instead — but `PayIntent.action` is an Android
+  **Intent action string** (`clover.intent.action.PAY`), *not* a transaction type, so the device ignored
+  it. Fixed to `transactionType:'CREDIT'` + `amount: -Math.abs(amount)`, matching
+  `CloverConnector.manualRefund()`.
+- **The two refund paths differ in sign — don't "normalise" them:**
+  - **Linked** (`REFUND_REQUEST`, when the sale stored a `clover_payment_id`): amount **positive**,
+    `paymentId` required, `orderId` optional. This path was already correct.
+  - **Manual/unlinked** (`TX_START` + `transactionType:'CREDIT'`): amount **negative**.
+  `FINISH_OK` now reports `Math.abs(credit.amount)` so callers don't have to care which path ran.
+- **Sale path deliberately untouched.** It still sends `action:'SALE'` with no `transactionType`;
+  that works because the device defaults to `PAYMENT`. Adding an explicit `transactionType:'PAYMENT'`
+  would be more correct but risks a working money path for no behavioural gain — leave it unless
+  something breaks.
+- **Combined with 1.4.4:** an unlinked refund previously charged the customer, *then* stalled 90s and
+  told staff to refund manually. Worst case the customer was down the refund amount and staff refunded
+  by hand on top. Anyone who ran an unlinked refund on ≤1.4.4 should reconcile those transactions.
+
+### 1.4.4
 - **CRITICAL — Clover manual refund could refund the customer TWICE.** `server.js` `handleMessage`
   opened `case 'FINISH_OK'` with `if (!pendingSale) break;`. A **MANUAL_REFUND** (unlinked — used when
   the original sale has no stored `clover_payment_id`) is started with **TX_START** and completes via

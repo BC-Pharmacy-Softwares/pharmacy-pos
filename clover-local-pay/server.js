@@ -290,7 +290,9 @@ function handleMessage(method, payload) {
         pendingRefund.resolve({
           ok:       true,
           refundId: credit.id || null,
-          amount:   credit.amount != null ? credit.amount : null,
+          // CREDIT amounts come back negative — report the magnitude so callers
+          // don't have to care which refund path ran.
+          amount:   credit.amount != null ? Math.abs(credit.amount) : null,
           cardType: credit.cardTransaction?.cardType || null,
           last4:    credit.cardTransaction?.last4    || null,
           result:   'SUCCESS',
@@ -653,13 +655,26 @@ app.post('/clover/refund', (req, res) => {
       fullRefund: false,
     });
   } else {
-    // Manual refund — no original payment ID (e.g. keyed-in transaction or ID not stored)
+    // Manual refund — no original payment ID (e.g. keyed-in transaction or ID not stored).
+    //
+    // TWO things make this a refund instead of a sale, and Clover's own SDK does BOTH
+    // (CloverConnector.manualRefund):
+    //   builder.setAmount(-Math.abs(amount)).setTransactionType(TransactionType.CREDIT)
+    //
+    // `transactionType` is what the device actually switches on: PAYMENT = charge the
+    // card, CREDIT = refund it. Omit it and the device defaults to PAYMENT, so a "$1
+    // refund" CHARGES the customer $1. The amount must be negative as well.
+    //
+    // NB: `action` is an Android *Intent action string* (clover.intent.action.PAY), not
+    // a transaction type — an earlier build sent action:'MANUAL_REFUND', which the
+    // device simply ignored, leaving it a plain sale.
     const externalId = 'REFUND-' + Date.now();
-    console.log(`[clover] TX_START MANUAL_REFUND → ${amount}¢  id:${externalId}`);
+    const creditAmount = -Math.abs(amount);
+    console.log(`[clover] TX_START CREDIT (manual refund) → ${creditAmount}¢  id:${externalId}`);
     wsSend('TX_START', {
       payIntent: {
-        action:           'MANUAL_REFUND',
-        amount,
+        transactionType:   'CREDIT',
+        amount:            creditAmount,
         externalPaymentId: externalId,
         tipAmount:         0,
         taxAmount:         0,
