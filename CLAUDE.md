@@ -36,7 +36,7 @@ is a Mac (this repo). **Claude cannot run the app** — the user tests on Window
 - **Must stay in sync with** `electron-app/package.json` `"version"` (that names the installer `.exe`).
 - Shown in-app on the **login screen** and **Settings top-right**.
 - Scheme: `MAJOR.MINOR.PATCH`. Most builds = PATCH bump.
-- **Current version: 1.4.1**
+- **Current version: 1.4.2**
 - When making a build, bump both files and note it in the Work Log below.
 
 ---
@@ -147,7 +147,36 @@ pharmacy-pos/
 
 ## Work Log (newest first — append new entries here)
 
-### 1.4.1 — (current)
+### 1.4.2 — (current)
+- **Clover manual (keyed) card entry FIXED — the terminal never showed the manual-entry screen.**
+  Root cause: `cardEntryMethods` is **not** a simple 4-bit flag. It is three masks OR'd together
+  (clover-android-sdk `Intents.java`):
+  `bits 0-3` base methods (mag=1 chip=2 tap=4 **manual=8**) | `bits 8-11` **KIOSK-mode** mask
+  (mag=256 chip=512 tap=1024 **manual=2048**) | `bit 15` `KIOSK_MODE_CARD_ENTRY_MASK_SUPPLIED` (32768).
+  Network Pay Display runs the device in **customer-facing kiosk mode**, so it reads the KIOSK mask —
+  and if bit 15 is absent it **discards the whole mask** and falls back to its own defaults
+  (swipe/chip/tap, no manual). `pos.js` was sending bare `8` for manual / `15` for normal → ignored.
+  Correct values: **MANUAL 34824**, **DEFAULT 34567**, **ALL 36623**.
+  - `pos.js` now sends `CloverAPI.CARD_ENTRY.MANUAL` / `.ALL` instead of `8` / `15`
+    (also `_runCloverPayment` default param + the two "enter card number" message checks).
+  - `js/api/clover.js` exports **`CloverAPI.CARD_ENTRY`** = { DEFAULT, MANUAL, ALL } — single source of truth.
+  - `clover-local-pay/server.js`: constants rebuilt from the real bit math (the old MAG/ICC/NFC/DEFAULT/ALL
+    all carried manual's kiosk bit 2048 and lacked their own 256/512/1024 — old `ALL` 34831 literally meant
+    "all four normally, but **manual only** in kiosk mode"). Added **`normalizeCardEntry()`** so a bare base
+    value from an older renderer is upgraded to a kiosk-valid mask instead of silently failing. TX_START log
+    now prints the effective value + `manual ON/off`.
+  - Removed **`allowManualCardEntry`** from `transactionSettings` — **no such field exists**; manual entry is
+    controlled *only* through `cardEntryMethods`. (Real PayIntent field is `isAllowManualCardEntryOnMFD`.)
+- **If the screen still doesn't appear after this build**, the remaining causes are device-side, not code:
+  (a) manual entry not enabled in **Setup → Payments** on the terminal; (b) the option sits behind
+  **"More Options"** on the customer screen; (c) merchant not boarded for keyed / card-not-present.
+  Check `[clover] TX_START … cardEntryMethods:34824 (… manual ON)` in the log to confirm the app's half is right.
+- NB: `transactionSettings.disablePrinting` is **also not a real field** (the SDK maps it to
+  `cloverShouldHandleReceipts`, inverted). Left as-is — `disableReceiptSelection: true` is what actually
+  suppresses the receipt prompt today, so behaviour is unchanged. Revisit only if the prompt reappears.
+- `BUILD-WINDOWS.bat` no longer prints a hardcoded (stale) installer filename.
+
+### 1.4.1
 - **AR correctness + interactivity batch (refines 1.4.0 AR):**
   - **Per-Rx reconciliation:** AR now computes billed/paid/owing **per prescription** (`getPosRxPaidByRx`
     groups POS RX line-item dollars by Rx#). Fixes the over-credit bug where the old `getPosPaidForPatient`

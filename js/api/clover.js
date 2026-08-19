@@ -57,13 +57,23 @@ const CloverAPI = (() => {
     });
   }
 
+  /* Card entry methods accepted by the terminal.
+     Each value is  base bits | KIOSK-mode bits | KIOSK_MASK_SUPPLIED(32768)  —
+     see the block comment in clover-local-pay/server.js. Network Pay Display runs
+     the device in kiosk mode, so a bare base value (8 / 15) is silently ignored
+     and manual entry never appears. Always send one of these. */
+  const CARD_ENTRY = {
+    DEFAULT: 34567,  // swipe + chip + tap
+    MANUAL:  34824,  // keyed card number entry only
+    ALL:     36623,  // swipe + chip + tap + manual
+  };
+
   /* Trigger a payment on the terminal.
      amount — integer in cents (e.g. $13.50 → 1350)
      externalPaymentId — your unique order reference
      signal — AbortSignal so the UI cancel button can abort the fetch
      Returns { ok, paymentId, amount, cardType, last4, result } */
-  // 34831 = Clover SDK ALL methods (swipe+chip+tap+manual), includes required KIOSK bit (32768)
-  async function sale(amountCents, externalPaymentId, signal = null, cardEntryMethods = 34831) {
+  async function sale(amountCents, externalPaymentId, signal = null, cardEntryMethods = CARD_ENTRY.ALL) {
     return _post('/clover/sale', { amount: amountCents, externalPaymentId, cardEntryMethods }, signal);
   }
 
@@ -90,5 +100,5 @@ const CloverAPI = (() => {
     }, signal);
   }
 
-  return { isConfigured, ping, displayOrder, sale, cancel, refund };
+  return { isConfigured, ping, displayOrder, sale, cancel, refund, CARD_ENTRY };
 })();
