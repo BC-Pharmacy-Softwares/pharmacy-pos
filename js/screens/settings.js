@@ -3645,7 +3645,14 @@ class SettingsScreen {
           statusEl.textContent = `Update available: v${tag}`;
           statusEl.style.color = 'var(--success, green)';
 
-          const asset = (data.assets || []).find(a => a.name.endsWith('.exe'));
+          // Prefer the NSIS installer ("Pharmacy POS Setup 1.4.3.exe") — the build also
+          // produces PharmacyPOS-Portable.exe, which RUNS the new version without
+          // upgrading the installed one. Picking that by accident leaves the old build
+          // in place and the update silently does nothing.
+          const exes  = (data.assets || []).filter(a => /\.exe$/i.test(a.name));
+          const asset = exes.find(a => /setup/i.test(a.name))
+                     || exes.find(a => !/portable/i.test(a.name))
+                     || exes[0];
           const downloadUrl = asset?.browser_download_url || data.html_url;
           const notes = data.body ? data.body.substring(0, 300) : '';
 

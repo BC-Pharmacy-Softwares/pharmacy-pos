@@ -36,7 +36,7 @@ is a Mac (this repo). **Claude cannot run the app** — the user tests on Window
 - **Must stay in sync with** `electron-app/package.json` `"version"` (that names the installer `.exe`).
 - Shown in-app on the **login screen** and **Settings top-right**.
 - Scheme: `MAJOR.MINOR.PATCH`. Most builds = PATCH bump.
-- **Current version: 1.4.2**
+- **Current version: 1.4.3**
 - When making a build, bump both files and note it in the Work Log below.
 
 ---
@@ -147,7 +147,28 @@ pharmacy-pos/
 
 ## Work Log (newest first — append new entries here)
 
-### 1.4.2 — (current)
+### 1.4.3 — (current)
+- **Version bumped to 1.4.3 so the built-in updater can actually fire.** Some machines had `js/`
+  copied in manually, so they *report* 1.4.2 while their `app.asar` + Clover bridge are still the old
+  build. Publishing a `v1.4.2` release would make `_semverGt('1.4.2','1.4.2')` → false → "You're up to
+  date", and the Clover manual-entry fix would never reach the terminal. Releasing as **v1.4.3** gets
+  those mislabelled installs back onto the normal update path.
+- **Updater asset matcher hardened.** `BUILD-WINDOWS.bat` emits **two** exes (NSIS `Pharmacy POS Setup
+  <ver>.exe` *and* `PharmacyPOS-Portable.exe`). The old `find(a => a.name.endsWith('.exe'))` took
+  whichever came first — if that was the portable, staff downloaded a standalone app that RUNS the new
+  version **without upgrading the installed one**, leaving the old build in place and the update
+  silently doing nothing. Now prefers `/setup/i`, then any non-portable exe, then falls back.
+- **Reminder for releases: attach ONLY the Setup exe** (belt and braces with the matcher above).
+
+**Publishing an update (developer task — these steps are deliberately NOT in the POS UI):**
+1. Bump `js/version.js` + `electron-app/package.json` (keep in sync), bump `?v=` for edited `js/` files.
+2. Windows: `cd electron-app && BUILD-WINDOWS.bat` → `electron-app\dist\Pharmacy POS Setup <ver>.exe`.
+3. GitHub → Releases → Draft a new release → tag `v<ver>` → attach the **Setup** exe → Publish.
+4. On each PC: Settings → Updates → Check for Updates → Download → run installer (NSIS `oneClick`).
+   NB: the updater is a **notifier**, not an auto-updater — it opens the browser, a human runs the .exe.
+   With **zero** releases published the GitHub API 404s; that's normal, not a fault.
+
+### 1.4.2
 - **Clover manual (keyed) card entry FIXED — the terminal never showed the manual-entry screen.**
   Root cause: `cardEntryMethods` is **not** a simple 4-bit flag. It is three masks OR'd together
   (clover-android-sdk `Intents.java`):
