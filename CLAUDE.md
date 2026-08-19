@@ -175,6 +175,14 @@ pharmacy-pos/
   `cloverShouldHandleReceipts`, inverted). Left as-is — `disableReceiptSelection: true` is what actually
   suppresses the receipt prompt today, so behaviour is unchanged. Revisit only if the prompt reappears.
 - `BUILD-WINDOWS.bat` no longer prints a hardcoded (stale) installer filename.
+- **Settings → Updates cleaned up:** removed the developer "How to publish an update" block (staff
+  shouldn't see "bump js/version.js"); the tab is now just version + Check for Updates + Download.
+  Also fixed the check itself — GitHub returns **404 when a repo has no releases yet**, which the old
+  code threw as a red "GitHub API returned 404" error (the intended "No releases published yet" branch
+  was unreachable). 404 now reports normally. Repo is public; 404 = nothing published yet.
+  **Publishing an update is a developer task — the steps live here in CLAUDE.md, not in the POS UI:**
+  bump `js/version.js` + `electron-app/package.json` → `BUILD-WINDOWS.bat` → GitHub → Releases →
+  Draft a new release → tag `v<version>` → attach `Pharmacy POS Setup <version>.exe` → Publish.
 
 ### 1.4.1
 - **AR correctness + interactivity batch (refines 1.4.0 AR):**
