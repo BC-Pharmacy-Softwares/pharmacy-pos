@@ -278,6 +278,26 @@ function handleMessage(method, payload) {
     }
 
     case 'FINISH_OK': {
+      // A MANUAL_REFUND is started with TX_START and finishes HERE, carrying a
+      // `credit` object — only LINKED refunds come back as REFUND_RESPONSE.
+      // Without this branch the device refunds the customer, the bridge keeps
+      // waiting, the 90s timer fires, and the POS tells staff the refund failed
+      // and to run it again on the terminal → customer refunded TWICE.
+      if (pendingRefund) {
+        clearTimeout(pendingRefund.timer);
+        const credit = payload.credit || payload.refund || {};
+        console.log('[clover] FINISH_OK (manual refund):', JSON.stringify(payload));
+        pendingRefund.resolve({
+          ok:       true,
+          refundId: credit.id || null,
+          amount:   credit.amount != null ? credit.amount : null,
+          cardType: credit.cardTransaction?.cardType || null,
+          last4:    credit.cardTransaction?.last4    || null,
+          result:   'SUCCESS',
+        });
+        pendingRefund = null;
+        break;
+      }
       if (!pendingSale) break;
       clearTimeout(pendingSale.timer);
       const payment = payload.payment || {};

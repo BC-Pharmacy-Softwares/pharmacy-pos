@@ -36,7 +36,7 @@ is a Mac (this repo). **Claude cannot run the app** — the user tests on Window
 - **Must stay in sync with** `electron-app/package.json` `"version"` (that names the installer `.exe`).
 - Shown in-app on the **login screen** and **Settings top-right**.
 - Scheme: `MAJOR.MINOR.PATCH`. Most builds = PATCH bump.
-- **Current version: 1.4.3**
+- **Current version: 1.4.4**
 - When making a build, bump both files and note it in the Work Log below.
 
 ---
@@ -147,7 +147,27 @@ pharmacy-pos/
 
 ## Work Log (newest first — append new entries here)
 
-### 1.4.3 — (current)
+### 1.4.4 — (current)
+- **CRITICAL — Clover manual refund could refund the customer TWICE.** `server.js` `handleMessage`
+  opened `case 'FINISH_OK'` with `if (!pendingSale) break;`. A **MANUAL_REFUND** (unlinked — used when
+  the original sale has no stored `clover_payment_id`) is started with **TX_START** and completes via
+  **FINISH_OK carrying a `credit` object**; only LINKED refunds come back as `REFUND_RESPONSE`
+  (which was handled). So the device really did refund the card, the bridge kept waiting, the 90s timer
+  fired → `504 TIMEOUT` + `CANCEL_PAYMENT`, and `pos.js` showed *"Card terminal error … process card
+  refund manually on Clover"* — inviting staff to refund an already-refunded customer.
+  Fixed: `FINISH_OK` now resolves `pendingRefund` first (from `payload.credit`), then falls through to
+  the sale path unchanged.
+- **Refund paths, for reference:** linked = `REFUND_REQUEST` → `REFUND_RESPONSE` (preferred, used when
+  the sale stored a Clover payment id); manual/unlinked = `TX_START` `MANUAL_REFUND` → `FINISH_OK`
+  + `credit`. Docs: "the ManualRefundResponse will have a Credit object".
+- **Still open (NOT fixed — flagged only):** `pos.js` `_showPartialRefundModal` picks the card payment
+  with `payments.find(...)`, so on a **split payment across two cards only the first is refunded** to the
+  terminal; the remainder is silently left to staff. Also, a non-cancel Clover error still writes the
+  refund record (deliberate — stops a terminal glitch losing paperwork).
+- Version bumped to 1.4.4. **This build is installed MANUALLY on the POS PC** (dev machine is a Mac);
+  the in-app updater still has no published GitHub release to find.
+
+### 1.4.3
 - **Version bumped to 1.4.3 so the built-in updater can actually fire.** Some machines had `js/`
   copied in manually, so they *report* 1.4.2 while their `app.asar` + Clover bridge are still the old
   build. Publishing a `v1.4.2` release would make `_semverGt('1.4.2','1.4.2')` → false → "You're up to
