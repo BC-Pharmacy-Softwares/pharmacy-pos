@@ -8,4 +8,4 @@
      MINOR  — new features
      PATCH  — fixes / small tweaks (most builds)
    ============================================================ */
-window.APP_VERSION = '1.4.5';
+window.APP_VERSION = '1.4.6';

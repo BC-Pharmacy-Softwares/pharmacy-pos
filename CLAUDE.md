@@ -36,7 +36,7 @@ is a Mac (this repo). **Claude cannot run the app** — the user tests on Window
 - **Must stay in sync with** `electron-app/package.json` `"version"` (that names the installer `.exe`).
 - Shown in-app on the **login screen** and **Settings top-right**.
 - Scheme: `MAJOR.MINOR.PATCH`. Most builds = PATCH bump.
-- **Current version: 1.4.5**
+- **Current version: 1.4.6**
 - When making a build, bump both files and note it in the Work Log below.
 
 ---
@@ -147,7 +147,47 @@ pharmacy-pos/
 
 ## Work Log (newest first — append new entries here)
 
-### 1.4.5 — (current)
+### 1.4.6 — (current)
+- **Opening / Closing (SOD & EOD) logs were write-only — you could file a checklist but never read one back.**
+  `DB.getShiftChecklists()` existed and was exported, but **nothing in the app ever called it**. Completed
+  sign-offs went into `shift_checklists` + a PDF on disk and then vanished from the UI: no way to review,
+  reprint, or show an inspector a past record. Fixed with a new **Reports → Opening & Closing Logs** tab
+  (`reports.js` `_renderChecklistLogs`).
+  - Table per record: date/time, SOD/EOD badge, completed-by + role, RPh counter-sign + CPBC #,
+    items checked `n/total` (flags **incomplete**), cold-chain readings with an **EXCURSION** badge,
+    sign-off method (PIN-verified / attestation), notes, **View**.
+  - **View** re-renders the record exactly as filed and prints it (hidden-iframe print → Save as PDF).
+  - **Missing-sign-off detector:** any day with sales or an opened shift is a trading day and needs BOTH an
+    opening and a closing record; gaps are listed in a red banner (PODSA s.23.9). Days with no trading are
+    not flagged.
+  - Date range + Today / This Month / All Time, and **CSV export** (incl. temps + excursion + PDF path).
+- **You can now file a checklist on demand.** Previously `Checklists.show()` was reachable *only* from
+  shift open / shift close, so "Skip for now" — or simply not using the shift feature — meant that day's
+  regulatory record could never be created. The new tab has **▶ Run Opening Checklist** / **▶ Run Closing
+  Checklist** buttons that open the same modal any time.
+- **`checklists.js` refactor:** the printable HTML builder is split out as **`Checklists.buildHtml(kind, data,
+  {date})`** — pure, works from the stored `data` blob alone, so the viewer reprints an old record with its
+  ORIGINAL date rather than today's. `_saveAndEmail` now returns the saved PDF path and `show()` stamps it
+  onto the row via new **`DB.setShiftChecklistPdf`** (`pdf_path` was a column nothing ever wrote).
+  New DB helpers: `getShiftChecklistsAll`, `getShiftChecklist`, `setShiftChecklistPdf`.
+- **CRASH FIX — the BTC / Controlled Log tab rendered blank.** `_renderBtcLog` had a stray dead block
+  (`if (!logs.length) {...}`) sitting in the *method* body just after the `renderTable` closure ended, where
+  `logs` is not in scope. Non-strict script → **`ReferenceError: logs is not defined`**, thrown *before*
+  `content.innerHTML` was ever assigned, so the whole tab was empty every time. Block deleted.
+- **Gotcha found — the "Sign as" pharmacist picker is empty unless a staff member has a CPBC license #.**
+  `checklists.js` selects pharmacists with `p.license_number || p.role === 'PHARMACIST'`, but **there is no
+  PHARMACIST role in this app** (roles are ADMIN / MANAGER / CASHIER only — see `Auth.roleLabel` and the
+  Settings → Staff dropdown). So `license_number` is the *only* thing that makes someone appear. With it
+  blank the dropdown shows just "Other / type manually…", which silently disables stored signatures and
+  PIN sign-off and forces typed-name + attestation. **Fix is data, not code: set each pharmacist's
+  License # in Settings → Staff.** Left the `role === 'PHARMACIST'` clause in place (harmless, forward-looking).
+- Verified by actually running the front-end (static server + browser, no Electron): first-run setup, seeded
+  records, tab render, gap banner, View/print modal, CSV export, and a full Complete & Save round-trip
+  (row inserted, no errors; PDF/email correctly skipped with no `electronAPI`).
+- Bumped `?v=` for `version.js`(11), `db.js`(31), `checklists.js`(5), `reports.js`(25).
+  **`main.js`/`preload.js` untouched — but rebuild anyway so `app.asar` and `js/` stay in step.**
+
+### 1.4.5
 - **CRITICAL — an unlinked Clover refund CHARGED the customer instead of refunding them.**
   Reported from the floor: "I needed to refund $1, it pushed $1 to the device instead of -$1."
   Exactly right, and there were **two** faults in the same payload:

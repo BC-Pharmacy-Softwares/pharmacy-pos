@@ -505,6 +505,16 @@ const DB = (() => {
       WHERE date(checklist_date) BETWEEN date(?) AND date(?)
       ORDER BY checklist_date DESC`, [fromDate, toDate]);
   }
+  function getShiftChecklistsAll(limit = 500) {
+    return all(`SELECT * FROM shift_checklists ORDER BY checklist_date DESC LIMIT ?`, [limit]);
+  }
+  function getShiftChecklist(checklistId) {
+    return get('SELECT * FROM shift_checklists WHERE checklist_id=?', [checklistId]);
+  }
+  /* Stamp the on-disk PDF path once the file has actually been written. */
+  function setShiftChecklistPdf(checklistId, pdfPath) {
+    run('UPDATE shift_checklists SET pdf_path=? WHERE checklist_id=?', [pdfPath || null, checklistId]);
+  }
 
   function addBtcReceived(entry) {
     run(`INSERT INTO btc_log(log_type,sale_date,drug_name,din,quantity,pharmacist_name,
@@ -1026,7 +1036,7 @@ const DB = (() => {
     createTransaction, updateTransactionStatus, getTransaction,
     getTransactionsForPatient, getTransactionsForDate, reverseTransaction, saveRphSignoff,
     addBtcLog, getBtcLog, getBtcLogAll, addBtcReceived, createRefundTransaction,
-    addShiftChecklist, getShiftChecklists,
+    addShiftChecklist, getShiftChecklists, getShiftChecklistsAll, getShiftChecklist, setShiftChecklistPdf,
     addTransactionItem, getItemsForTransaction,
     addPayment, getPaymentsForTransaction,
     findProductByBarcode, findCustomProductByBarcode, saveCustomProduct,

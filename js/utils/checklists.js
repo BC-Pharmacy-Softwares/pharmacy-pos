@@ -532,7 +532,8 @@ const Checklists = (() => {
           kind, shift_id, completed_by: staff?.name || null,
           rph_name: rphName, rph_license: rphLic, data,
         });
-        await _saveAndEmail(kind, tpl, data, staff);
+        const pdfPath = await _saveAndEmail(kind, tpl, data, staff);
+        if (pdfPath && DB.setShiftChecklistPdf) DB.setShiftChecklistPdf(id, pdfPath);
         btn.textContent = '✓ Saved';
         btn.style.background = 'var(--success)';
         setTimeout(() => { close(); onDone && onDone(); }, 900);
@@ -545,11 +546,17 @@ const Checklists = (() => {
     updateProg();
   }
 
-  /* ── Build printable HTML, save PDF to folder, email a copy ── */
-  async function _saveAndEmail(kind, tpl, data, staff) {
+  /* ── Build the printable HTML for a checklist record ──────────
+     Pure: works from the stored `data` blob alone, so the Reports
+     → Opening & Closing Logs viewer can re-render / reprint an old
+     record exactly as it was filed. `opts.date` stamps the record's
+     own date (defaults to now, i.e. a fresh completion). */
+  async function buildHtml(kind, data, opts = {}) {
+    const tpl = TEMPLATES[kind];
+    if (!tpl) return '';
     const cfg  = await Config.getAll();
     const name = cfg.pharmacy_name || 'Pharmacy';
-    const now  = new Date();
+    const now  = opts.date instanceof Date ? opts.date : (opts.date ? new Date(opts.date) : new Date());
     const dateStr = now.toLocaleDateString('en-CA', { weekday:'long', year:'numeric', month:'long', day:'numeric' });
 
     const cell = (s, b) => `<td style="padding:4px 8px;border:1px solid #ddd;${b?'font-weight:700;':''}">${esc(s)}</td>`;
@@ -610,6 +617,18 @@ const Checklists = (() => {
       </div>
     </body></html>`;
 
+    return html;
+  }
+
+  /* ── Save PDF to the configured folder + email a copy ─────────
+     Returns the full path of the PDF written (or '' if none). */
+  async function _saveAndEmail(kind, tpl, data, staff) {
+    const cfg  = await Config.getAll();
+    const name = cfg.pharmacy_name || 'Pharmacy';
+    const now  = new Date();
+    const html = await buildHtml(kind, data, { date: now });
+    let pdfPath = '';
+
     // Save PDF to the configured shift-records folder
     const folder = cfg.shift_records_folder || '';
     if (folder && window.electronAPI?.savePdfFile && (window.electronAPI?.generateA5Pdf || window.electronAPI?.generateReceiptPdf)) {
@@ -617,9 +636,10 @@ const Checklists = (() => {
       const b64 = await gen(html);
       if (b64) {
         const stamp = now.toISOString().slice(0,19).replace(/[T:]/g,'-');
-        await window.electronAPI.savePdfFile({
+        const res = await window.electronAPI.savePdfFile({
           base64: b64, filename: `${kind.toUpperCase()}_${stamp}.pdf`, folderPath: folder,
         });
+        pdfPath = (res && res.ok && res.path) ? res.path : '';
       }
     }
 
@@ -631,7 +651,9 @@ const Checklists = (() => {
         htmlBody: html, textBody: tpl.title + ' completed ' + now.toLocaleString('en-CA'),
       }).catch(()=>{});
     }
+
+    return pdfPath;
   }
 
-  return { show, TEMPLATES, eligibleDefaultItems, itemId };
+  return { show, buildHtml, TEMPLATES, eligibleDefaultItems, itemId };
 })();

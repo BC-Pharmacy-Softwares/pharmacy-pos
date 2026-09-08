@@ -23,7 +23,8 @@ class ReportsScreen {
         <div class="settings-nav">
           ${[['summary','Sales Summary'],['tax','Tax Report'],['methods','By Method'],
              ['products','Products Sold'],['orders','Order Suggestions'],['shifts','Shift Reports'],
-             ['btclog','BTC / Controlled Log'],['ar','Accounts Receivable'],
+             ['btclog','BTC / Controlled Log'],['checklists','Opening & Closing Logs'],
+             ['ar','Accounts Receivable'],
              ['yearend','Year-End (Accountant)']].map(([id,label]) =>
             `<div class="settings-nav-item${id===this._activeTab?' active':''}" data-tab="${id}">${label}</div>`
           ).join('')}
@@ -54,6 +55,7 @@ class ReportsScreen {
       case 'orders':   this._renderOrders(content);   break;
       case 'shifts':   this._renderShifts(content);   break;
       case 'btclog':   this._renderBtcLog(content);   break;
+      case 'checklists': this._renderChecklistLogs(content); break;
       case 'ar':       this._renderAR(content);       break;
       case 'yearend':  this._renderYearEnd(content);  break;
     }
@@ -2021,14 +2023,6 @@ class ReportsScreen {
         </div>`;
     };
 
-      if (!logs.length) {
-        content.querySelector('#btc-body').innerHTML = `
-          <div style="padding:40px;text-align:center;color:var(--text-muted);">
-            No BTC/controlled sales recorded in this period.
-          </div>`;
-        return;
-      }
-
     content.innerHTML = `
       <div class="settings-section">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
@@ -2214,6 +2208,297 @@ class ReportsScreen {
     const monthStart = d.toISOString().slice(0,10);
     content.querySelector('#btc-from').value = monthStart;
     renderTable(monthStart, _dateStr());
+  }
+
+  /* ── Opening & Closing Logs (SOD / EOD checklist records) ─────
+     Reads the shift_checklists table filled in by js/utils/checklists.js.
+     Until now nothing in the UI ever read it back, so a completed
+     opening/closing sign-off could not be reviewed, reprinted or proven
+     to an inspector. Also flags days the pharmacy traded but no
+     checklist was filed (PODSA s.23.9 needs one at open AND close). */
+  _renderChecklistLogs(content) {
+    const META = {
+      open:  { label: 'Opening (SOD)', bg: '#d1e7dd', fg: '#0a3622' },
+      close: { label: 'Closing (EOD)', bg: '#fff3cd', fg: '#856404' },
+    };
+    const parse = (row) => { try { return JSON.parse(row.data || '{}') || {}; } catch (_) { return {}; } };
+    const dayOf = (v) => String(v || '').slice(0, 10);
+    const esc   = (v) => String(v === null || v === undefined ? '' : v)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+    const itemStats = (d) => {
+      const items = d.items || [];
+      return { done: items.filter(i => i.checked).length, total: items.length };
+    };
+    const tempInfo = (d) => {
+      const t = d.temps || {};
+      const bits = [];
+      if (t.fridge_current  !== undefined && t.fridge_current  !== '') bits.push(`Fridge ${t.fridge_current}°`);
+      if (t.freezer_current !== undefined && t.freezer_current !== '') bits.push(`Freezer ${t.freezer_current}°`);
+      return { text: bits.join(' · ') || '—', excursion: (t.excursion || 'No') === 'Yes' };
+    };
+
+    /* Print any full HTML document through a hidden iframe. */
+    const printDoc = (html) => {
+      const frame = document.createElement('iframe');
+      frame.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0;';
+      document.body.appendChild(frame);
+      frame.onload = () => {
+        try { frame.contentWindow.focus(); frame.contentWindow.print(); } catch (_) {}
+        setTimeout(() => frame.remove(), 1000);
+      };
+      frame.srcdoc = html;
+    };
+
+    const openDetail = async (row) => {
+      const data = parse(row);
+      const when = new Date(row.checklist_date);
+      let html = '';
+      try { html = await Checklists.buildHtml(row.kind, data, { date: when }); } catch (_) {}
+      if (!html) { alert('This record could not be rendered — its stored data is unreadable.'); return; }
+
+      const overlay = document.createElement('div');
+      overlay.className = 'modal-overlay';
+      overlay.style.zIndex = '9700';
+      overlay.innerHTML = `
+        <div class="modal" style="max-width:820px;max-height:92vh;display:flex;flex-direction:column;">
+          <div class="modal-header" style="background:${META[row.kind]?.bg || 'var(--surface2)'};">
+            <div>
+              <h3 style="margin:0;color:${META[row.kind]?.fg || 'var(--text)'};">
+                ${esc(META[row.kind]?.label || row.kind)} — ${when.toLocaleDateString('en-CA')}
+              </h3>
+              <div style="font-size:12px;opacity:.8;">
+                Record #${row.checklist_id} · filed ${when.toLocaleString('en-CA')}
+              </div>
+            </div>
+            <button class="modal-close">&times;</button>
+          </div>
+          <div class="modal-body" style="overflow-y:auto;background:#fff;">
+            <div id="cl-detail-doc" style="background:#fff;color:#000;"></div>
+          </div>
+          <div class="modal-footer">
+            ${row.pdf_path ? `<span style="font-size:11px;color:var(--text-muted);margin-right:auto;">
+              PDF: ${esc(row.pdf_path)}</span>` : ''}
+            <button class="btn btn-outline" id="cl-detail-close">Close</button>
+            <button class="btn btn-primary" id="cl-detail-print">&#128424; Print / Save PDF</button>
+          </div>
+        </div>`;
+      document.body.appendChild(overlay);
+
+      // Strip the wrapper tags so the document body renders inside the modal
+      const bodyHtml = (html.match(/<body[^>]*>([\s\S]*)<\/body>/i) || [null, html])[1];
+      overlay.querySelector('#cl-detail-doc').innerHTML = bodyHtml;
+
+      const close = () => overlay.remove();
+      overlay.querySelector('.modal-close').addEventListener('click', close);
+      overlay.querySelector('#cl-detail-close').addEventListener('click', close);
+      overlay.querySelector('#cl-detail-print').addEventListener('click', () => printDoc(html));
+    };
+
+    const renderTable = (from, to) => {
+      const body = content.querySelector('#cl-body');
+      const rows = (DB.getShiftChecklists(from, to) || []);
+
+      /* Which days did the pharmacy actually operate? A day with sales or an
+         opened shift is a day that needed both an opening and a closing record. */
+      const opDays = new Set();
+      (DB.getTransactionsInRange(from, to) || []).forEach(t => opDays.add(dayOf(t.transaction_date)));
+      (DB.getShiftHistory(500) || []).forEach(s => {
+        const d = dayOf(s.opened_at);
+        if (d >= from && d <= to) opDays.add(d);
+      });
+
+      const filed = {};
+      rows.forEach(r => {
+        const d = dayOf(r.checklist_date);
+        (filed[d] = filed[d] || {})[r.kind] = true;
+      });
+
+      const gaps = [...opDays].filter(d => !filed[d] || !filed[d].open || !filed[d].close).sort().reverse();
+      const gapsHtml = gaps.length ? `
+        <div style="background:rgba(220,53,69,.08);border-left:4px solid var(--danger);
+                    border-radius:var(--radius);padding:12px 16px;margin-bottom:16px;">
+          <div style="font-weight:700;font-size:13px;color:#b02a37;margin-bottom:6px;">
+            &#9888; ${gaps.length} trading day${gaps.length !== 1 ? 's' : ''} missing a sign-off
+          </div>
+          <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px;">
+            PODSA s.23.9 requires a record at opening <em>and</em> closing on every working day.
+          </div>
+          <div style="display:flex;flex-wrap:wrap;gap:6px;">
+            ${gaps.slice(0, 40).map(d => {
+              const f = filed[d] || {};
+              const miss = [!f.open ? 'Opening' : null, !f.close ? 'Closing' : null].filter(Boolean).join(' + ');
+              return `<span class="badge" style="background:#f8d7da;color:#842029;font-size:11px;">
+                ${d} — no ${miss}</span>`;
+            }).join('')}
+            ${gaps.length > 40 ? `<span style="font-size:11px;color:var(--text-muted);">
+              +${gaps.length - 40} more</span>` : ''}
+          </div>
+        </div>` : (opDays.size ? `
+        <div style="background:rgba(25,135,84,.08);border-left:4px solid var(--success);
+                    border-radius:var(--radius);padding:10px 16px;margin-bottom:16px;font-size:13px;">
+          &#10004; Every trading day in this period has both an opening and a closing sign-off.
+        </div>` : '');
+
+      if (!rows.length) {
+        body.innerHTML = gapsHtml + `<div style="padding:40px;text-align:center;color:var(--text-muted);">
+          No opening or closing checklists filed in this period.</div>`;
+        return;
+      }
+
+      const trs = rows.map(r => {
+        const d    = parse(r);
+        const when = new Date(r.checklist_date);
+        const m    = META[r.kind] || { label: r.kind, bg: 'var(--surface2)', fg: 'var(--text)' };
+        const st   = itemStats(d);
+        const tmp  = tempInfo(d);
+        const so   = d.signoff || {};
+        const incomplete = st.total && st.done < st.total;
+        return `
+          <tr>
+            <td style="white-space:nowrap;">${when.toLocaleDateString('en-CA')}<br>
+              <small style="color:var(--text-muted);">${when.toLocaleTimeString('en-CA', { hour: '2-digit', minute: '2-digit' })}</small></td>
+            <td><span class="badge" style="background:${m.bg};color:${m.fg};font-size:11px;">${esc(m.label)}</span></td>
+            <td>${esc(r.completed_by || '—')}<br>
+              <small style="color:var(--text-muted);">${esc(so.completed_by_role || '')}</small></td>
+            <td>${esc(r.rph_name || '—')}<br>
+              <small style="color:var(--text-muted);">${r.rph_license ? 'CPBC ' + esc(r.rph_license) : ''}</small></td>
+            <td style="text-align:center;">
+              <span style="font-weight:600;color:${incomplete ? '#856404' : 'var(--success)'};">${st.done}/${st.total}</span>
+              ${incomplete ? '<br><small style="color:#856404;">incomplete</small>' : ''}
+            </td>
+            <td style="white-space:nowrap;">${esc(tmp.text)}
+              ${tmp.excursion ? '<br><span class="badge" style="background:#f8d7da;color:#842029;font-size:10px;">EXCURSION</span>' : ''}</td>
+            <td><small style="color:var(--text-muted);">${esc(so.method || '—')}</small></td>
+            <td style="max-width:220px;">${d.notes
+              ? `<small>${esc(String(d.notes).slice(0, 120))}${String(d.notes).length > 120 ? '…' : ''}</small>`
+              : '<span style="color:var(--text-muted);">—</span>'}</td>
+            <td style="white-space:nowrap;">
+              <button class="btn btn-outline btn-sm cl-view" data-id="${r.checklist_id}"
+                      style="padding:2px 8px;font-size:11px;">View</button>
+            </td>
+          </tr>`;
+      }).join('');
+
+      body.innerHTML = gapsHtml + `
+        <div style="overflow-x:auto;">
+          <table class="table" style="font-size:12px;min-width:900px;">
+            <thead><tr>
+              <th>Date / Time</th><th>Type</th><th>Completed By</th><th>RPh Counter-Sign</th>
+              <th>Items</th><th>Cold Chain</th><th>Signed Via</th><th>Notes</th><th></th>
+            </tr></thead>
+            <tbody>${trs}</tbody>
+          </table>
+        </div>
+        <div style="margin-top:8px;font-size:12px;color:var(--text-muted);">
+          ${rows.length} record${rows.length !== 1 ? 's' : ''} ·
+          ${rows.filter(r => r.kind === 'open').length} opening ·
+          ${rows.filter(r => r.kind === 'close').length} closing
+        </div>`;
+
+      const byId = {};
+      rows.forEach(r => { byId[r.checklist_id] = r; });
+      body.querySelectorAll('.cl-view').forEach(btn => {
+        btn.addEventListener('click', () => openDetail(byId[btn.dataset.id]));
+      });
+    };
+
+    const monthStart = (() => { const d = new Date();
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-01`; })();
+
+    content.innerHTML = `
+      <div class="settings-section">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;flex-wrap:wrap;gap:8px;">
+          <h3 style="margin:0;">Opening &amp; Closing Logs</h3>
+          <div style="display:flex;gap:8px;">
+            <button class="btn btn-success btn-sm" id="cl-run-open">&#9654; Run Opening Checklist</button>
+            <button class="btn btn-warning btn-sm" id="cl-run-close">&#9654; Run Closing Checklist</button>
+          </div>
+        </div>
+        <p style="color:var(--text-muted);font-size:13px;margin-bottom:16px;">
+          Every Start-of-Day and End-of-Day sign-off filed on this machine, with the pharmacist
+          counter-signature, cold-chain readings and notes. Use the buttons above to file one now
+          if a shift was opened or closed without completing the checklist.
+        </p>
+
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;
+                    background:var(--surface2);padding:12px 16px;border-radius:var(--radius);">
+          <label style="font-size:13px;font-weight:500;">From</label>
+          <input type="date" id="cl-from" value="${monthStart}" style="width:150px;" />
+          <label style="font-size:13px;font-weight:500;">To</label>
+          <input type="date" id="cl-to" value="${_dateStr()}" style="width:150px;" />
+          <button class="btn btn-primary btn-sm" id="cl-run">Run Report</button>
+          <div style="display:flex;gap:6px;margin-left:auto;">
+            <button class="btn btn-outline btn-sm" id="cl-quick-today">Today</button>
+            <button class="btn btn-outline btn-sm" id="cl-quick-month">This Month</button>
+            <button class="btn btn-outline btn-sm" id="cl-quick-all">All Time</button>
+          </div>
+        </div>
+
+        <div style="display:flex;gap:8px;margin-bottom:14px;">
+          <button class="btn btn-outline btn-sm" id="cl-csv">&#8659; Export CSV</button>
+        </div>
+
+        <div id="cl-body"></div>
+      </div>`;
+
+    const getFrom = () => content.querySelector('#cl-from').value;
+    const getTo   = () => content.querySelector('#cl-to').value;
+    const refresh = () => renderTable(getFrom(), getTo());
+
+    content.querySelector('#cl-run').addEventListener('click', refresh);
+    content.querySelector('#cl-quick-today').addEventListener('click', () => {
+      const t = _dateStr();
+      content.querySelector('#cl-from').value = t;
+      content.querySelector('#cl-to').value   = t;
+      refresh();
+    });
+    content.querySelector('#cl-quick-month').addEventListener('click', () => {
+      content.querySelector('#cl-from').value = monthStart;
+      content.querySelector('#cl-to').value   = _dateStr();
+      refresh();
+    });
+    content.querySelector('#cl-quick-all').addEventListener('click', () => {
+      content.querySelector('#cl-from').value = '2000-01-01';
+      content.querySelector('#cl-to').value   = _dateStr();
+      refresh();
+    });
+
+    const runChecklist = (kind) => {
+      if (typeof Checklists === 'undefined') { alert('Checklist module not loaded.'); return; }
+      Checklists.show(kind, { shift_id: DB.getActiveShift()?.shift_id, onDone: refresh });
+    };
+    content.querySelector('#cl-run-open').addEventListener('click',  () => runChecklist('open'));
+    content.querySelector('#cl-run-close').addEventListener('click', () => runChecklist('close'));
+
+    content.querySelector('#cl-csv').addEventListener('click', () => {
+      const recs = DB.getShiftChecklists(getFrom(), getTo()) || [];
+      const out  = [['Date','Time','Type','Completed By','Role','RPh Counter-Sign','CPBC #','Signed Via',
+                     'Items Checked','Items Total','Fridge','Fridge Min','Fridge Max','Freezer',
+                     'Excursion','Notes','PDF Path']];
+      recs.forEach(r => {
+        const d  = parse(r);
+        const t  = d.temps || {};
+        const so = d.signoff || {};
+        const st = itemStats(d);
+        const w  = new Date(r.checklist_date);
+        out.push([
+          w.toLocaleDateString('en-CA'),
+          w.toLocaleTimeString('en-CA', { hour: '2-digit', minute: '2-digit' }),
+          (META[r.kind] || {}).label || r.kind,
+          r.completed_by || '', so.completed_by_role || '',
+          r.rph_name || '', r.rph_license || '', so.method || '',
+          st.done, st.total,
+          t.fridge_current || '', t.fridge_min || '', t.fridge_max || '', t.freezer_current || '',
+          t.excursion || 'No',
+          (d.notes || '').replace(/\r?\n/g, ' '),
+          r.pdf_path || '',
+        ]);
+      });
+      _csvDownload(out, `opening_closing_logs_${getFrom()}_to_${getTo()}.csv`);
+    });
+
+    refresh();
   }
 
   detach() {}
