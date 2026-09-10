@@ -36,7 +36,7 @@ is a Mac (this repo). **Claude cannot run the app** — the user tests on Window
 - **Must stay in sync with** `electron-app/package.json` `"version"` (that names the installer `.exe`).
 - Shown in-app on the **login screen** and **Settings top-right**.
 - Scheme: `MAJOR.MINOR.PATCH`. Most builds = PATCH bump.
-- **Current version: 1.4.6**
+- **Current version: 1.4.7**
 - When making a build, bump both files and note it in the Work Log below.
 
 ---
@@ -147,7 +147,11 @@ pharmacy-pos/
 
 ## Work Log (newest first — append new entries here)
 
-### 1.4.6 — (current)
+### 1.4.7 — (current)
+
+*Ships everything below. **1.4.6 was never built or released** — it only ever existed on this branch —
+so both parts go out together as 1.4.7. Nothing on any PC reports 1.4.6.*
+
 
 **Part 2 — reported from the floor: "not capturing shift open/close, not getting any emails."**
 The saved PDFs told the story: last `OPEN_` was 2026-08-11, last `CLOSE_` was 2026-08-05, and it was
