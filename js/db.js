@@ -972,10 +972,20 @@ const DB = (() => {
   }
 
   /* ---- Shifts ---- */
+  /* Never stack two OPEN shifts — getActiveShift() only ever returns the
+     newest, so an accidental second one would orphan the first forever
+     (its End-of-Day sign-off could then never be filed). */
   function openShift(staffId, staffName, openingFloat) {
+    const existing = getActiveShift();
+    if (existing) return existing.shift_id;
     run(`INSERT INTO shifts(staff_id,staff_name,opened_at,opening_float,status)
          VALUES(?,?,?,?,'OPEN')`, [staffId||null, staffName||null, localISOStr(), openingFloat||0]);
     return lastInsertId();
+  }
+  /* Any shift left OPEN from a previous calendar day. */
+  function getStaleShifts() {
+    return all(`SELECT * FROM shifts WHERE status='OPEN' AND date(opened_at) < date(?)
+      ORDER BY opened_at`, [localDateStr()]);
   }
   function closeShift(shiftId, countedCash, notes) {
     run(`UPDATE shifts SET closed_at=?,closing_counted=?,closing_notes=?,status='CLOSED'
@@ -1050,7 +1060,7 @@ const DB = (() => {
     getArManualPaid, getArEntryByReference, getArEntry, updateArEntry, deleteArEntry, getArWriteOffs,
     setPatientArAccount, getPatientByArAccount, getNextArAccountNo,
     logEvent,
-    openShift, closeShift, getActiveShift, getShiftHistory,
+    openShift, closeShift, getActiveShift, getShiftHistory, getStaleShifts,
     recordCashMovement, getCashMovements, getShiftSummary,
   };
 })();

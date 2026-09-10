@@ -532,11 +532,29 @@ const Checklists = (() => {
           kind, shift_id, completed_by: staff?.name || null,
           rph_name: rphName, rph_license: rphLic, data,
         });
-        const pdfPath = await _saveAndEmail(kind, tpl, data, staff);
-        if (pdfPath && DB.setShiftChecklistPdf) DB.setShiftChecklistPdf(id, pdfPath);
-        btn.textContent = '✓ Saved';
-        btn.style.background = 'var(--success)';
-        setTimeout(() => { close(); onDone && onDone(); }, 900);
+        const r = await _saveAndEmail(kind, tpl, data, staff);
+        if (r.pdfPath && DB.setShiftChecklistPdf) DB.setShiftChecklistPdf(id, r.pdfPath);
+
+        /* The sign-off is already in the log — that part always succeeded.
+           But say plainly whether the PDF and the email actually happened,
+           instead of a green tick that hid both. */
+        if (r.ok) {
+          btn.textContent = '✓ Saved';
+          btn.style.background = 'var(--success)';
+          setTimeout(() => { close(); onDone && onDone(); }, 900);
+        } else {
+          const notes = [r.pdfNote, r.emailNote].filter(Boolean);
+          err.style.display = 'block';
+          err.className = 'alert alert-warning';
+          err.innerHTML = '<strong>Sign-off saved to the log' +
+            (r.pdfPath ? ' and PDF written' : '') + ', but:</strong><ul style="margin:6px 0 0 18px;">' +
+            notes.map(n => `<li>${esc(n)}</li>`).join('') + '</ul>';
+          err.scrollIntoView({ block: 'nearest' });
+          btn.textContent = 'Close';
+          btn.disabled = false;
+          btn.style.background = 'var(--success)';
+          btn.onclick = () => { close(); onDone && onDone(); };
+        }
       } catch(e) {
         showErr('Saved to log, but PDF/email step failed: ' + e.message);
         btn.disabled = false; btn.textContent = 'Complete & Save';
@@ -621,38 +639,73 @@ const Checklists = (() => {
   }
 
   /* ── Save PDF to the configured folder + email a copy ─────────
-     Returns the full path of the PDF written (or '' if none). */
+     Returns { pdfPath, pdfNote, emailNote, ok } — never throws for the
+     PDF/email step alone, but ALWAYS reports what actually happened.
+     The old version swallowed every email error with .catch(()=>{}) and
+     said nothing when no recipient was configured, so a checklist that
+     emailed nobody looked identical to one that emailed fine. */
   async function _saveAndEmail(kind, tpl, data, staff) {
     const cfg  = await Config.getAll();
     const name = cfg.pharmacy_name || 'Pharmacy';
     const now  = new Date();
     const html = await buildHtml(kind, data, { date: now });
-    let pdfPath = '';
+    let pdfPath = '', pdfNote = '', emailNote = '', ok = true;
 
-    // Save PDF to the configured shift-records folder
+    /* Save PDF to the configured shift-records folder.
+       Stamp is LOCAL time — toISOString() is UTC, so an evening closing
+       was filed under the NEXT day's date (a 17:02 PDT close became
+       CLOSE_2026-07-31…, i.e. July 31's name on July 30's record). */
+    const pad    = (n) => String(n).padStart(2, '0');
+    const stamp  = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}` +
+                   `-${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}`;
     const folder = cfg.shift_records_folder || '';
-    if (folder && window.electronAPI?.savePdfFile && (window.electronAPI?.generateA5Pdf || window.electronAPI?.generateReceiptPdf)) {
+    const canPdf = window.electronAPI?.savePdfFile &&
+                   (window.electronAPI?.generateA5Pdf || window.electronAPI?.generateReceiptPdf);
+    if (!folder) {
+      pdfNote = 'No Shift Records folder set (Settings → Records) — PDF not saved.';
+      ok = false;
+    } else if (!canPdf) {
+      pdfNote = 'PDF saving is only available in the desktop app.';
+    } else {
       const gen = window.electronAPI.generateA5Pdf || window.electronAPI.generateReceiptPdf;
       const b64 = await gen(html);
-      if (b64) {
-        const stamp = now.toISOString().slice(0,19).replace(/[T:]/g,'-');
+      if (!b64) {
+        pdfNote = 'PDF could not be generated.'; ok = false;
+      } else {
         const res = await window.electronAPI.savePdfFile({
           base64: b64, filename: `${kind.toUpperCase()}_${stamp}.pdf`, folderPath: folder,
         });
-        pdfPath = (res && res.ok && res.path) ? res.path : '';
+        if (res && res.ok && res.path) pdfPath = res.path;
+        else { pdfNote = 'PDF not saved: ' + ((res && res.error) || 'unknown error'); ok = false; }
       }
     }
 
     // Email a copy
     const to = cfg.shift_records_recipients || cfg.email_recipients_sales || '';
-    if (to && typeof EmailAPI !== 'undefined' && EmailAPI.send) {
-      await EmailAPI.send({
-        to, subject: `${tpl.title} — ${name} — ${now.toLocaleDateString('en-CA')}`,
-        htmlBody: html, textBody: tpl.title + ' completed ' + now.toLocaleString('en-CA'),
-      }).catch(()=>{});
+    if (!to) {
+      emailNote = 'No email recipients set (Settings → Records → Shift Sign-Off Records) — nothing emailed.';
+      ok = false;
+    } else if (typeof EmailAPI === 'undefined' || !EmailAPI.send) {
+      emailNote = 'Email module unavailable — nothing emailed.'; ok = false;
+    } else if ((cfg.email_service || 'mailto') === 'mailto') {
+      /* The mailto fallback calls window.open(..., '_self'), which would
+         navigate the POS away mid-shift. Never do that unattended. */
+      emailNote = 'Email service is still set to "mailto" (Settings → Email Reports) — ' +
+                  'that cannot send automatically, so nothing was emailed.';
+      ok = false;
+    } else {
+      try {
+        await EmailAPI.send({
+          to, subject: `${tpl.title} — ${name} — ${now.toLocaleDateString('en-CA')}`,
+          htmlBody: html, textBody: tpl.title + ' completed ' + now.toLocaleString('en-CA'),
+        });
+        emailNote = `Emailed to ${to}.`;
+      } catch (e) {
+        emailNote = 'Email failed: ' + (e.message || e); ok = false;
+      }
     }
 
-    return pdfPath;
+    return { pdfPath, pdfNote, emailNote, ok };
   }
 
   return { show, buildHtml, TEMPLATES, eligibleDefaultItems, itemId };

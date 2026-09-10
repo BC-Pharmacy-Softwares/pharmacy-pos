@@ -170,6 +170,7 @@ class POSScreen {
     this._el.querySelector('#btn-reports').addEventListener('click', () => this._onNavigate('reports'));
     this._el.querySelector('#btn-shift').addEventListener('click', () => this._showShiftModal());
     this._updateShiftIndicator();
+    this._checkStaleShift();
     this._el.querySelector('#btn-customer-display').addEventListener('click', () => {
       window.open('customer-display.html', 'customer-display',
         'width=800,height=500,menubar=no,toolbar=no,location=no,status=no');
@@ -2876,6 +2877,20 @@ class POSScreen {
 
   /* ── Shift Management ───────────────────────────────────────── */
 
+  /* How many whole calendar days ago was this shift opened? 0 = today.
+     A shift left open overnight is the silent killer here: while one is
+     open the "Open Shift" flow never runs, so the Start-of-Day checklist
+     never appears again — and neither does End-of-Day, because nobody
+     closes a shift they don't realise is still running. */
+  _shiftAgeDays(shift) {
+    if (!shift) return 0;
+    const o = new Date(shift.opened_at);
+    const a = new Date(o.getFullYear(), o.getMonth(), o.getDate());
+    const n = new Date();
+    const b = new Date(n.getFullYear(), n.getMonth(), n.getDate());
+    return Math.round((b - a) / 86400000);
+  }
+
   _updateShiftIndicator() {
     const shift    = DB.getActiveShift();
     const dot      = this._el?.querySelector('#shift-dot');
@@ -2885,16 +2900,53 @@ class POSScreen {
     if (shift) {
       const opened = new Date(shift.opened_at);
       const hhmm   = opened.toLocaleTimeString(navigator.language, { hour: '2-digit', minute: '2-digit' });
-      dot.style.color   = '#198754';
-      label.textContent = `Shift · ${hhmm}`;
-      btn.style.background = 'rgba(25,135,84,.1)';
-      btn.style.borderColor = 'rgba(25,135,84,.4)';
+      const days   = this._shiftAgeDays(shift);
+      if (days > 0) {
+        // Stale: show the DATE, not just the time — "Shift · 09:00" looked
+        // perfectly normal on a shift that had been open for a month.
+        const dstr = opened.toLocaleDateString(navigator.language, { month: 'short', day: 'numeric' });
+        dot.style.color   = '#dc3545';
+        label.textContent = `Shift open since ${dstr} (${days}d)`;
+        btn.style.background  = 'rgba(220,53,69,.12)';
+        btn.style.borderColor = 'rgba(220,53,69,.5)';
+        btn.title = 'This shift was never closed — close it to file the End-of-Day sign-off.';
+      } else {
+        dot.style.color   = '#198754';
+        label.textContent = `Shift · ${hhmm}`;
+        btn.style.background = 'rgba(25,135,84,.1)';
+        btn.style.borderColor = 'rgba(25,135,84,.4)';
+        btn.title = '';
+      }
     } else {
       dot.style.color   = '#fd7e14';
       label.textContent = 'Open Shift';
       btn.style.background = 'rgba(253,126,20,.1)';
       btn.style.borderColor = 'rgba(253,126,20,.4)';
+      btn.title = '';
     }
+  }
+
+  /* Nag once a day if a shift is still open from a previous day. */
+  _checkStaleShift() {
+    const shift = DB.getActiveShift();
+    if (!shift) return;
+    const days = this._shiftAgeDays(shift);
+    if (days < 1) return;
+    const today = localDateStr();
+    if (localStorage.getItem('pos_stale_shift_nag') === today) return;
+    localStorage.setItem('pos_stale_shift_nag', today);
+    const opened = new Date(shift.opened_at).toLocaleString(navigator.language,
+      { dateStyle: 'medium', timeStyle: 'short' });
+    setTimeout(() => {
+      if (confirm(
+        `Shift #${shift.shift_id} has been open since ${opened} — ${days} day${days !== 1 ? 's' : ''}.\n\n` +
+        `While a shift is open the Start-of-Day checklist never appears, and the ` +
+        `End-of-Day sign-off is only created when a shift is closed. ` +
+        `That means no opening or closing records have been filed since then.\n\n` +
+        `Close this shift now?`)) {
+        this._showShiftModal();
+      }
+    }, 600);
   }
 
   _showShiftModal() {
@@ -3020,7 +3072,23 @@ class POSScreen {
     const elapsed = Math.floor((Date.now() - opened.getTime()) / 60000);
     const hrs     = Math.floor(elapsed / 60);
     const mins    = elapsed % 60;
-    const duration = hrs > 0 ? `${hrs}h ${mins}m` : `${mins}m`;
+    const days    = this._shiftAgeDays(shift);
+    const duration = days > 0 ? `${days}d ${hrs % 24}h`
+                              : (hrs > 0 ? `${hrs}h ${mins}m` : `${mins}m`);
+    // Show the date too once the shift is no longer today's — a bare
+    // "Opened 09:00" gave no hint the shift was weeks old.
+    const openedLabel = days > 0
+      ? opened.toLocaleString(navigator.language, { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' })
+      : opened.toLocaleTimeString(navigator.language, { hour:'2-digit', minute:'2-digit' });
+    const staleBanner = days > 0 ? `
+      <div class="alert alert-danger" style="margin-bottom:14px;">
+        <strong>&#9888; This shift has been open for ${days} day${days!==1?'s':''}</strong>
+        <div style="font-size:12px;margin-top:4px;">
+          Opened ${openedLabel}. No Start-of-Day checklist can appear while a shift is open,
+          and the End-of-Day sign-off is only created when a shift is closed — so no opening or
+          closing records have been filed since then. Close it below to file the sign-off.
+        </div>
+      </div>` : '';
 
     const movementRows = s.movements.length === 0
       ? '<tr><td colspan="3" class="text-muted" style="padding:8px;font-size:12px;">No cash movements recorded.</td></tr>'
@@ -3053,11 +3121,11 @@ class POSScreen {
           <button class="modal-close">&times;</button>
         </div>
         <div class="modal-body" style="max-height:70vh;overflow-y:auto;">
-
+          ${staleBanner}
           <!-- Shift Overview -->
           <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:16px;">
             ${[
-              ['Opened', new Date(shift.opened_at).toLocaleTimeString(navigator.language,{hour:'2-digit',minute:'2-digit'})],
+              ['Opened', openedLabel],
               ['Duration', duration],
               ['Float', Tax.fmt(shift.opening_float||0)],
               ['Transactions', s.txnSummary.txn_count],

@@ -148,6 +148,53 @@ pharmacy-pos/
 ## Work Log (newest first — append new entries here)
 
 ### 1.4.6 — (current)
+
+**Part 2 — reported from the floor: "not capturing shift open/close, not getting any emails."**
+The saved PDFs told the story: last `OPEN_` was 2026-08-11, last `CLOSE_` was 2026-08-05, and it was
+2026-09-10. So it worked, then stopped dead. Three separate faults:
+
+- **ROOT CAUSE — a shift left OPEN silently switches both checklists off, forever.**
+  `_showShiftModal()` branches on `DB.getActiveShift()`: if a shift is open you get the *active shift*
+  modal, so the **Open Shift flow — and with it the SOD checklist — never runs again**. And the EOD
+  checklist only fires from *closing* a shift. So one un-closed shift kills BOTH records indefinitely.
+  It was invisible because **the indicator showed only the time** — `Shift · 09:00` looks completely
+  normal on a shift that has been open for a month (`_showActiveShiftModal` likewise showed
+  `Opened 09:00`, and a `742h 22m` duration that reads as noise). Reproduced exactly: inserted an
+  OPEN shift dated 2026-08-11 and the old UI showed nothing wrong.
+  Fixes in `pos.js`: new **`_shiftAgeDays()`**; the indicator turns **red** and reads
+  **"Shift open since Aug 11 (30d)"**; `_showActiveShiftModal` gets a red stale banner, a dated
+  "Opened", and a `30d 22h` duration; new **`_checkStaleShift()`** runs on POS load and nags
+  once per day (localStorage `pos_stale_shift_nag`) offering to close it.
+  `db.js`: **`openShift` now refuses to stack a second OPEN shift** (returns the existing id —
+  `getActiveShift` only ever returns the newest, so a second one would orphan the first and its EOD
+  sign-off could never be filed). Added **`DB.getStaleShifts()`**.
+  **NB: deliberately NOT auto-closing stale shifts** — closing requires a counted cash drawer, and
+  fabricating that would corrupt the reconciliation. Staff must close it.
+- **Email failures were completely invisible.** `_saveAndEmail` ended with
+  `EmailAPI.send({...}).catch(()=>{})` — every error swallowed — and if **no recipient was configured
+  it didn't even attempt a send and said nothing**. Either way the modal showed a green "✓ Saved".
+  Now `_saveAndEmail` returns `{ pdfPath, pdfNote, emailNote, ok }` and the modal prints exactly what
+  did and didn't happen ("No email recipients set (Settings → Records → Shift Sign-Off Records)",
+  "Email failed: Worker URL not configured…"). **The sign-off still saves to the log either way** —
+  only the reporting changed.
+- **`email_service` defaults to `'mailto'`, which cannot send unattended — and would have hijacked
+  the POS.** `EmailAPI.send`'s mailto branch calls `window.open(mailto…, '_self')`, i.e. it navigates
+  the renderer away from the running app mid-shift. `_saveAndEmail` now refuses that branch and reports
+  it instead. **If they never picked a service in Settings → Email Reports, this alone explains
+  "no emails".**
+- **PDF filenames were stamped in UTC, so evening closings were filed under the NEXT day.**
+  `now.toISOString()` → a 17:02 PDT close on Jul 30 was written as `CLOSE_2026-07-31-00-02-00.pdf`.
+  Visible right in their folder: that file, and `CLOSE_2026-08-01-00-00-42.pdf` (actually Jul 31).
+  Roughly every close after ~5 PM local was misdated. Now built from `getFullYear/getMonth/getDate` +
+  local h/m/s. **The DB was always correct** (`addShiftChecklist` uses `localISOStr()`); only the
+  filename lied.
+- Verified in a real browser run: reproduced the 30-day open shift → red indicator + nag text, stale
+  banner, close-shift → EOD checklist appeared, both email-failure branches reported (and `window.open`
+  confirmed NOT called), `openShift` double-call returned the same id with one OPEN row, and the
+  filename came out local (`CLOSE_2026-09-10-07-27-16`) vs UTC (`…-14-27-19`).
+- `?v=` bumped again: `db.js`(32), `checklists.js`(6), `pos.js`(80).
+
+**Part 1 — Opening & Closing log viewer (original 1.4.6 work):**
 - **Opening / Closing (SOD & EOD) logs were write-only — you could file a checklist but never read one back.**
   `DB.getShiftChecklists()` existed and was exported, but **nothing in the app ever called it**. Completed
   sign-offs went into `shift_checklists` + a PDF on disk and then vanished from the UI: no way to review,
