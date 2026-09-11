@@ -616,7 +616,7 @@ function registerIpcHandlers() {
 function mapPatient(p) {
   const fmtDate = v => v instanceof Date ? v.toISOString().split('T')[0] : (v || null);
   return {
-    PHN:       String(p.PANUM      || ''),
+    PHN:       String(p.PANUM      || '').trim(),   // WinRx pads PANUM — a padded PHN never matched in AR
     SURNAME:   p.PASURNAME  || '',
     GIVEN:     p.PAGIVEN    || '',
     SEX:       p.PASEX      || null,               // M / F / U
@@ -1042,6 +1042,97 @@ function addSqlRoutes(expressApp) {
       })));
     } catch (e) {
       console.error('/getAllBilled error:', e.message);
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  /* /getPatientBilled — every billed copay fill for ONE patient, for Accounts
+     Receivable. Unlike /getPatientProfile (TOP 60, for the POS pick list) there is
+     NO row cap: a chronic / blister-pack patient's oldest fills were being cut off,
+     hiding exactly the debts that matter most. Dates are filtered in SQL.
+     Also returns every Rx number the patient owns (billed or not), so the POS can
+     credit a copay to whoever the prescription belongs to. */
+  expressApp.post('/getPatientBilled', async (req, res) => {
+    const { PHN, Cutoff, AsOf } = req.body || {};
+    if (!PHN) return res.status(400).json({ error: 'PHN required' });
+    try {
+      const phn = String(PHN).trim();
+      const fills = await sqlPool.request()
+        .input('phn',    sql.VarChar, phn)
+        .input('cutoff', sql.Date, Cutoff ? new Date(Cutoff) : null)
+        .input('asof',   sql.Date, AsOf   ? new Date(AsOf)   : null)
+        .query(`
+          SELECT rf.RERXNUM AS RXNUM, rf.RECOPAY AS RECOPAY, rf.REEFDATE AS REEFDATE
+          FROM REFILL rf
+          JOIN RX r ON r.RXNUM = rf.RERXNUM
+          WHERE r.RXPANUM = @phn AND rf.REREVDATE IS NULL AND rf.RECOPAY > 0
+            AND (@cutoff IS NULL OR rf.REEFDATE >= @cutoff)
+            AND (@asof   IS NULL OR rf.REEFDATE <= @asof)
+          ORDER BY rf.REEFDATE
+        `);
+      const owned = await sqlPool.request()
+        .input('phn', sql.VarChar, phn)
+        .query(`SELECT RXNUM FROM RX WHERE RXPANUM = @phn`);
+      res.json({
+        fills: fills.recordset.map(r => ({
+          RXNUM: String(r.RXNUM), RECOPAY: parseFloat(r.RECOPAY) || 0, REEFDATE: r.REEFDATE,
+        })),
+        rxNumbers: owned.recordset.map(r => String(r.RXNUM)),
+      });
+    } catch (e) {
+      console.error('/getPatientBilled error:', e.message);
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  /* /getAllBilledByRx — the AR dashboard's billed side: one row per patient per Rx
+     (copays summed, first fill date) across ALL patients, so the dashboard runs
+     the very same reconciliation as each patient's own page. */
+  expressApp.post('/getAllBilledByRx', async (req, res) => {
+    const { Cutoff, AsOf } = req.body || {};
+    try {
+      const result = await sqlPool.request()
+        .input('cutoff', sql.Date, Cutoff ? new Date(Cutoff) : null)
+        .input('asof',   sql.Date, AsOf   ? new Date(AsOf)   : null)
+        .query(`
+          SELECT LTRIM(RTRIM(r.RXPANUM)) AS PHN, rf.RERXNUM AS RXNUM,
+                 COUNT(*) AS Fills, SUM(rf.RECOPAY) AS Billed, MIN(rf.REEFDATE) AS FirstFill
+          FROM REFILL rf
+          JOIN RX r ON r.RXNUM = rf.RERXNUM
+          WHERE rf.REREVDATE IS NULL AND rf.RECOPAY > 0
+            AND (@cutoff IS NULL OR rf.REEFDATE >= @cutoff)
+            AND (@asof   IS NULL OR rf.REEFDATE <= @asof)
+          GROUP BY LTRIM(RTRIM(r.RXPANUM)), rf.RERXNUM
+        `);
+      res.json(result.recordset.map(r => ({
+        PHN: String(r.PHN || '').trim(), RXNUM: String(r.RXNUM),
+        Fills: r.Fills || 0, Billed: parseFloat(r.Billed) || 0, FirstFill: r.FirstFill,
+      })));
+    } catch (e) {
+      console.error('/getAllBilledByRx error:', e.message);
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  /* /getRxOwners — which patient (PHN) each Rx number belongs to. Lets AR credit a
+     copay to the prescription's owner even when the sale was linked to someone else
+     (a parent picking up a child's Rx) or to nobody. Body: { RX: ['50005', …] } */
+  expressApp.post('/getRxOwners', async (req, res) => {
+    const list = [...new Set(((req.body || {}).RX || [])
+      .map(v => String(v).trim()).filter(v => /^\d+$/.test(v)))];
+    const out = {};
+    try {
+      for (let i = 0; i < list.length; i += 500) {            // SQL Server allows ~2100 params per query
+        const chunk = list.slice(i, i + 500);
+        const reqst = sqlPool.request();
+        chunk.forEach((v, j) => reqst.input('r' + j, sql.Float, Number(v)));
+        const result = await reqst.query(
+          `SELECT RXNUM, LTRIM(RTRIM(RXPANUM)) AS PHN FROM RX WHERE RXNUM IN (${chunk.map((_, j) => '@r' + j).join(',')})`);
+        result.recordset.forEach(r => { out[String(r.RXNUM)] = String(r.PHN || '').trim(); });
+      }
+      res.json(out);
+    } catch (e) {
+      console.error('/getRxOwners error:', e.message);
       res.status(500).json({ error: e.message });
     }
   });

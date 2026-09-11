@@ -24,3 +24,7 @@ Thumbs.db
 *.swo
 .vscode/
 .idea/
+
+# --- Electron build output / dependencies (built on Windows or in CI) ---
+electron-app/node_modules/
+electron-app/dist/

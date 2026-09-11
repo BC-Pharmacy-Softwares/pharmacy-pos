@@ -4,7 +4,7 @@ A point-of-sale system for pharmacies. It rings up prescriptions and OTC product
 takes payments, keeps compliance records, tracks patient accounts, talks to WinRx and
 McKesson, and prints receipts, shelf tags, and reports — all from one Windows app.
 
-> **Version 1.4.8.** The installed version is shown on the login screen and at the
+> **Version 1.4.9.** The installed version is shown on the login screen and at the
 > top-right of Settings. Check it before reporting a problem.
 
 ---
@@ -59,7 +59,7 @@ Patients also never see drug cost or markup — only their copay and quantity.
 
 ## 2. Installing on a New Computer
 
-You only need **one file**: `Pharmacy POS Setup 1.4.8.exe` (the installer).
+You only need **one file**: `Pharmacy POS Setup 1.4.9.exe` (the installer).
 
 ### Steps
 1. Copy the installer to the new PC (USB or network share)
@@ -366,8 +366,20 @@ For patients who pick up now and pay later.
 
 **How the balance is worked out:** WinRx records what was **billed** (the patient copay
 on each fill) but never records what was **collected** — so the POS is the only record of
-payment. Owing = copay billed in WinRx − (payments taken at the till + manual entries).
-Insurance is never included; only the patient's own portion.
+payment.
+
+> **Owing** = copay billed in WinRx − copay collected at the till − manual payments
+> \+ anything else charged to the account
+
+- **Charging to AR** (the 🧾 **AR (Account)** button at the till) collects nothing: the Rx
+  copay stays owing, and any other items on that sale (OTC, tax) are added to the account.
+  If a sale is split — part cash, part AR — only the AR part is owed.
+- A copay is credited to the patient **whose prescription it is**, even when a family member
+  paid for it or the sale wasn't linked to anyone.
+- Every billed fill counts, however many a patient has.
+- Money taken for an Rx that WinRx no longer bills (for example a reversed fill) becomes a
+  **credit** on the account — it's never lost.
+- Insurance is never included; only the patient's own portion.
 
 ### On a patient's profile
 Patients screen → find the patient:
@@ -378,6 +390,9 @@ Patients screen → find the patient:
   (e-transfer, cheque, payment link). You can target a specific Rx, and a reference
   number prevents the same payment being entered twice.
 
+At the till, choosing **🧾 AR (Account)** shows the patient's **current balance** before you
+charge anything more to it.
+
 ### The dashboard
 **Reports → Accounts Receivable**:
 
@@ -386,8 +401,10 @@ Patients screen → find the patient:
 - Search by name, PHN, or account number
 - **Billed from** — ignore fills before a cutoff date (useful when you first start using AR)
 - **As of** — see what the balance *was* on a past date
-- Click a patient for their **statement**: every fill and payment in date order with a
-  running balance, plus per-Rx **Pay** and **Write off** buttons
+- Click a patient for their **statement**: what they owe item by item — each Rx, and anything
+  else charged to the account — with **Pay** and **Write off** buttons
+- A patient billed in WinRx who has never been rung up at the POS shows by PHN — click them and
+  they're loaded from WinRx automatically, so you can record payments for them
 - CSV export respects whatever filter is active
 
 > Statements show `Rx #60004`, never the medication name.
@@ -675,4 +692,4 @@ Copy it from the old account to the new one.
 
 ---
 
-*Pharmacy POS — User & Setup Guide · v1.4.8*
+*Pharmacy POS — User & Setup Guide · v1.4.9*

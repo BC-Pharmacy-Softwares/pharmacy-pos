@@ -270,6 +270,9 @@ const DB = (() => {
       "ALTER TABLE transaction_items ADD COLUMN drug_name TEXT",
       // Unique human-friendly AR account number per patient (e.g. AR-0001)
       "ALTER TABLE patients ADD COLUMN ar_account_no TEXT",
+      // 1.4.9: PHNs imported from WinRx could carry its CHAR padding ("9876543210   "),
+      // which broke AR's PHN matching. Trim them — unless that would clash with a record.
+      "UPDATE patients SET phn = TRIM(phn) WHERE phn != TRIM(phn) AND TRIM(phn) NOT IN (SELECT phn FROM patients)",
     ].forEach(sql => { try { _db.run(sql); } catch(_) {} });
 
     // BTC / Schedule II dispensing log
@@ -407,28 +410,47 @@ const DB = (() => {
   }
 
   /* ---- Patients ---- */
+  /* Patients are matched on PHN, so the PHN must be stored cleanly:
+       • trimmed — WinRx pads PHNs with spaces, and a padded one never matched in AR;
+       • every missing field → null — sql.js refuses to bind `undefined`, which made
+         the POS "quick customer" (only PHN / name / phone) fail outright;
+       • an existing record is found even if its stored PHN was padded or typed with
+         spaces/dashes, and its PHN is cleaned on update. */
   function upsertPatient(p) {
-    const existing = get('SELECT patient_id FROM patients WHERE phn=?', [p.phn]);
+    const phn = String(p.phn ?? '').trim();
+    const v   = k => (p[k] === undefined ? null : p[k]);
+    const existing = _findPatientRow(phn);
     if (existing) {
-      run(`UPDATE patients SET surname=?,given_name=?,dob=?,phone=?,cell=?,email=?,
+      run(`UPDATE patients SET phn=?,surname=?,given_name=?,dob=?,phone=?,cell=?,email=?,
            address=?,city=?,province=?,postal_code=?,allergies=?,updated_at=?
-           WHERE phn=?`,
-        [p.surname,p.given_name,p.dob,p.phone,p.cell,p.email,
-         p.address,p.city,p.province,p.postal_code,p.allergies,localISOStr(),p.phn]);
+           WHERE patient_id=?`,
+        [phn, v('surname') ?? '', v('given_name') ?? '', v('dob'), v('phone'), v('cell'), v('email'),
+         v('address'), v('city'), v('province'), v('postal_code'), v('allergies'), localISOStr(),
+         existing.patient_id]);
       return existing.patient_id;
-    } else {
-      run(`INSERT INTO patients(phn,surname,given_name,dob,phone,cell,email,address,city,province,postal_code,allergies)
-           VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
-        [p.phn,p.surname,p.given_name,p.dob,p.phone,p.cell,p.email,
-         p.address,p.city,p.province,p.postal_code,p.allergies]);
-      return lastInsertId();
     }
+    run(`INSERT INTO patients(phn,surname,given_name,dob,phone,cell,email,address,city,province,postal_code,allergies)
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [phn, v('surname') ?? '', v('given_name') ?? '', v('dob'), v('phone'), v('cell'), v('email'),
+       v('address'), v('city'), v('province'), v('postal_code'), v('allergies')]);
+    return lastInsertId();
+  }
+  /* Exact PHN first; otherwise ignore surrounding/inner spaces, dashes and case
+     ("9876 543 210", a WinRx-padded "9876543210   "). Exact wins, so updating the
+     tolerant match to the clean PHN can never collide with another record. */
+  function _findPatientRow(phn) {
+    const clean = String(phn ?? '').trim();
+    if (!clean) return null;
+    return get('SELECT * FROM patients WHERE phn=?', [clean])
+        || get(`SELECT * FROM patients
+                WHERE UPPER(REPLACE(REPLACE(TRIM(phn),' ',''),'-','')) = ?
+                ORDER BY patient_id LIMIT 1`, [clean.replace(/[\s-]/g, '').toUpperCase()]);
   }
   function getPatient(patientId) {
     return get('SELECT * FROM patients WHERE patient_id=?', [patientId]);
   }
   function getPatientByPhn(phn) {
-    return get('SELECT * FROM patients WHERE phn=?', [phn]);
+    return _findPatientRow(phn);
   }
   function searchPatients(term) {
     const t = `%${term}%`;
@@ -846,37 +868,47 @@ const DB = (() => {
         [patientId || null, txnId]);
   }
 
-  /* ---- AR summary ---- */
-  function getPatientARSummary(patientId) {
-    const billed = get('SELECT COALESCE(SUM(total_amount),0) as total FROM transactions WHERE patient_id=? AND status!=?',
-      [patientId, 'REVERSED'])?.total || 0;
-    const paid = get('SELECT COALESCE(SUM(amount),0) as total FROM payments p JOIN transactions t ON p.transaction_id=t.transaction_id WHERE t.patient_id=? AND t.status!=?',
-      [patientId, 'REVERSED'])?.total || 0;
-    const outstanding = get('SELECT COALESCE(SUM(balance_owing),0) as total FROM transactions WHERE patient_id=? AND status IN (?,?)',
-      [patientId, 'PENDING', 'PARTIAL'])?.total || 0;
-    return { billed, paid, outstanding };
+  /* ---- Accounts Receivable — local (POS) side ----
+     Billed comes from WinRx; js/utils/ar.js does ALL the reconciliation. These only
+     return raw POS facts: which Rx lines were sold, and how each sale was paid.
+     (1.4.9 replaced getPatientARSummary / getPosPaidForPatient / getPosRxPaidAmount /
+     getPosRxPaidByRx — they counted a copay "charged to AR" as collected, credited
+     money by linked patient instead of Rx owner, and disagreed on refunds.) */
+
+  // Every non-reversed sale in a date window with its payment mix, plus its Rx lines.
+  // paid_ar = amount charged to the patient's account (method AR) — NOT money collected.
+  function getArPosData(from, to) {
+    const cond = ["t.status != 'REVERSED'"], params = [];
+    if (from) { cond.push('date(t.transaction_date) >= date(?)'); params.push(from); }
+    if (to)   { cond.push('date(t.transaction_date) <= date(?)'); params.push(to); }
+    const where = cond.join(' AND ');
+    const txns = all(`
+      SELECT t.transaction_id, t.patient_id, t.transaction_date, t.transaction_type, t.total_amount, t.notes,
+        COALESCE((SELECT SUM(p.amount) FROM payments p WHERE p.transaction_id = t.transaction_id AND UPPER(p.method) != 'AR'), 0) AS paid_other,
+        COALESCE((SELECT SUM(p.amount) FROM payments p WHERE p.transaction_id = t.transaction_id AND UPPER(p.method)  = 'AR'), 0) AS paid_ar,
+        COALESCE((SELECT SUM(ti.line_total) FROM transaction_items ti WHERE ti.transaction_id = t.transaction_id AND ti.item_type = 'RX'), 0) AS rx_total
+      FROM transactions t WHERE ${where}`, params);
+    const lines = all(`
+      SELECT ti.transaction_id, ti.rx_number, ti.line_total
+      FROM transaction_items ti JOIN transactions t ON t.transaction_id = ti.transaction_id
+      WHERE ti.item_type = 'RX' AND ${where}`, params);
+    return { txns, lines };
   }
 
-  /* ---- Accounts Receivable (patient copay reconciliation) ----
-     Billed comes from WinRx (REFILL.RECOPAY) via the API layer; this module owns
-     the LOCAL "paid" side: POS payments + manual ar_entries. */
-
-  // Total collected through the POS for a patient (excludes reversed sales).
-  // asOf (optional ISO date) → only payments on/before that date (point-in-time balance).
-  function getPosPaidForPatient(patientId, asOf) {
-    const dc = asOf ? ' AND date(p.payment_date) <= date(?)' : '';
-    const params = asOf ? [patientId, asOf] : [patientId];
-    return get(`SELECT COALESCE(SUM(p.amount),0) AS total
-                FROM payments p JOIN transactions t ON p.transaction_id = t.transaction_id
-                WHERE t.patient_id = ? AND t.status != 'REVERSED'${dc}`, params)?.total || 0;
+  // Payment mix of one sale — a refund inherits the mix of the sale it refunds.
+  function getTxnPaymentMix(txnId) {
+    return get(`
+      SELECT t.transaction_id, t.transaction_type, t.total_amount, t.notes,
+        COALESCE((SELECT SUM(p.amount) FROM payments p WHERE p.transaction_id = t.transaction_id AND UPPER(p.method) != 'AR'), 0) AS paid_other,
+        COALESCE((SELECT SUM(p.amount) FROM payments p WHERE p.transaction_id = t.transaction_id AND UPPER(p.method)  = 'AR'), 0) AS paid_ar
+      FROM transactions t WHERE t.transaction_id = ?`, [txnId]);
   }
 
-  // Rx numbers the patient has paid for through the POS (PAID transactions only).
-  function getPosPaidRxForPatient(patientId) {
-    return all(`SELECT DISTINCT ti.rx_number AS rx
-                FROM transaction_items ti JOIN transactions t ON ti.transaction_id = t.transaction_id
-                WHERE t.patient_id = ? AND t.status = 'PAID' AND ti.rx_number IS NOT NULL`,
-               [patientId]).map(r => String(r.rx));
+  function getPatientsForAR() {
+    return all('SELECT patient_id, phn, given_name, surname, ar_account_no FROM patients');
+  }
+  function getArEntriesAll() {
+    return all('SELECT * FROM ar_entries');
   }
 
   function addArEntry(e) {
@@ -909,32 +941,6 @@ const DB = (() => {
 
   // Sum of manual entries that reduce what the patient owes (all types count;
   // reversals are stored as negative amounts so they net out).
-  // Rx copay dollars actually collected at the POS for a patient — only RX line
-  // items on non-reversed sales (excludes OTC + tax, which aren't part of AR).
-  function getPosRxPaidAmount(patientId, asOf) {
-    const dc = asOf ? ' AND date(t.transaction_date) <= date(?)' : '';
-    const params = asOf ? [patientId, asOf] : [patientId];
-    return get(`SELECT COALESCE(SUM(ti.line_total),0) AS total
-                FROM transaction_items ti JOIN transactions t ON ti.transaction_id = t.transaction_id
-                WHERE t.patient_id = ? AND t.status != 'REVERSED'
-                  AND ti.item_type = 'RX' AND ti.line_total > 0${dc}`, params)?.total || 0;
-  }
-
-  // POS Rx-copay collected, grouped by Rx number → { rx_number: amount }.
-  // Lets AR show per-Rx paid vs billed (e.g. billed $10, collected $9 → $1 owing).
-  function getPosRxPaidByRx(patientId, asOf) {
-    const dc = asOf ? ' AND date(t.transaction_date) <= date(?)' : '';
-    const params = asOf ? [patientId, asOf] : [patientId];
-    const rows = all(`SELECT ti.rx_number AS rx, COALESCE(SUM(ti.line_total),0) AS amt
-        FROM transaction_items ti JOIN transactions t ON ti.transaction_id = t.transaction_id
-        WHERE t.patient_id = ? AND t.status != 'REVERSED'
-          AND ti.item_type = 'RX' AND ti.rx_number IS NOT NULL${dc}
-        GROUP BY ti.rx_number`, params);
-    const map = {};
-    rows.forEach(r => { map[String(r.rx)] = r.amt || 0; });
-    return map;
-  }
-
   function getArManualPaid(patientId, asOf) {
     const dc = asOf ? ' AND date(entry_date) <= date(?)' : '';
     const params = asOf ? [patientId, asOf] : [patientId];
@@ -1055,8 +1061,7 @@ const DB = (() => {
     upsertProducts, upsertProductsSelective, getProductCount, getLastSyncTime,
     getSalesSummary, getInventoryValuation, getTotalCollectedInRange, getSalesByMethod, getSoldProducts, getTransactionsInRange,
     searchTransactionsByRx, linkPatientToTransaction,
-    getPatientARSummary,
-    getPosPaidForPatient, getPosRxPaidAmount, getPosRxPaidByRx, getPosPaidRxForPatient, addArEntry, getArEntries,
+    getArPosData, getTxnPaymentMix, getPatientsForAR, getArEntriesAll, addArEntry, getArEntries,
     getArManualPaid, getArEntryByReference, getArEntry, updateArEntry, deleteArEntry, getArWriteOffs,
     setPatientArAccount, getPatientByArAccount, getNextArAccountNo,
     logEvent,

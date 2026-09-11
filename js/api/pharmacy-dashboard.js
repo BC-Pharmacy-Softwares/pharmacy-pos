@@ -97,6 +97,23 @@ const PharmacyDashboardAPI = (() => {
     return _call('getAllBilled', { Cutoff: cutoff || '', AsOf: asOf || '' });
   }
 
+  /* AR (1.4.9) — one patient's billed fills with NO row cap, plus every Rx they own.
+     Returns { fills: [{ RXNUM, RECOPAY, REEFDATE }], rxNumbers: [...] } */
+  async function getPatientBilled(phn, cutoff, asOf) {
+    return _call('getPatientBilled', { PHN: String(phn), Cutoff: cutoff || '', AsOf: asOf || '' });
+  }
+
+  /* AR dashboard — billed per patient per Rx, for everyone.
+     Returns [{ PHN, RXNUM, Fills, Billed, FirstFill }] */
+  async function getAllBilledByRx(cutoff, asOf) {
+    return _call('getAllBilledByRx', { Cutoff: cutoff || '', AsOf: asOf || '' });
+  }
+
+  /* Rx number → owner PHN, so a copay is credited to the prescription's patient. */
+  async function getRxOwners(rxNumbers) {
+    return _call('getRxOwners', { RX: rxNumbers || [] });
+  }
+
   /* ── Rx transaction ───────────────────────────────────────── */
 
   async function getRxTx(rxNum, branchCode) {
@@ -206,7 +223,7 @@ const PharmacyDashboardAPI = (() => {
   function _normalizePatient(d) {
     if (!d) return null;
     return {
-      phn:         String(d.PHN        || d.phn          || ''),
+      phn:         String(d.PHN        || d.phn          || '').trim(),   // WinRx pads PHNs
       surname:     d.SURNAME    || d.LastName   || d.surname    || '',
       given_name:  d.GIVEN      || d.FirstName  || d.given_name || '',
       sex:         d.SEX        || d.sex        || null,          // M/F/U
@@ -320,6 +337,7 @@ const PharmacyDashboardAPI = (() => {
     }
   }
 
-  return { getPatient, getPatients, getPatientProfile, getAllBilled, getRxTx, getDrug, saveDocument, savePdfToFolder, ping, getPharmacyInfo };
+  return { getPatient, getPatients, getPatientProfile, getAllBilled, getPatientBilled, getAllBilledByRx, getRxOwners,
+           getRxTx, getDrug, saveDocument, savePdfToFolder, ping, getPharmacyInfo };
   // v10: dedicated POS worker; POST + JSON body; X-POS-Key auth; PHARMACY_ID in body
 })();

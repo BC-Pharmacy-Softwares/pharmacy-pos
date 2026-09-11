@@ -169,7 +169,7 @@ class ReportsScreen {
     content.innerHTML = `
       <div class="settings-section" style="max-width:880px;">
         <h3>Accounts Receivable</h3>
-        <div class="alert alert-info">Patient copays billed in WinRx that haven't been collected (POS + manual payments). Insurance is not included.</div>
+        <div class="alert alert-info">Patient copays billed in WinRx that haven't been collected, plus anything else charged to a patient's account. A copay charged to AR stays owing until it's paid. Insurance is not included.</div>
         <div id="ar-loading" class="text-muted">Loading from WinRx…</div>
         <div id="ar-body" style="display:none;">
           <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:12px;" id="ar-kpis"></div>
@@ -185,6 +185,7 @@ class ReportsScreen {
             <button class="btn btn-outline btn-sm" id="ar-export">&#8659; CSV</button>
           </div>
           <div id="ar-table"></div>
+          <div id="ar-note" style="font-size:12px;color:var(--text-muted);margin-top:6px;"></div>
         </div>
       </div>`;
 
@@ -236,10 +237,13 @@ class ReportsScreen {
 
       content.querySelector('#ar-clear-filter')?.addEventListener('click', () => { agingFilter=''; renderAging(); renderTable(); });
       content.querySelectorAll('#ar-table tr[data-phn]').forEach(tr => {
-        tr.addEventListener('click', () => {
+        tr.addEventListener('click', async () => {
           const pid = parseInt(tr.dataset.pid) || null;
-          if (pid) this._showARStatement(pid, tr.dataset.phn, cutoff, asOf);
-          else alert('This patient is billed in WinRx but not yet in the POS patient list — ring a sale or look them up first.');
+          if (pid) { this._showARStatement(pid, tr.dataset.phn, cutoff, asOf); return; }
+          // Billed in WinRx but never rung up at the POS — bring them in from WinRx
+          const added = await this._importArPatient(tr.dataset.phn);
+          if (added) { this._showARStatement(added.patient_id, added.phn, cutoff, asOf); load(); }
+          else alert('This patient is billed in WinRx but could not be loaded from WinRx — check the WinRx connection.');
         });
       });
     };
@@ -284,6 +288,10 @@ class ReportsScreen {
 
       renderAging();
       renderTable();
+      content.querySelector('#ar-note').textContent = [
+        res.unmatched > 0.005 ? `${Tax.fmt(res.unmatched)} of this is owed by patients not yet in the POS list — click them to load from WinRx.` : '',
+        res.unattributed > 0.005 ? `${Tax.fmt(res.unattributed)} collected at the till for Rx numbers WinRx doesn't recognise, on sales with no patient linked.` : '',
+      ].filter(Boolean).join(' ');
 
       content.querySelector('#ar-export').onclick = () => {
         const rows = currentRows();
@@ -354,14 +362,14 @@ class ReportsScreen {
           Aging — 0-30: ${Tax.fmt(ag.d0_30)} · 31-60: ${Tax.fmt(ag.d31_60)} · 61-90: ${Tax.fmt(ag.d61_90)} · 90+: ${Tax.fmt(ag.d90_plus)}</div>
         <div style="font-weight:600;font-size:13px;margin:4px 0;">By prescription</div>
         <table class="table" style="margin-bottom:14px;">
-          <thead><tr><th>Rx #</th><th>Fill date</th><th class="text-right">Billed</th><th class="text-right">Paid</th><th class="text-right">Owing</th><th></th></tr></thead>
-          <tbody>${(st.perRx||[]).map(r => `<tr style="${r.owing>0?'background:#fdf4f3;':''}"><td>Rx #${r.rxNumber}</td>
+          <thead><tr><th>Item</th><th>Date</th><th class="text-right">Billed</th><th class="text-right">Paid</th><th class="text-right">Owing</th><th></th></tr></thead>
+          <tbody>${(st.perRx||[]).map(r => `<tr style="${r.owing>0?'background:#fdf4f3;':''}"><td>${r.label || 'Rx #' + r.rxNumber}</td>
             <td>${r.fillDate?new Date(r.fillDate).toLocaleDateString('en-CA'):''}</td>
             <td class="text-right">${Tax.fmt(r.billed)}</td><td class="text-right">${Tax.fmt(r.paid)}</td>
             <td class="text-right ${r.owing>0?'fw-bold text-danger':''}">${Tax.fmt(r.owing)}</td>
             <td style="text-align:right;white-space:nowrap;">${r.owing>0?`
-              <button class="btn btn-outline btn-sm st-pay" data-rx="${r.rxNumber}" data-amt="${r.owing}">Pay</button>
-              <button class="btn btn-outline btn-sm st-wo" data-rx="${r.rxNumber}" data-amt="${r.owing}">Write off</button>`:'<span style="color:var(--success);">✓</span>'}</td></tr>`).join('')}</tbody>
+              <button class="btn btn-outline btn-sm st-pay" data-rx="${r.rxNumber}" data-label="${r.label || ''}" data-amt="${r.owing}">Pay</button>
+              <button class="btn btn-outline btn-sm st-wo" data-rx="${r.rxNumber}" data-label="${r.label || ''}" data-amt="${r.owing}">Write off</button>`:'<span style="color:var(--success);">✓</span>'}</td></tr>`).join('')}</tbody>
         </table>
         <div style="font-weight:600;font-size:13px;margin:4px 0;">Payments &amp; adjustments</div>
         ${entries.length ? `<table class="table"><thead><tr><th>Date</th><th>Type</th><th>Method / Ref</th><th class="text-right">Amount</th><th></th></tr></thead>
@@ -392,9 +400,9 @@ class ReportsScreen {
       // Per-Rx actions: pay / write off this specific prescription
       const pObj = patient || { patient_id: patientId, phn, given_name: '', surname: '' };
       body.querySelectorAll('.st-pay').forEach(b => b.addEventListener('click', () =>
-        this._showArRecordModal(pObj, { rxNumber: b.dataset.rx, amount: b.dataset.amt, type: 'payment' }, render)));
+        this._showArRecordModal(pObj, { rxNumber: b.dataset.rx, label: b.dataset.label, amount: b.dataset.amt, type: 'payment' }, render)));
       body.querySelectorAll('.st-wo').forEach(b => b.addEventListener('click', () =>
-        this._showArRecordModal(pObj, { rxNumber: b.dataset.rx, amount: b.dataset.amt, type: 'write_off' }, render)));
+        this._showArRecordModal(pObj, { rxNumber: b.dataset.rx, label: b.dataset.label, amount: b.dataset.amt, type: 'write_off' }, render)));
     };
 
     modal.querySelector('#st-apply').addEventListener('click', render);
@@ -402,12 +410,24 @@ class ReportsScreen {
       this._showArRecordModal(patient || { patient_id: patientId, phn, given_name:'', surname:'' }, {}, render));
     modal.querySelector('#ar-st-csv').addEventListener('click', () => {
       if (!st || st.error) return;
-      _csvDownload([['Rx #','Fill date','Billed','Paid','Owing'],
-        ...(st.perRx||[]).map(r => ['Rx #'+r.rxNumber, r.fillDate?new Date(r.fillDate).toLocaleDateString('en-CA'):'',
+      _csvDownload([['Item','Date','Billed','Paid','Owing'],
+        ...(st.perRx||[]).map(r => [r.label || 'Rx #'+r.rxNumber, r.fillDate?new Date(r.fillDate).toLocaleDateString('en-CA'):'',
           r.billed.toFixed(2), r.paid.toFixed(2), r.owing.toFixed(2)])],
         `statement_${phn}_${_dateStr()}.csv`);
     });
     await render();
+  }
+
+  /* A patient billed in WinRx who was never rung up at the POS has no local record,
+     so no payment could be recorded for them. Load them from WinRx. */
+  async _importArPatient(phn) {
+    if (!phn) return null;
+    try {
+      const p = await PharmacyDashboardAPI.getPatient(phn);
+      if (!p || !p.phn) return null;
+      DB.upsertPatient(p);
+      return DB.getPatientByPhn(p.phn);
+    } catch (_) { return null; }
   }
 
   /* Edit an existing AR entry (correct a mis-keyed payment/adjustment). */
@@ -463,7 +483,13 @@ class ReportsScreen {
   /* Record a payment / adjustment / write-off — optionally pre-targeted to one Rx. */
   _showArRecordModal(patient, preset, onDone) {
     preset = preset || {};
-    if (!patient || !patient.patient_id) { alert('This patient is not in the POS list yet — look them up first.'); return; }
+    if (!patient || !patient.patient_id) {
+      // Billed in WinRx but not in the POS yet → import them from WinRx, then carry on
+      this._importArPatient(patient && patient.phn).then(p => p
+        ? this._showArRecordModal(p, preset, onDone)
+        : alert('This patient is not in the POS list and could not be loaded from WinRx.'));
+      return;
+    }
     const isAdmin = typeof Auth!=='undefined' && Auth.isAdmin && Auth.isAdmin();
     const modal = document.createElement('div');
     modal.className = 'modal-overlay';
@@ -472,7 +498,7 @@ class ReportsScreen {
       <div class="modal" style="max-width:400px;">
         <div class="modal-header"><h3>${preset.type==='write_off'?'Write off to bad debt':'Record payment / adjustment'}</h3><button class="modal-close">&times;</button></div>
         <div class="modal-body">
-          <div style="font-size:13px;color:var(--text-muted);margin-bottom:10px;">${patient.given_name} ${patient.surname} · PHN ${patient.phn}${preset.rxNumber?` · <strong>Rx #${preset.rxNumber}</strong>`:''}</div>
+          <div style="font-size:13px;color:var(--text-muted);margin-bottom:10px;">${patient.given_name} ${patient.surname} · PHN ${patient.phn}${preset.rxNumber?` · <strong>${preset.label || 'Rx #' + preset.rxNumber}</strong>`:''}</div>
           <div class="form-group"><label>Type</label>
             <select id="arr-type">
               <option value="payment">Payment received</option>

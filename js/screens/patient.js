@@ -186,7 +186,7 @@ class PatientScreen {
         }
       } catch { /* use local data */ }
 
-      const ar      = DB.getPatientARSummary(patient.patient_id);
+      const ar      = AR.posEstimate(patient);   // instant POS-only figures; replaced by the WinRx reconciliation below
       const txns    = DB.getTransactionsForPatient(patient.patient_id);
 
       content.innerHTML = `
@@ -489,7 +489,7 @@ class PatientScreen {
           ar.outstanding.forEach(f => {
             const o = document.createElement('option');
             o.value = f.rxNumber;
-            o.textContent = `Rx #${f.rxNumber} — owing ${Tax.fmt(f.owing)}${f.fillDate ? ' (' + new Date(f.fillDate).toLocaleDateString('en-CA') + ')' : ''}`;
+            o.textContent = `${f.label || 'Rx #' + f.rxNumber} — owing ${Tax.fmt(f.owing)}${f.fillDate ? ' (' + new Date(f.fillDate).toLocaleDateString('en-CA') + ')' : ''}`;
             sel.appendChild(o);
           });
         }

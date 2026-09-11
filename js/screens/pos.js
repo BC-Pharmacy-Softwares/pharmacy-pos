@@ -1868,8 +1868,6 @@ class POSScreen {
 
         // AR — show patient balance and charge immediately
         if (isAR) {
-          const arSummary = this._patient ? DB.getPatientARSummary(this._patient.patient_id) : null;
-          const outstanding = arSummary?.outstanding || 0;
           modal.querySelector('#pm-entry').style.display = 'block';
           modal.querySelector('#pm-cash-extras').style.display = 'none';
           modal.querySelector('#pm-clover-hint').style.display = 'none';
@@ -1883,8 +1881,23 @@ class POSScreen {
               arInfo.style.cssText = 'font-size:12px;padding:8px 10px;background:var(--surface2);border-radius:var(--radius);margin-bottom:8px;';
               modal.querySelector('#pm-amount').parentNode.insertAdjacentElement('afterend', arInfo);
             }
-            arInfo.innerHTML = `<strong>${this._patient.given_name} ${this._patient.surname}</strong>` +
-              (outstanding > 0 ? ` &nbsp;·&nbsp; <span style="color:var(--danger);">Current balance: ${Tax.fmt(outstanding)}</span>` : ' &nbsp;·&nbsp; <span style="color:var(--success);">No outstanding balance</span>');
+            // POS figure instantly, then the full WinRx reconciliation. (The old figure
+            // counted earlier "Charge to AR" sales as paid, so it always said "No balance".)
+            const pt = this._patient;
+            const show = (bal, note) => {
+              arInfo.innerHTML = `<strong>${pt.given_name} ${pt.surname}</strong>` +
+                (bal > 0.005 ? ` &nbsp;·&nbsp; <span style="color:var(--danger);">Current balance: ${Tax.fmt(bal)}</span>`
+                             : ' &nbsp;·&nbsp; <span style="color:var(--success);">No outstanding balance</span>') +
+                (note ? ` <span style="color:var(--text-muted);">${note}</span>` : '');
+            };
+            show(AR.posEstimate(pt).owing, '· checking WinRx…');
+            (async () => {
+              const cutoff = (await Config.get('ar_cutoff_date')) || '';
+              const r = await AR.getPatientAR(pt, { cutoff }).catch(e => ({ error: e.message }));
+              if (!arInfo.isConnected) return;
+              if (r.error) show(AR.posEstimate(pt).owing, '(POS records only — WinRx unavailable)');
+              else show(r.owing, '');
+            })();
           }
           modal.querySelector('#pm-add-btn').textContent = 'Charge to AR';
           return;

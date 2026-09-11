@@ -25,6 +25,12 @@ is a Mac (this repo). **Claude cannot run the app** — the user tests on Window
   - Changes to **`js/`, `css/`, `index.html`** live in `resources/app/` → take effect after rebuild (or manual file copy into the install folder).
   - Changes to **`electron-app/main.js`, `preload.js`** are sealed in `app.asar` → **require a rebuild**.
   - **When in doubt: rebuild.** Build command on Windows: `cd electron-app && BUILD-WINDOWS.bat`
+- **Releases are built by GitHub (since 1.4.9).** Pushing a tag `v<version>` runs
+  `.github/workflows/release.yml` on a Windows runner: it checks the tag matches `js/version.js` +
+  `electron-app/package.json`, downloads `lib/` (git-ignored), `npm ci`s both packages, builds the
+  **Setup exe only**, and publishes the GitHub Release that **Settings → About & Updates → Check for
+  Updates** reads. So a release from the Mac is: bump both version files → commit → push `main` →
+  `git tag v<ver> && git push origin v<ver>`. `BUILD-WINDOWS.bat` still works as a manual fallback.
 - **Claude is on Mac, cannot run/preview the app.** Ignore "preview server" hook nudges — verify by `node --check` on edited JS files instead.
 - After editing any `js/*.js`, **bump its `?v=N` query string in `index.html`** so the app doesn't serve a cached old copy.
 
@@ -36,7 +42,7 @@ is a Mac (this repo). **Claude cannot run the app** — the user tests on Window
 - **Must stay in sync with** `electron-app/package.json` `"version"` (that names the installer `.exe`).
 - Shown in-app on the **login screen** and **Settings top-right**.
 - Scheme: `MAJOR.MINOR.PATCH`. Most builds = PATCH bump.
-- **Current version: 1.4.8**
+- **Current version: 1.4.9**
 - When making a build, bump both files and note it in the Work Log below.
 
 ---
@@ -78,6 +84,8 @@ pharmacy-pos/
 │   └── icon.ico            # pharmacy logo (6 PNG-frame sizes incl 256)
 ├── clover-local-pay/
 │   └── server.js           # WebSocket bridge to Clover Network Pay Display
+├── .github/workflows/
+│   └── release.yml         # tag v<ver> → builds the Windows installer → publishes the GitHub Release
 ├── README.md               # full user & setup guide
 ├── SQL-SETUP.md            # how to make the read-only SQL login
 └── CLAUDE.md               # this file
@@ -127,6 +135,17 @@ pharmacy-pos/
     New "is this set up?" checks go in `SettingsHealth.check()`. Use level **`warn`** only for things that are
     silently failing (records not saved, email can't send, backups off) — `warn` is what the POS ⚙ button counts,
     and a badge that's always lit gets ignored. Optional/unused features are **`setup`**.
+12. **AR rules (1.4.9) — `js/utils/ar.js` `_reconcile()` is the ONLY place AR is computed** (patient page,
+    statements, dashboard, the payment screen's "Current balance"). Don't add a second calculation — that is
+    how the old app came to show two different balances. The rules: *collected* = money actually taken
+    (`payments.method = 'AR'` is a charge, not a payment; a refund inherits its sale's payment mix via the
+    `Refund for Txn #N` note); a copay belongs to **the Rx's owner in WinRx** (`/getRxOwners`), not the
+    sale's linked patient; Rx numbers compare via `AR.normRx` (no leading zeros), PHNs via `AR.normPhn`;
+    unmatched POS money becomes credit, never dropped. **`/getPatientProfile` is `TOP 60` — it's for the POS
+    pick list only; AR must use `/getPatientBilled` (uncapped).**
+13. **`lib/sql-wasm.js`, `lib/sql-wasm.wasm`, `lib/bcrypt.min.js` are git-ignored** (the setup scripts
+    download them). Any build from a fresh checkout — e.g. the release workflow — must download them first
+    (sql.js 1.10.2, bcryptjs 2.4.3) or the app ships without its database engine and won't start.
 
 ---
 
@@ -144,6 +163,8 @@ pharmacy-pos/
   button), error messages that deep-link to the fix, real folder checks + Open folder, one Receipt Design page,
   SMTP-only Email with Gmail/Outlook quick setup
 - Opening & Closing (SOD/EOD) log viewer in Reports, stale-open-shift warning (1.4.6+)
+- AR reconciliation rebuilt (1.4.9): charges to AR stay owing, copays credited to the Rx's owner, no fill cap,
+  one calculation everywhere; releases published automatically from a git tag
 - Docs: README.md (user guide), SQL-SETUP.md
 
 **Known limits (by design):**
@@ -163,7 +184,67 @@ pharmacy-pos/
 
 ## Work Log (newest first — append new entries here)
 
-### 1.4.8 — (current)
+### 1.4.9 — (current)
+**Reported: "check if AR is getting properly connected to patients."** It wasn't. Patients were matched
+WinRx↔POS by PHN correctly in the simple case, but money was mis-credited or dropped in common cases. Every
+failure below was reproduced by running the real AR code against a fake WinRx that mirrored its SQL:
+- **CRITICAL — a copay "charged to AR" counted as collected.** The 🧾 AR (Account) button saves a normal payment
+  line with `method='AR'` (status PAID); AR summed every Rx line on any non-reversed sale and never looked at
+  the method. $12.50 charged → AR said $0 owing, and the payment screen said **"No outstanding balance"**
+  (`getPatientARSummary` also counted AR lines as paid). The charge-account patients AR exists for were invisible.
+- **Per-patient billed capped at 60 fills** — AR used `/getPatientProfile` (`TOP 60 … ORDER BY REEFDATE DESC`,
+  built for the POS pick list). 80 unpaid $5 fills → $300 not $400, and the missing $100 was the *oldest*
+  (90+ days). The dashboard's uncapped total was then overwritten by the capped figure.
+- **Money credited by the sale's linked patient, not the Rx's owner.** Parent picks up child's Rx → child still
+  owed $15 and the parent got nothing either (dropped). A sale with no patient linked was never credited.
+- **POS payments silently dropped** when the Rx # didn't exactly match a billed fill: leading zeros from the
+  ProPharm Old (default) / ProPharm New / Generic barcode profiles (`0050005` vs `50005`), reversed fills, >60.
+- **Dashboard and patient page disagreed** — two different paid totals (one ignored refund lines), so a patient
+  who owed could be **missing from the dashboard** while their own page showed a balance.
+- **PHNs not trimmed on import** (`mapPatient` / `_normalizePatient`) while the dashboard trimmed WinRx's —
+  a padded PHN would never match. *Probable, not confirmed* (depends on WinRx's PANUM column type).
+- **POS "quick customer" creation threw** `Wrong API use: tried to bind a value of an unknown type (undefined)`:
+  `upsertPatient` passed missing fields as `undefined` to sql.js. (All other patient-save paths set every field.)
+
+**Fix — one reconciliation, used everywhere (`ar.js` rewritten around `_reconcile()`):**
+- *Collected* = `line_total × (non-AR payments ÷ sale total)`. AR-charged / unpaid Rx stays owing; the non-Rx
+  part (OTC, tax) of an AR-charged or unpaid sale becomes a **charge line** on the account (`TXN#<id>`).
+  A refund inherits its original sale's mix (parsed from its `Refund for Txn #N` note).
+- A copay is credited to the **Rx's owner in WinRx**; failing that, the linked patient; failing that it's
+  reported as *unattributed*. POS money matching no billed fill → **credit** (never dropped).
+- Rx numbers normalised (`AR.normRx`), PHNs normalised (`AR.normPhn`); all local records sharing a PHN are one
+  patient (a hand-typed "123 456 789" and the WinRx record).
+- Statements now include till payments, charges and refunds, and end at exactly owing − credit.
+- `AR.posEstimate()` — instant POS-only figure (shown first, and when WinRx is offline).
+- **main.js**: `mapPatient` trims PHN; new `/getPatientBilled` (uncapped fills + every Rx the patient owns),
+  `/getAllBilledByRx` (dashboard, per patient per Rx), `/getRxOwners` (chunked 500 params/query, numbers only).
+- **db.js**: `upsertPatient` trims PHN, defaults missing fields to null (quick customer fixed), finds padded /
+  spaced records (`_findPatientRow`); one-time migration trims padded PHNs; `getArPosData`, `getTxnPaymentMix`,
+  `getPatientsForAR`, `getArEntriesAll` replace `getPatientARSummary` / `getPosPaidForPatient` /
+  `getPosRxPaidAmount` / `getPosRxPaidByRx` / `getPosPaidRxForPatient`.
+- **UI**: payment screen shows the real balance when 🧾 AR is chosen; AR dashboard + Record Payment import a
+  WinRx-only patient on click (no more "look them up first"); statement rows use item labels; a note shows
+  amounts owed by patients not yet in the POS and unattributed till copays.
+- **Assumption:** Rx numbers are unique within the pharmacy (single branch "A"). Multi-branch would need the
+  branch code in the owner lookup.
+- **Expect balances to rise after this update** for patients who were charged to AR — that's money genuinely
+  owed that the old code hid.
+- **Verified:** the real `main.js` route code in Node with a fake SQL pool (PHN trimmed, no `TOP`, 1,200 Rx →
+  3 queries of ≤500 params, junk filtered, leading zeros looked up as numbers); browser run of the real engine +
+  DB with WinRx faked to mirror the new SQL — charged to AR $12.50 owed; family pickup child/parent 0/0; unlinked
+  0; leading-zero 0; padded PHN 0; refund $10 (both views); 80 fills $400 with $310 in 90+; OTC charged $21 via
+  a charge line; AR-charged Rx refunded+reversed 0; split cash/AR owes exactly the $15 charged; paid-but-unbilled
+  → $10 credit; spaced duplicate record = same patient; quick customer saves; **dashboard == patient page and
+  statement == owing − credit for every patient**; payment screen "Current balance: $12.50"; Reports → AR
+  imported a WinRx-only patient on click and opened their statement; zero console errors.
+- **Release pipeline added** (`.github/workflows/release.yml`) — see Critical Workflow Facts. Found while
+  writing it: `lib/` is git-ignored, so a clean-checkout build would have shipped without sql.js; the workflow
+  downloads it. `package.json` build filter now excludes `.github/**`; `.gitignore` adds `electron-app/node_modules/`
+  + `electron-app/dist/`.
+- `?v=`: `version.js`(14), `db.js`(33), `ar.js`(8), `pharmacy-dashboard.js`(21), `reports.js`(28), `patient.js`(14),
+  `pos.js`(83). **`main.js` changed → rebuild required** (the release workflow does it). README section 8 + version.
+
+### 1.4.8
 *Ships the whole Settings redesign — Phase 1 (navigation + search), Phase 2 (setup health, Overview, error deep
 links, folder check) and Phase 3 (below). **`main.js` + `preload.js` changed in Phase 2 → REBUILD REQUIRED.**
 `README.md` (the user guide) and `PHARMACY-SOP.md` updated to the new Settings names.*
