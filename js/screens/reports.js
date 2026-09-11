@@ -1225,7 +1225,7 @@ class ReportsScreen {
       body.querySelector('#btn-export-mckesson')?.addEventListener('click', async () => {
         const account = (await Config.get('mckesson_account') || '').replace(/\D/g, '');
         if (!account) {
-          alert('McKesson Account Number is not set.\n\nGo to Settings → API Credentials → McKesson and enter your 6-digit Account / Customer Number first.');
+          SettingsLink.alertOrGo('McKesson Account Number is not set.\n\nGo to Settings → WinRx & McKesson → McKesson Login and enter your 6-digit Account Number first.', '#mk-account');
           return;
         }
 
@@ -1291,7 +1291,7 @@ class ReportsScreen {
       body.querySelector('#btn-upload-mckesson')?.addEventListener('click', async function() {
         const account = (await Config.get('mckesson_account') || '').replace(/\D/g, '');
         if (!account) {
-          alert('Set your McKesson Account Number in Settings → API Credentials first.');
+          SettingsLink.alertOrGo('Set your McKesson Account Number in Settings → WinRx & McKesson → McKesson Login first.', '#mk-account');
           return;
         }
         const qtys = getQtys().filter(i => i.item_no || i.upc);
@@ -1321,7 +1321,7 @@ class ReportsScreen {
           alert(`✓ Order uploaded to PharmaClik.\n\nConfirmation: ${conf}\n\nReview & send it in PharmaClik → Orders → Order Management.`);
         } catch(e) {
           btn.disabled = false; btn.textContent = '↑ Upload to PharmaClik';
-          alert('Upload failed:\n\n' + e.message);
+          SettingsLink.alertOrGo('Upload failed:\n\n' + e.message);
         }
       });
 
@@ -1533,7 +1533,7 @@ class ReportsScreen {
           status.style.color = 'var(--success)';
         });
       } catch(e) {
-        status.textContent = 'Failed: ' + e.message;
+        status.innerHTML = SettingsLink.linkify('Failed: ' + e.message);
         status.style.color = 'var(--danger)';
         btn.disabled = false; btn.textContent = '⬇ Download Invoices';
       }
@@ -2577,8 +2577,8 @@ async function _sendEmail({ recipientKey, subject, htmlBody, textBody, statusEl,
     else { alert(msg); }
   } catch(e) {
     const msg = `✗ ${e.message}`;
-    if (statusEl) { statusEl.textContent = msg; statusEl.style.color = 'var(--danger)'; }
-    else { alert(msg); }
+    if (statusEl) { statusEl.innerHTML = SettingsLink.linkify(msg); statusEl.style.color = 'var(--danger)'; }
+    else { SettingsLink.alertOrGo(msg); }
   } finally {
     if (btn) { btn.disabled = false; btn.innerHTML = '&#9993; Email'; }
   }

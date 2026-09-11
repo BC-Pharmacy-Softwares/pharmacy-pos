@@ -163,7 +163,7 @@ const McKessonAPI = (() => {
     // Catalog uses the CUSTOMER number (same as invoices), not the order Account#.
     const acct = (await Config.get('mckesson_customer') || await Config.get('mckesson_account') || '').replace(/\D/g,'');
     if (!user || !pass) throw new Error('McKesson username/password not set.');
-    if (!acct)          throw new Error('McKesson Customer Number not set (Settings → API Credentials).');
+    if (!acct)          throw new Error('McKesson Customer Number not set (Settings → WinRx & McKesson → McKesson Login).');
 
     const xml = `<?xml version="1.0" encoding="utf-8"?>
 <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">
@@ -377,8 +377,8 @@ const McKessonAPI = (() => {
     const user = await Config.get('mckesson_username');
     const pass = await Config.get('mckesson_password');
     const acct = (await Config.get('mckesson_account') || '').replace(/\D/g,'');
-    if (!user || !pass) throw new Error('McKesson username/password not set (Settings → API Credentials).');
-    if (!acct)          throw new Error('McKesson Account Number not set (Settings → API Credentials).');
+    if (!user || !pass) throw new Error('McKesson username/password not set (Settings → WinRx & McKesson → McKesson Login).');
+    if (!acct)          throw new Error('McKesson Account Number not set (Settings → WinRx & McKesson → McKesson Login).');
     if (!items?.length) throw new Error('No items to upload.');
 
     const itemXml = items.map(i => `
@@ -440,7 +440,7 @@ const McKessonAPI = (() => {
     // Fall back to account number if customer not set.
     const acct = (await Config.get('mckesson_customer') || await Config.get('mckesson_account') || '').replace(/\D/g,'');
     if (!user || !pass) throw new Error('McKesson username/password not set.');
-    if (!acct)          throw new Error('McKesson Customer Number not set (Settings → API Credentials).');
+    if (!acct)          throw new Error('McKesson Customer Number not set (Settings → WinRx & McKesson → McKesson Login).');
 
     // Build the request for a given DistributorIdentifier value.
     // distVal '' means omit the element entirely.

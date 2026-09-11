@@ -1,7 +1,7 @@
 /* ============================================================
    pharmacy-dashboard.js — WinRx / Pharmacy Dashboard API
    v9 — uses a configurable website Cloudflare Worker
-        (set via worker_url in Settings) which is
+        (worker_url — no Settings field; desktop uses the local SQL API) which is
         already deployed and working. No wrangler needed.
 
    Call pattern:
@@ -28,7 +28,7 @@ const PharmacyDashboardAPI = (() => {
   async function _base() {
     if (_localApi()) return _localApi();
     const url = await Config.get('worker_url');
-    if (!url) throw new Error('Worker URL not configured. Go to Settings → API Credentials.');
+    if (!url) throw new Error('WinRx is not connected. Set it up in Settings → WinRx & McKesson → WinRx Connection.');
     return url.replace(/\/$/, '');
   }
 

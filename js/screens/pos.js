@@ -42,7 +42,7 @@ class POSScreen {
             <span id="shift-dot" style="color:#adb5bd;">&#9679;</span>
             <span id="shift-label" style="margin-left:4px;">Shift</span>
           </button>
-          <button class="btn btn-outline btn-sm" id="btn-settings">&#9881;</button>
+          <button class="btn btn-outline btn-sm" id="btn-settings">&#9881; Settings<span id="settings-badge" class="pos-settings-badge" hidden></span></button>
           <div class="topbar-staff">
             <span id="staff-name"></span>
             <button class="btn btn-outline btn-sm" id="btn-lock">Lock</button>
@@ -171,6 +171,7 @@ class POSScreen {
     this._el.querySelector('#btn-shift').addEventListener('click', () => this._showShiftModal());
     this._updateShiftIndicator();
     this._checkStaleShift();
+    this._refreshSettingsBadge();
     this._el.querySelector('#btn-customer-display').addEventListener('click', () => {
       window.open('customer-display.html', 'customer-display',
         'width=800,height=500,menubar=no,toolbar=no,location=no,status=no');
@@ -1033,11 +1034,13 @@ class POSScreen {
     setTimeout(() => searchInput.focus(), 60);
   }
 
-  _setStatus(type, msg) {
+  _setStatus(type, msg, field) {
     const el = this._el.querySelector('#scan-status');
     if (!el) return;
     el.className = 'scan-status' + (type ? ` ${type}` : '');
-    el.textContent = msg;
+    // A message that names a setting becomes a link straight to it
+    if (typeof SettingsLink !== 'undefined' && String(msg).includes('Settings →')) el.innerHTML = SettingsLink.linkify(msg, field);
+    else el.textContent = msg;
   }
 
   /* ---- Partial Refund Modal ---- */
@@ -1210,8 +1213,8 @@ class POSScreen {
     }
     const folderPath = await Config.get('btc_records_folder');
     if (!folderPath) {
-      console.warn('[BTC PDF] SKIPPED — no folder configured. Set it in Settings → BTC Records.');
-      this._setStatus('warn', '⚠ BTC record not saved — no folder set (Settings → BTC Records)');
+      console.warn('[BTC PDF] SKIPPED — no folder configured. Set it in Settings → Folders & Backup.');
+      this._setStatus('warn', '⚠ BTC record not saved — no folder set (Settings → Folders & Backup)', '#fd-btc');
       return;
     }
     console.log('[BTC PDF] Folder path:', folderPath);
@@ -2015,7 +2018,7 @@ class POSScreen {
     if (!configured) {
       if (errTarget) {
         errTarget.style.display = 'block';
-        errTarget.textContent   = 'Clover Local Pay not configured. Go to Settings → API Credentials → Clover.';
+        errTarget.innerHTML     = SettingsLink.linkify('The card terminal is not set up. Go to Settings → Card Terminal.');
       }
       return;
     }
@@ -2924,6 +2927,22 @@ class POSScreen {
       btn.style.borderColor = 'rgba(253,126,20,.4)';
       btn.title = '';
     }
+  }
+
+  /* ⚙ Settings button: show a ⚠ count when something is silently not
+     working (records not saved, email can't send, backups off…).
+     Managers/Admins only — cashiers can't open Settings, so for them it
+     would only be noise. */
+  async _refreshSettingsBadge() {
+    const badge = this._el?.querySelector('#settings-badge');
+    if (!badge || typeof SettingsHealth === 'undefined') return;
+    if (!Auth.isManager()) { badge.hidden = true; return; }
+    let warn = [];
+    try { warn = (await SettingsHealth.check()).filter(i => i.level === 'warn'); } catch (_) {}
+    badge.hidden = !warn.length;
+    badge.textContent = warn.length ? `⚠ ${warn.length}` : '';
+    const btn = this._el?.querySelector('#btn-settings');
+    if (btn) btn.title = warn.length ? `Needs attention:\n• ${warn.map(i => i.msg).join('\n• ')}` : '';
   }
 
   /* Nag once a day if a shift is still open from a previous day. */
@@ -4323,7 +4342,7 @@ class POSScreen {
         }
 
         if (!folderOk && !sqlOk) {
-          throw new Error('Document not saved — configure the document folder in Settings → API Credentials');
+          throw new Error('Document not saved — set the WinRx document inbox folder in Settings → Folders & Backup');
         }
       } catch(e) {
         errorMsg = e.message;
@@ -4348,7 +4367,9 @@ class POSScreen {
             padding:8px 12px;background:#fff0f0;border-radius:4px;border:1px solid #fcc;`;
           btn.parentNode.insertBefore(errEl, btn);
         }
-        errEl.textContent = `Pick Up Confirmation upload failed: ${errorMsg}. Configure the document folder in Settings → API Credentials.`;
+        // errorMsg may already name the setting — don't say it twice
+        const hint = String(errorMsg).includes('Settings →') ? '' : ' Set the WinRx document inbox folder in Settings → Folders & Backup.';
+        errEl.innerHTML = SettingsLink.linkify(`Pick Up Confirmation upload failed: ${errorMsg}.${hint}`, '#fd-doc');
       }
     });
 

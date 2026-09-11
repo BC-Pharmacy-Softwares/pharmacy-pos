@@ -76,6 +76,8 @@ const Config = (() => {
     const json      = JSON.stringify(obj);
     const encrypted = await _encrypt(json);
     localStorage.setItem(DATA_KEY, encrypted);
+    // Let open screens (Settings badges, the POS ⚙ count) re-check setup health
+    try { window.dispatchEvent(new CustomEvent('config-changed')); } catch (_) {}
   }
 
   async function get(key) {

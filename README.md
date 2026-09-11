@@ -4,7 +4,7 @@ A point-of-sale system for pharmacies. It rings up prescriptions and OTC product
 takes payments, keeps compliance records, tracks patient accounts, talks to WinRx and
 McKesson, and prints receipts, shelf tags, and reports — all from one Windows app.
 
-> **Version 1.4.5.** The installed version is shown on the login screen and at the
+> **Version 1.4.8.** The installed version is shown on the login screen and at the
 > top-right of Settings. Check it before reporting a problem.
 
 ---
@@ -59,7 +59,7 @@ Patients also never see drug cost or markup — only their copay and quantity.
 
 ## 2. Installing on a New Computer
 
-You only need **one file**: `Pharmacy POS Setup 1.4.5.exe` (the installer).
+You only need **one file**: `Pharmacy POS Setup 1.4.8.exe` (the installer).
 
 ### Steps
 1. Copy the installer to the new PC (USB or network share)
@@ -113,20 +113,35 @@ Next, go through **Settings** (gear icon) and fill in each section below.
 
 ## 4. Settings — What to Enter & Where
 
-Open **Settings** (⚙ gear icon, top-right). Sections are grouped on the left.
+Open **⚙ Settings** (top-right). It opens on **🏠 Overview**, which lists anything that
+needs attention — each with a **Fix →** button that takes you straight to the right field —
+plus a tile for every section. A **⚠** on the Settings button, and ⚠ badges in the sidebar,
+mean something is quietly not working (records not being saved, email not sending, backups
+off…). A grey **○ / •** only means an optional feature isn't set up yet.
 
-| Group | Sections |
-|-------|----------|
-| **Pharmacy Setup** | Pharmacy Details · Date & Time · Staff Management *(Admin)* |
-| **Connections** | SQL Connection · API Credentials *(Admin)* · Catalog Sync |
-| **Products & Pricing** | Products · Quick Actions · Barcode Profiles |
-| **Printing & Labels** | Receipt Printer · Receipt Layout · Shelf Tags · Name Tags |
-| **Records & Reports** | BTC Records · Email Reports · Backup *(Admin)* · Updates |
+**Can't find something?** Type it into **Search settings** at the top left — for example
+*printer*, *logo*, *PIN*, *clover* or *backup* — and pick the result.
 
-**Cashiers** cannot open Settings at all. **Managers** see everything except
-API Credentials, Staff Management, and Backup — those are **Admin only**.
+| Section | Pages |
+|---------|-------|
+| 🏪 **My Pharmacy** | Business Details & Branding · Date & Time |
+| 👥 **Staff & Pharmacists** *(Admin)* | Staff, PINs, License #, signatures |
+| 💳 **Card Terminal** *(Admin)* | Clover device and pairing |
+| 🔗 **WinRx & McKesson** | WinRx Connection · McKesson Login *(Admin)* · Catalog Sync |
+| 🛒 **Products & Checkout** | Products · Quick Action Buttons · Barcode Scanning |
+| 🖨️ **Printing** | Receipt Printer · Receipt Design · Shelf Tags · Name Tags |
+| 📧 **Email & Reports** | Email account, report recipients, automatic reports |
+| 📁 **Folders & Backup** | Save Folders · Backup & Restore *(Admin)* |
+| ℹ️ **About & Updates** | Version and updates |
 
-### 4a. Pharmacy Details
+**Cashiers** cannot open Settings at all. **Managers** see everything, but Staff & Pharmacists,
+Card Terminal, McKesson Login and Backup & Restore are **Admin only** (so are the WinRx inbox
+and backup folders on Save Folders — Managers see those read-only).
+
+> Error messages elsewhere in the app that name a setting (e.g. *"Settings → Card Terminal"*)
+> are clickable for Managers and Admins — they open that setting directly.
+
+### 4a. My Pharmacy → Business Details & Branding
 The basics that appear on receipts and reports.
 
 | Field | Example |
@@ -138,23 +153,27 @@ The basics that appear on receipts and reports.
 | GST Registration Number | Your CRA GST # |
 | PST Registration Number | If applicable |
 | **Tax Rates** | GST % and PST % — turn each on/off and set the rate |
-| **Logo** | Upload a PNG/JPG (shown on receipts) |
+| **Logo** | Upload a PNG/JPG (printed on receipts and name badges) |
 | **Brand Kit** | Background + three brand colours, with live preview and reset |
 
 > **Brand Kit** replaces the old single "App Colour Theme" picker. It re-colours the
 > whole app plus name badges, shelf tags, and document headers. Thermal receipt printers
 > are monochrome, so colour only appears on colour printers (name badges, the A5 PDF).
 
-### 4b. Receipt Layout
-Customise how receipts print.
+### 4b. Printing → Receipt Design
+Everything about how receipts print, on one page.
 
 - **Paper width**: 58 / 72 / 80 mm
 - **Font** style & size, **separator** style (dashed/solid/stars)
 - **Receipt title** (e.g. "RECEIPT")
-- Toggles: show logo, patient name, PHN, Rx number, DIN, tax breakdown, staff name, footer
-- A **live preview** updates as you change settings
+- **Header and footer messages** (e.g. "Free delivery!" / "Thank you!"), each with an on/off switch
+- Toggles: show logo, patient name, PHN, Rx number, DIN, tax breakdown, staff name
+- A **live preview** updates as you type
 
-### 4c. SQL Connection (WinRx) — *desktop only*
+The logo itself is uploaded under **My Pharmacy → Business Details & Branding**, because it
+is also used on name badges.
+
+### 4c. WinRx & McKesson → WinRx Connection — *desktop only*
 Connects the POS to your WinRx database for patient/Rx lookup.
 
 | Field | Example |
@@ -169,7 +188,7 @@ Click **Test Connection** → should say Connected → **Save**.
 > **Creating the SQL login:** See **`SQL-SETUP.md`** for step-by-step instructions
 > (a read-only `db_datareader` login on the WinRx database). Hand it to your IT admin.
 
-### 4d. API Credentials *(Admin only)*
+### 4d. WinRx & McKesson → McKesson Login *(Admin only)*
 
 **McKesson PharmaClik** — for catalog, ordering, and receiving:
 
@@ -183,6 +202,8 @@ Click **Test Connection** → should say Connected → **Save**.
 > ⚠️ **Two different numbers!** Orders use Account#, invoices & catalog use Customer#.
 > Both are on your WinRx supplier screen. Swapping them causes "Invalid User Type".
 
+### 4e. Card Terminal *(Admin only)*
+
 **Clover — Network Pay Display** (skip if you don't use Clover):
 
 | Field | Where to find it | Example |
@@ -195,38 +216,35 @@ Click **Test Connection** → should say Connected → **Save**.
 Click **Save Clover Device** → the payment bridge restarts automatically →
 click **Pair with Device** → enter the 4-digit code shown on the Clover screen.
 
-**Document Storage (WinRx pick-up confirmations):**
+### 4f. Folders & Backup → Save Folders
+Every folder the POS saves into, on one page. Use **📁 Browse** rather than typing the path.
+Each folder shows **✓ Folder found**, or a warning if it's missing (e.g. a disconnected drive
+or OneDrive) or the POS isn't allowed to save there. **📂 Open** shows it in File Explorer.
 
-| Field | Example |
-|-------|---------|
-| WinRx Document Inbox Folder | `C:\WinRx\Documents\Inbox` |
+| Folder | What goes there | Example |
+|--------|-----------------|---------|
+| WinRx Document Inbox *(Admin)* | Rx pick-up confirmation PDFs with a WinRx-readable barcode | `C:\WinRx\Documents\Inbox` |
+| BTC / Schedule II Records | One PDF per BTC / controlled sale | `C:\Pharmacy Records\BTC` |
+| Opening & Closing Sign-offs | `OPEN_…` / `CLOSE_…` checklist PDFs | `C:\Pharmacy Records\Shift` |
+| Nightly Backup *(Admin)* | Daily database backup (schedule: Backup & Restore) | `D:\PharmacyBackups` |
 
-After the pharmacist signs off an Rx pickup, an A5 PDF with a WinRx-readable barcode
-is dropped here. Use **📁 Browse** to pick the folder rather than typing it.
+Each folder must already exist. PDFs are written **directly into it** — no subfolders.
 
-### 4e. BTC Records — *desktop only*
-Where Behind-the-Counter / controlled sale PDFs are saved.
-
-| Field | Example |
-|-------|---------|
-| Records Folder Path | `C:\Pharmacy Records\BTC` |
-
-The folder must already exist. PDFs are written **directly into it** — no subfolders.
-
-### 4f. Receipt Printer — *desktop only*
+### 4g. Printing → Receipt Printer — *desktop only*
 Select your 80mm thermal printer from the dropdown → **Save** → **Test Print**.
 When selected, receipts print silently (no dialog).
 
-### 4g. Staff Management *(Admin only)*
+### 4h. Staff & Pharmacists *(Admin only)*
 Add staff with their own PIN and role:
 
 - **Cashier** — POS only, no Settings
-- **Manager** — all settings except API Credentials / Staff / Backup
+- **Manager** — all settings except Staff & Pharmacists, Card Terminal, McKesson Login, Backup & Restore
 - **Admin** — everything
 
 Per-staff fields worth filling in:
 
-- **Designation / Title** and **License #** — printed on name badges and RPh sign-offs
+- **Designation / Title** and **License #** — printed on name badges and RPh sign-offs. A pharmacist only
+  appears in the sign-off **Sign as** list once their **License #** is filled in
 - **Stored signature** — draw it once; it's then stamped on sign-offs automatically
 - **Sign-off mode** — `PIN` (re-enter your login PIN to sign) or `Tick` (attestation only)
 - **Checklist defaults** — routine checklist items to pre-tick for this person
@@ -234,21 +252,30 @@ Per-staff fields worth filling in:
 > Regulatory, PODSA, pharmacist-only, and temperature items **never** pre-tick,
 > regardless of defaults.
 
-### 4h. Email Reports
-SMTP settings to email reports (e.g. Zoho, Gmail, Office 365):
+### 4i. Email & Reports
+The POS sends email through **your own email account (SMTP)** — the only method that sends
+automatically. Under **Quick setup**, pick **Gmail**, **Outlook.com** or **Microsoft 365** to
+fill in the server details, then enter your address and password and click **Send Test Email**.
+
+> **Gmail:** use an **App Password**, not your normal password. Google Account → Security →
+> turn on **2-Step Verification** → **App passwords** → create one → paste the 16-character code.
+>
+> **Outlook / Microsoft 365:** Microsoft has been switching off password sign-in for other apps.
+> If the test email fails with a sign-in error, the account may not allow it — Gmail is simplest.
 
 - SMTP Host, Port, Encryption, Username, Password, From/Reply-To
+- **Recipients** for each report — including **Opening & Closing Sign-offs**
 - **Automated Reports**: enable Daily and/or Monthly, set send time, pick which
   report sections to include (Sales, Methods, Tax, Products, BTC, Low Stock)
 
 > Automated reports only send **while the app is running**. If the PC is off at the
 > scheduled time, that day's email is skipped.
 
-### 4i. Catalog Sync, Products, Quick Actions, Barcode Profiles
+### 4j. Catalog Sync, Products, Quick Action Buttons, Barcode Scanning
 - **Catalog Sync** — pull the McKesson product catalogue (Sync via SOAP API)
 - **Products** — add/edit products, prices, stock, low-stock threshold, **Schedule flag**
-- **Quick Actions** — custom buttons on the POS screen
-- **Barcode Profiles** — how Rx barcodes are parsed (ProPharm, Positec, WinRx, Generic)
+- **Quick Action Buttons** — custom buttons on the POS screen
+- **Barcode Scanning** — how Rx barcodes are parsed (ProPharm, Positec, WinRx, Generic)
 
 ---
 
@@ -459,12 +486,13 @@ prices, and item numbers. (Uses your Customer #.)
 | **Order Suggestions** | Reorder list + McKesson ordering/receiving |
 | **Shift Reports** | Per-shift totals, cash movements, expected vs counted |
 | **BTC / Controlled Log** | Legal dispensing log with running balance |
+| **Opening & Closing Logs** | Every opening/closing sign-off, days missing one, reprint (section 10) |
 | **Accounts Receivable** | Who owes what, aging, statements (section 8) |
 | **Year-End (Accountant)** | AR aging, bad debt written off, inventory, sales & tax |
 
 Each has date filters, **Print**, **Export CSV**, and **Email** options.
 
-**Automated emails** (Settings → Email Reports):
+**Automated emails** (Settings → Email & Reports):
 - Daily report at a set time (previous day's sales)
 - Monthly report on a set day
 - Choose which sections to include
@@ -501,8 +529,8 @@ The database is **AES-encrypted** on disk. That protects a stolen laptop, backup
 copied file. Pair it with **BitLocker** on the PC for full-disk protection.
 
 ### Automatic nightly backup
-Settings → **Backup** → **Automatic Nightly Backup**:
-- Turn it on, set a time, and choose a folder (**📁 Browse**)
+Settings → **Folders & Backup → Backup & Restore** → **Automatic Nightly Backup**:
+- Turn it on and set a time. The folder is chosen under **Folders & Backup → Save Folders**
 - Writes one `.sqlite` file per day, overwriting within the same day
 - Old files are never auto-deleted — prune them yourself occasionally
 - **Back Up Now** runs it immediately
@@ -513,7 +541,7 @@ Settings → **Backup** → **Automatic Nightly Backup**:
 > The nightly backup only runs **while the app is running**.
 
 ### Manual export / restore
-Settings → **Backup**:
+Settings → **Folders & Backup → Backup & Restore**:
 - **⬇ Export Database (.sqlite)** — the real backup format
 - **⬇ Export All Data (.json)** — a readable data dump, for inspection or migration
 - **Import & Restore** — accepts a **`.sqlite`** file only, and **overwrites everything**
@@ -524,14 +552,14 @@ Settings → **Backup**:
 
 ## 15. Updating the App
 
-Settings → **Updates** shows the installed version and a **Check for Updates** button.
+Settings → **About & Updates** shows the installed version and a **Check for Updates** button.
 
 It is a **notifier, not an auto-updater**. It checks GitHub for a newer release and, if
 there is one, gives you a **Download** button that opens your browser. You then run the
 downloaded installer — it replaces the app and keeps all your data.
 
 **To update a PC:**
-1. Settings → **Updates** → **Check for Updates**
+1. Settings → **About & Updates** → **Check for Updates**
 2. If it says *Update available*, click **Download**
 3. Run the downloaded `Pharmacy POS Setup <version>.exe`
 4. Reopen the app and confirm the new version on the login screen
@@ -550,19 +578,20 @@ Keep these handy when setting up a pharmacy:
 
 | What | Where to find it | Goes in |
 |------|-----------------|---------|
-| SQL Server name | SSMS → `SELECT @@SERVERNAME` | Settings → SQL Connection |
-| WinRx database name | usually `winrxdata` | Settings → SQL Connection |
-| SQL login + password | created in SSMS (read-only) | Settings → SQL Connection |
-| McKesson **Account #** | WinRx → Supplier → Acct# | Settings → API → McKesson |
-| McKesson **Customer #** | WinRx → Supplier → Customer# | Settings → API → McKesson |
-| McKesson web login | your PharmaClik credentials | Settings → API → McKesson |
-| Clover device IP | Clover → Network Pay Display screen | Settings → API → Clover |
-| WinRx document inbox | the folder WinRx watches | Settings → API → Document Storage |
-| BTC records folder | any folder you create | Settings → BTC Records |
-| Shift records folder | any folder you create | Settings → Email Reports |
-| Nightly backup folder | OneDrive / network / encrypted drive | Settings → Backup |
-| Thermal printer | Windows installed printer | Settings → Receipt Printer |
-| Pharmacist CPBC # | the pharmacist's licence | Settings → Staff Management |
+| SQL Server name | SSMS → `SELECT @@SERVERNAME` | Settings → WinRx & McKesson → WinRx Connection |
+| WinRx database name | usually `winrxdata` | Settings → WinRx & McKesson → WinRx Connection |
+| SQL login + password | created in SSMS (read-only) | Settings → WinRx & McKesson → WinRx Connection |
+| McKesson **Account #** | WinRx → Supplier → Acct# | Settings → WinRx & McKesson → McKesson Login |
+| McKesson **Customer #** | WinRx → Supplier → Customer# | Settings → WinRx & McKesson → McKesson Login |
+| McKesson web login | your PharmaClik credentials | Settings → WinRx & McKesson → McKesson Login |
+| Clover device IP | Clover → Network Pay Display screen | Settings → Card Terminal |
+| WinRx document inbox | the folder WinRx watches | Settings → Folders & Backup → Save Folders |
+| BTC records folder | any folder you create | Settings → Folders & Backup → Save Folders |
+| Sign-off (shift records) folder | any folder you create | Settings → Folders & Backup → Save Folders |
+| Sign-off email recipients | who should receive them | Settings → Email & Reports |
+| Nightly backup folder | OneDrive / network / encrypted drive | Settings → Folders & Backup → Save Folders |
+| Thermal printer | Windows installed printer | Settings → Printing → Receipt Printer |
+| Pharmacist CPBC # | the pharmacist's licence | Settings → Staff & Pharmacists |
 
 ---
 
@@ -573,13 +602,13 @@ Press **Ctrl + Shift + R** to reload. If it persists, press **Ctrl + Shift + I**
 Console tab → read the red error.
 
 ### Can't connect to WinRx SQL
-- Confirm Server/Database/Username/Password in Settings → SQL Connection
+- Confirm Server/Database/Username/Password in Settings → WinRx & McKesson → WinRx Connection
 - In PowerShell: `Test-NetConnection -ComputerName <server> -Port 1433`
 - Make sure SQL Server allows **SQL Authentication** (Mixed Mode)
 
 ### Clover not connecting / red indicator
 - Open **Network Pay Display** on the Clover device and press Start
-- Settings → Clover → confirm the device IP matches → Save → Pair with Device
+- Settings → Card Terminal → confirm the device IP matches → Save Clover Device → Pair with Device
 - Both the PC and Clover must be on the same network
 
 ### Manual Card Entry doesn't show the keypad
@@ -593,15 +622,15 @@ Console tab → read the red error.
 - If still failing, McKesson must enable invoice download for your web-services account
 
 ### Receipt prints blank / wrong size
-- Settings → Receipt Printer → select the correct thermal printer
-- Settings → Receipt Layout → confirm paper width (usually 80mm)
+- Settings → Printing → Receipt Printer → select the correct thermal printer
+- Settings → Printing → Receipt Design → confirm paper width (usually 80mm)
 
 ### Rx copay shows $0.00
 The Rx was found but WinRx returned no copay for that Rx/branch combination.
 Click the price on the cart line to enter it manually and continue the sale.
 
 ### BTC PDF not saving
-- Settings → BTC Records → set a valid folder path that **already exists** on this PC
+- Settings → Folders & Backup → Save Folders → the BTC folder should say **✓ Folder found**
 - If it says the app needs a rebuild, the install is out of date — update it
 
 ### Automated report or nightly backup didn't run
@@ -631,19 +660,19 @@ Copy it from the old account to the new one.
 
 - [ ] Install `Pharmacy POS Setup <version>.exe`
 - [ ] Create Admin PIN + config passphrase, then **restart the app**
-- [ ] Settings → Pharmacy Details (name, tax, logo, Brand Kit)
-- [ ] Settings → SQL Connection (WinRx) → Test → Save
-- [ ] Settings → API → McKesson (Account #, Customer #, login)
-- [ ] Settings → API → Clover (device IP) → Save → Pair *(if using Clover)*
-- [ ] Settings → API → Document inbox folder
-- [ ] Settings → BTC Records folder
-- [ ] Settings → Receipt Printer → select → Test Print
-- [ ] Settings → Staff Management → add staff, PINs, licences, signatures
-- [ ] Settings → Email Reports → SMTP + automated reports
-- [ ] Settings → Backup → nightly backup folder → **Back Up Now** to test
+- [ ] Settings → My Pharmacy → Business Details & Branding (name, tax, logo, Brand Kit)
+- [ ] Settings → WinRx & McKesson → WinRx Connection → Test → Save
+- [ ] Settings → WinRx & McKesson → McKesson Login (Account #, Customer #, login)
+- [ ] Settings → Card Terminal (device IP) → Save → Pair *(if using Clover)*
+- [ ] Settings → Folders & Backup → Save Folders (WinRx inbox, BTC, sign-offs, backup)
+- [ ] Settings → Printing → Receipt Printer → select → Test Print
+- [ ] Settings → Staff & Pharmacists → add staff, PINs, **licences**, signatures
+- [ ] Settings → Email & Reports → Gmail / SMTP → **Send Test Email** → recipients
+- [ ] Settings → Folders & Backup → Backup & Restore → nightly backup on → **Back Up Now**
+- [ ] Settings → **Overview** should say **✓ Nothing needs attention**
 - [ ] Catalog Sync → pull products
 - [ ] Open a shift → complete the opening checklist → ring a test sale
 
 ---
 
-*Pharmacy POS — User & Setup Guide · v1.4.5*
+*Pharmacy POS — User & Setup Guide · v1.4.8*

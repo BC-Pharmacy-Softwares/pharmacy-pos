@@ -543,12 +543,13 @@ const Checklists = (() => {
           btn.style.background = 'var(--success)';
           setTimeout(() => { close(); onDone && onDone(); }, 900);
         } else {
-          const notes = [r.pdfNote, r.emailNote].filter(Boolean);
+          // Each note that names a setting links straight to it
+          const notes = [[r.pdfNote, '#fd-shift'], [r.emailNote, undefined]].filter(n => n[0]);
           err.style.display = 'block';
           err.className = 'alert alert-warning';
           err.innerHTML = '<strong>Sign-off saved to the log' +
             (r.pdfPath ? ' and PDF written' : '') + ', but:</strong><ul style="margin:6px 0 0 18px;">' +
-            notes.map(n => `<li>${esc(n)}</li>`).join('') + '</ul>';
+            notes.map(([n, f]) => `<li>${typeof SettingsLink !== 'undefined' ? SettingsLink.linkify(n, f) : esc(n)}</li>`).join('') + '</ul>';
           err.scrollIntoView({ block: 'nearest' });
           btn.textContent = 'Close';
           btn.disabled = false;
@@ -662,7 +663,7 @@ const Checklists = (() => {
     const canPdf = window.electronAPI?.savePdfFile &&
                    (window.electronAPI?.generateA5Pdf || window.electronAPI?.generateReceiptPdf);
     if (!folder) {
-      pdfNote = 'No Shift Records folder set (Settings → Records) — PDF not saved.';
+      pdfNote = 'No sign-off folder set (Settings → Folders & Backup → Save Folders) — PDF not saved.';
       ok = false;
     } else if (!canPdf) {
       pdfNote = 'PDF saving is only available in the desktop app.';
@@ -683,14 +684,14 @@ const Checklists = (() => {
     // Email a copy
     const to = cfg.shift_records_recipients || cfg.email_recipients_sales || '';
     if (!to) {
-      emailNote = 'No email recipients set (Settings → Records → Shift Sign-Off Records) — nothing emailed.';
+      emailNote = 'No email recipients set (Settings → Email & Reports → Opening & Closing Sign-offs) — nothing emailed.';
       ok = false;
     } else if (typeof EmailAPI === 'undefined' || !EmailAPI.send) {
       emailNote = 'Email module unavailable — nothing emailed.'; ok = false;
     } else if ((cfg.email_service || 'mailto') === 'mailto') {
       /* The mailto fallback calls window.open(..., '_self'), which would
          navigate the POS away mid-shift. Never do that unattended. */
-      emailNote = 'Email service is still set to "mailto" (Settings → Email Reports) — ' +
+      emailNote = 'Email service is still set to "mailto" (Settings → Email & Reports) — ' +
                   'that cannot send automatically, so nothing was emailed.';
       ok = false;
     } else {

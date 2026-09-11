@@ -7,6 +7,10 @@
   const container = document.getElementById('screen-container');
   let currentScreen = null;
 
+  // Lets other modules open a screen — e.g. an error message that links
+  // straight to the setting that fixes it (SettingsLink.go).
+  window.App = { navigate: (screen, params) => navigate(screen, params), current: () => currentScreen };
+
   function _clear() {
     if (currentScreen?.detach) currentScreen.detach();
     container.innerHTML = '';

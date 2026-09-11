@@ -43,6 +43,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   /** Open the native folder picker — returns { ok, path?, canceled? } */
   pickFolder: (current) => ipcRenderer.invoke('pick-folder', { current }),
 
+  /** Does a folder exist, and can the app write to it? — returns { ok, exists, isDir, writable, error? } */
+  checkFolder: (folderPath) => ipcRenderer.invoke('check-folder', folderPath),
+
+  /** Open a folder in File Explorer (folders only, never files) — returns { ok, error? } */
+  openFolder: (folderPath) => ipcRenderer.invoke('open-folder', folderPath),
+
   /** Open a URL in the system default browser */
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
 });

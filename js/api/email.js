@@ -34,9 +34,9 @@ const EmailAPI = (() => {
 
     // ── SMTP in Electron: send directly via nodemailer (no Worker) ─
     if (cfg.email_service === 'smtp' && window.electronAPI?.sendEmail) {
-      if (!cfg.smtp_host)     throw new Error('SMTP host not configured. Go to Settings → Email Reports.');
-      if (!cfg.smtp_username) throw new Error('SMTP username not configured. Go to Settings → Email Reports.');
-      if (!cfg.smtp_password) throw new Error('SMTP password not configured. Go to Settings → Email Reports.');
+      if (!cfg.smtp_host)     throw new Error('SMTP host not configured. Go to Settings → Email & Reports.');
+      if (!cfg.smtp_username) throw new Error('SMTP username not configured. Go to Settings → Email & Reports.');
+      if (!cfg.smtp_password) throw new Error('SMTP password not configured. Go to Settings → Email & Reports.');
 
       const result = await window.electronAPI.sendEmail({
         smtpHost:       cfg.smtp_host,
@@ -55,13 +55,13 @@ const EmailAPI = (() => {
     }
 
     // ── API services / browser SMTP: route via Cloudflare Worker ──
-    if (!cfg.worker_url) throw new Error('Worker URL not configured. Go to Settings → API Credentials.');
+    if (!cfg.worker_url) throw new Error('This email service needs a Worker URL, which this version has no setting for. Choose SMTP in Settings → Email & Reports instead.');
 
     let payload;
     if (cfg.email_service === 'smtp') {
-      if (!cfg.smtp_host)     throw new Error('SMTP host not configured. Go to Settings → Email Reports.');
-      if (!cfg.smtp_username) throw new Error('SMTP username not configured. Go to Settings → Email Reports.');
-      if (!cfg.smtp_password) throw new Error('SMTP password not configured. Go to Settings → Email Reports.');
+      if (!cfg.smtp_host)     throw new Error('SMTP host not configured. Go to Settings → Email & Reports.');
+      if (!cfg.smtp_username) throw new Error('SMTP username not configured. Go to Settings → Email & Reports.');
+      if (!cfg.smtp_password) throw new Error('SMTP password not configured. Go to Settings → Email & Reports.');
       payload = {
         service:    'smtp',
         to, subject, htmlBody, textBody,
@@ -74,8 +74,8 @@ const EmailAPI = (() => {
         smtpPass:   cfg.smtp_password,
       };
     } else {
-      if (!cfg.email_api_key)  throw new Error('Email API key not configured. Go to Settings → Email Reports.');
-      if (!fromEmail)          throw new Error('From address not configured. Go to Settings → Email Reports.');
+      if (!cfg.email_api_key)  throw new Error('Email API key not configured. Go to Settings → Email & Reports.');
+      if (!fromEmail)          throw new Error('From address not configured. Go to Settings → Email & Reports.');
       payload = {
         service:   cfg.email_service,
         to, subject, htmlBody, textBody,
@@ -101,7 +101,7 @@ const EmailAPI = (() => {
   /* Convenience: look up recipient list from config key, then send. */
   async function sendReport({ recipientKey, subject, htmlBody, textBody }) {
     const to = (await Config.get(recipientKey)) || '';
-    if (!to) throw new Error('No recipients configured for this report. Go to Settings → Email Reports.');
+    if (!to) throw new Error('No recipients configured for this report. Go to Settings → Email & Reports.');
     return send({ to, subject, htmlBody, textBody });
   }
 

@@ -36,7 +36,7 @@ is a Mac (this repo). **Claude cannot run the app** — the user tests on Window
 - **Must stay in sync with** `electron-app/package.json` `"version"` (that names the installer `.exe`).
 - Shown in-app on the **login screen** and **Settings top-right**.
 - Scheme: `MAJOR.MINOR.PATCH`. Most builds = PATCH bump.
-- **Current version: 1.4.7**
+- **Current version: 1.4.8**
 - When making a build, bump both files and note it in the Work Log below.
 
 ---
@@ -68,6 +68,7 @@ pharmacy-pos/
 │   │   ├── print.js        # receipts, A5 docs, Code128 barcode
 │   │   ├── shelf-tags.js   # shelf price tags + EAN/UPC barcodes
 │   │   ├── scheduler.js    # automated daily/monthly report emails
+│   │   ├── settings-health.js  # SettingsHealth (setup checks) + SettingsLink (error → setting deep links)
 │   │   ├── tax.js, audit.js, report-print.js
 │   └── parsers/            # barcode.js, webcat.js (McKesson catalog format)
 ├── electron-app/
@@ -115,6 +116,17 @@ pharmacy-pos/
    path that tries legacy keys then re-saves under the stable key. Don't reintroduce `Config.unlock(null)`.
 10. **`??` vs `0`:** `a ?? b` keeps `a` when it's `0` (only falls back on null/undefined). Bit us on Rx copay
     (`getRxTx` 0 clobbered a good RECOPAY). Use `> 0` checks for prices, not `??`.
+11. **Settings nav is data-driven — adding a setting means touching THREE things** (top of `settings.js`):
+    `SETTINGS_NAV` (which group/page, `admin`/`desktop` flags, the one-line `about`), `SETTINGS_SEARCH`
+    (one entry per findable setting: `t`, `tab`, `sel` = the field's `#id`, `k` = extra keywords), and the
+    `_renderTab` switch. A setting missing from `SETTINGS_SEARCH` still works but **can't be found by search**.
+    Also: **Reports reuses `.settings-nav` / `.settings-body` / `.settings-nav-item`** — new Settings styles must be
+    scoped under `.settings-v2` or they leak into Reports. Error messages that say "Settings → X" must use the new
+    names (Card Terminal, WinRx & McKesson → McKesson Login, Folders & Backup, Email & Reports) — and any NEW
+    "Settings → …" phrase must be added to `SettingsLink`'s `MAP` in `settings-health.js`, or it won't become a link.
+    New "is this set up?" checks go in `SettingsHealth.check()`. Use level **`warn`** only for things that are
+    silently failing (records not saved, email can't send, backups off) — `warn` is what the POS ⚙ button counts,
+    and a badge that's always lit gets ignored. Optional/unused features are **`setup`**.
 
 ---
 
@@ -128,6 +140,10 @@ pharmacy-pos/
 - Shelf tags: Avery + thermal presets, real UPC/EAN-13 barcodes, live preview
 - Reports: sales/tax/method/products/shifts/BTC; daily+monthly automated emails with selectable sections
 - Clover: in-app bridge, Settings-based device config, pair, sale, refund, no Clover receipt prompt
+- Settings (1.4.8): task-based navigation + search, Overview with setup health checks, ⚠ badges (sidebar + POS
+  button), error messages that deep-link to the fix, real folder checks + Open folder, one Receipt Design page,
+  SMTP-only Email with Gmail/Outlook quick setup
+- Opening & Closing (SOD/EOD) log viewer in Reports, stale-open-shift warning (1.4.6+)
 - Docs: README.md (user guide), SQL-SETUP.md
 
 **Known limits (by design):**
@@ -147,7 +163,146 @@ pharmacy-pos/
 
 ## Work Log (newest first — append new entries here)
 
-### 1.4.7 — (current)
+### 1.4.8 — (current)
+*Ships the whole Settings redesign — Phase 1 (navigation + search), Phase 2 (setup health, Overview, error deep
+links, folder check) and Phase 3 (below). **`main.js` + `preload.js` changed in Phase 2 → REBUILD REQUIRED.**
+`README.md` (the user guide) and `PHARMACY-SOP.md` updated to the new Settings names.*
+
+**Phase 3 — one receipt page; Email that can actually be set up**
+- **Receipt pages merged.** Header/footer messages moved from Business Details to **Printing → Receipt Design**,
+  under their existing on/off switches, beside the live preview. The **logo stays in Business Details** — it's
+  branding, also used on name badges (`pos.js`, `print.js`; stored in localStorage `pharmacy_logo_data`, not
+  Config); Receipt Design shows the current logo with a "Change logo →" deep link. Business Details' save no
+  longer writes `receipt_header_msg`/`receipt_footer_msg` (it would have read the removed textareas).
+- **BUG FIXED — the Receipt Design "live preview" never showed your header/footer.** It always rendered canned
+  text ("Free delivery available!" / "Thank you for choosing our pharmacy! Follow us on social media."), whatever
+  was saved. Now it uses the typed text and **mirrors `print.js` exactly**: printed as-is (line breaks are NOT
+  kept), and a blank footer prints "Thank you for choosing <pharmacy name>!" (the help text under the box says
+  so). Textareas now trigger preview updates (the listeners only covered `select`/`input`).
+- **Email:** the method dropdown is now **"Send from your email account (SMTP) — recommended"** / **"Not set up —
+  can't send automatically"**. Resend/SendGrid/Brevo are no longer offered (they need `worker_url`, which has no
+  field) — shown only if already selected, labelled "can't send from this version", with a warning in the API
+  section; `API_HINTS`/`API_GUIDES` removed. `email.js` still supports them, untouched.
+- **Quick setup** buttons — Gmail / Outlook.com / Microsoft 365 / Other — fill host/port/encryption, switch the
+  method to SMTP and show that provider's tips (Gmail: App Password steps). **They live in the always-visible
+  Email Method box** — first placed inside the SMTP section, but that section is hidden exactly when a pharmacy
+  most needs them ("Not set up"). Same reason the "SMTP server & password" search entry points at `#er-service`.
+  A saved account shows its provider's tips on load, only while SMTP is selected.
+- ⚠ **The Microsoft wording is a caution, not verified against current policy**: the tips say Microsoft has
+  been switching off password sign-in for other apps and M365 needs SMTP AUTH allowed by IT. If Outlook/M365
+  users report sign-in failures on Send Test Email, that's the likely cause — Gmail + App Password is the
+  known-good path.
+- "Not set up" shows a warning that automatic reports and sign-offs can't be sent. **Send Test Email refuses on
+  "Not set up"** — the mailto branch does `window.open(mailto…, '_self')`, which would hand the POS window over.
+- Search: header/footer entries now point at Receipt Design; new "Gmail / Outlook email setup" entry.
+  63 entries, every target verified to exist in its render function.
+- Verified in a browser run: v1.4.8 everywhere; Business Details has no header/footer boxes, still saves
+  (header text kept), its link lands on + flashes `#rc-header-msg`; Receipt Design prefilled, preview shows the
+  real header + blank-footer default with the canned text gone, live on typing, header switch hides it, Save
+  writes both keys, logo link flashes the upload box; Email on "Not set up" offers only two methods, shows the
+  warning + visible Gmail button, Test refused with `window.open` never called; Gmail → smtp + `smtp.gmail.com`
+  587 STARTTLS + tips + focus on username, saved, tips re-shown on reopen; legacy `resend` shown labelled with
+  the warning and flagged by SettingsHealth; search "footer"/"gmail" land on + flash the right fields (Gmail
+  button visible while not set up); zero console errors. One fix from that run: provider tips only while SMTP
+  is selected.
+- Version **1.4.8** (`js/version.js`, `electron-app/package.json`); `?v=`: `settings.js`(60), `style.css`(10),
+  `version.js`(13).
+
+**Phase 2 — setup health, Overview page, error deep links, folder check**
+**⚠ `main.js` + `preload.js` changed (two new IPC handlers) → REBUILD REQUIRED.** Copying `js/` alone gives the
+Overview/badges/links, but not the folder check or 📂 Open (both degrade gracefully: "Set", no Open button).
+- **New `js/utils/settings-health.js`** (loaded right after `audit.js`):
+  - **`SettingsHealth.check()`** → `[{ tab, level, msg, field }]`. `warn` = silently failing: pharmacy name missing,
+    no staff with a License #, WinRx not connected (desktop), McKesson Account #/Customer # missing when a login is
+    entered, email can't send (`mailto`, incomplete SMTP, or Resend/SendGrid/Brevo with no `worker_url`), nobody
+    receives sign-offs, sign-off/BTC folder unset, nightly backup off / on-with-no-folder, **a set folder that no
+    longer exists or can't be written**. `setup` = optional: Clover, McKesson login, receipt printer, WinRx inbox.
+    Folder checks cached ~60 s (`checkFolder(p, { fresh })`) so clicking around doesn't hit the disk.
+  - **`SettingsLink`** — `linkify(text, field?)` turns the first "Settings → …" phrase in a message into a link
+    (HTML-escaped; plain text for Cashiers, who can't open Settings); `go(tab, field)` opens Settings there, **holding
+    an in-progress POS cart first** (same as auto-lock) and closing popups; `alertOrGo(text)` replaces `alert()` with
+    "…Open that setting now?". One document-level click listener handles every `[data-settings-tab]` link.
+- **Settings opens on 🏠 Overview** (`_renderHome`): banner ("⚠ N things need attention" / "✓ Nothing needs
+  attention"), each problem with **Fix →** (opens the page and flashes the field; "🔒 Ask an Admin" where locked),
+  a tile per group (✓ All set / ⚠ N need attention / ○ N not set up), optional features collapsed, search tip.
+- **Sidebar badges** (`_refreshHealth` → `_applyBadges`): ⚠ N on pages and group headings for `warn`, a grey • on
+  pages with only `setup` (group headings never show `setup`, so an unused feature doesn't shout). Re-checked on
+  every page open and on **`config-changed`** — `config.js` `_saveAll` now fires that event on every save.
+  Listener removed in `detach()` (+ `_detached` guard for in-flight checks).
+- **POS "⚙ Settings ⚠ N"** (`_refreshSettingsBadge`) — `warn` only, Managers/Admins only; hover lists them.
+- **Errors that now link to the fix:** sign-off warnings (folder → `#fd-shift`, recipients → `#er-signoff`), POS
+  status bar (`_setStatus(type, msg, field)` linkifies any "Settings →"; BTC → `#fd-btc`), Clover-not-set-up in
+  the payment modal, WinRx pickup upload failure (`#fd-doc`; also stopped it naming the setting twice), Email test
+  errors, Reports invoice download + report-email errors, and the three McKesson `alert()`s → `alertOrGo`.
+- **`window.App = { navigate, current }`** exposed from `app.js` (was private) so `SettingsLink.go` can navigate.
+- **Save Folders:** each set folder is really checked — ✓ Folder found / ⚠ Folder not found (drive or OneDrive
+  disconnected?) / ⚠ path is a file / ⚠ POS isn't allowed to save there; re-checked 600 ms after typing or Browse.
+  **📂 Open** per row (also on folders a Manager can't edit — it's read-only).
+- **`main.js`:** `check-folder` → `fs.promises.stat` + a **real test write** of a zero-byte `.pos-write-test-*`
+  file, then deletes it (on Windows `access(W_OK)` ignores folder ACLs); every step times out at 4 s because a
+  disconnected network/OneDrive path can hang. `open-folder` → **directories only** before `shell.openPath`
+  (which would otherwise launch a *file* typed into Settings). `preload.js`: `checkFolder`, `openFolder`.
+- Verified: the real `main.js` handler code run in Node with Electron stubbed — missing → ENOENT, file → not a
+  folder, good → writable, chmod-500 folder → EACCES/not writable, **no probe file left behind**, Open refused for
+  a file / missing / empty path and `shell.openPath` reached only for the real folder. Browser run: POS "⚙ Settings
+  ⚠ 7" + tooltip on a fresh install; Settings lands on Overview (7 issues, tiles, 3 optional); sidebar badges;
+  Fix → lands on + flashes `#fd-shift`; Save Folders statuses with a stubbed checker (found / not allowed / not
+  found), Open on a missing folder reports it, badge re-computed after Save; Email test error links to
+  `#er-service`; deep link from the POS **held the cart** and closed the popup; both sign-off warning links
+  land on the right fields; `alertOrGo` → `#mk-account`; Cashier gets plain text and no badge; zero console
+  errors. Two fixes from that run: dropped the "→" appended after link text (read as another path step), and
+  kept folder-name casing ("BTC", not "btc").
+- `?v=`: `settings-health.js`(2, new), `style.css`(9), `config.js`(6), `app.js`(10), `checklists.js`(8),
+  `pos.js`(82), `settings.js`(57), `reports.js`(27).
+
+**Phase 1 — Settings navigation rebuilt**
+**Reported: "setting navigation is really tough to find settings."** Agreed with the user first (proposal, then
+"where would the paths be?", then go). The old 17 tabs were grouped by *code module*, so things hid under names that
+didn't match: Clover pairing + the WinRx inbox folder under **API Credentials**, the opening/closing sign-off folder +
+recipients under **BTC Records**, pharmacist License # buried in the Staff edit popup, WinRx called "SQL Connection".
+- **8 task-based groups** (`SETTINGS_NAV`): 🏪 My Pharmacy · 👥 Staff & Pharmacists · 💳 Card Terminal ·
+  🔗 WinRx & McKesson · 🛒 Products & Checkout · 🖨️ Printing · 📧 Email & Reports · 📁 Folders & Backup, + About & Updates.
+  One-page groups render as a single row; others get a heading with indented pages.
+- **Search box** finds individual *settings*, not just pages (`SETTINGS_SEARCH`, 61 entries). Picking a result (or
+  Enter) opens the page, scrolls to the field, **flashes and focuses it** (`_highlight` polls ≤2 s because several
+  pages render async). All 61 `sel` targets verified to exist in their render functions.
+- **Breadcrumb + one-line "what this page is for"** above every page (`#settings-intro`).
+- **API Credentials split** → `_renderClover` (Card Terminal) + `_renderMcKesson` (McKesson Login); markup/handlers
+  copied verbatim. The Clover "Local Pay Service URL" used to be saved by the tab's shared Save button, which no longer
+  exists → now saves on `change`.
+- **All four folder paths on one page** — new `_renderFolders` (**Save Folders**): WinRx inbox (`doc_folder_path`),
+  BTC (`btc_records_folder`), sign-offs (`shift_records_folder`), nightly backup (`auto_backup_folder`), each with
+  what-goes-here text and a live ✓ Set / ⚠ Not set status stating the consequence. **Permissions preserved:** the inbox
+  and backup folders were Admin-only before, so Managers see them disabled and Save never writes them.
+  `_renderBtcFolder` deleted. Dropped its claim that "monthly subfolders are created automatically" — false since
+  commit `5872e3f` (`save-pdf-file` writes straight into the folder).
+- **Backup & Restore** no longer has its own folder field (one place per setting): shows the path read-only with a
+  "Change in Save Folders →" link; Save/Back Up Now read the folder from Config.
+- **Email & Reports** gained **Opening & Closing Sign-offs** recipients (`shift_records_recipients`, was on the BTC
+  tab). The existing "Shift Reports" field relabelled **Shift Cash Reports** to stop the two being confused.
+- **Cross-page links** via `data-goto` / `data-goto-field` (delegated). `render(params)` now honours
+  `{ tab, field }`; `SETTINGS_TAB_ALIASES` maps old ids `api`→`clover`, `btcfolder`→`folders`.
+- ⚙ button on the POS top bar now reads **⚙ Settings**.
+- **~25 messages across 9 files** rewritten from "Settings → API Credentials / BTC Records / Records / Email Reports"
+  to the new names — including the 1.4.7 checklist warnings, which named a "Records" tab that never existed.
+- **Found, not fixed — Email "Worker URL" is a dead end.** Resend/SendGrid/Brevo require `worker_url`, which has **no
+  field anywhere** in Settings (read in `email.js`, `mckesson.js`, `pharmacy-dashboard.js`; never written). Only
+  **SMTP** can send from the desktop app. The error now says so honestly instead of pointing at a tab. Phase 3 plan:
+  hide the three options + add a Gmail/Outlook SMTP preset. `pharmacy-dashboard.js`'s identical message only fires
+  when WinRx isn't connected → now says "WinRx is not connected → WinRx & McKesson → WinRx Connection".
+- Catalog page's "CORS note … configure a CORS proxy in API Credentials" now shows **only in browser mode** — desktop
+  SOAP goes through Node (`electronAPI.mckessonSoap`), and no proxy setting ever existed.
+- Verified in a browser run: nav/intro render, search (clover → 4 hits, "path" → all 4 folders, no-match hint),
+  Enter opens Card Terminal + flashes/focuses the IP field, Save Folders live status + save, Backup shows the folder
+  and its link lands on + flashes `#fd-backup`, sign-off recipients save, old deep links alias correctly; as Manager
+  → staff/clover/mckesson/backup locked, inbox + backup folders read-only (2 Browse buttons, not 4); **Reports
+  untouched** (200px nav, no search, no `settings-v2`); zero console errors.
+- Phases 2 and 3 followed in the same release — see above.
+- `?v=` bumped: `style.css`(7), `checklists.js`(7), `pharmacy-dashboard.js`(20), `mckesson.js`(12), `clover.js`(6),
+  `email.js`(5), `pos.js`(81), `settings.js`(56), `reports.js`(26). `scheduler.js` comment-only, not bumped.
+  **`main.js`/`preload.js` untouched.**
+
+### 1.4.7
 
 *Ships everything below. **1.4.6 was never built or released** — it only ever existed on this branch —
 so both parts go out together as 1.4.7. Nothing on any PC reports 1.4.6.*

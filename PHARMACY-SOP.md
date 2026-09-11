@@ -58,7 +58,7 @@
 3. Press **Enter** or click **Login**
 4. Your name and role appear in the top bar (e.g. `Sarah (Cashier)`)
 
-> **Forgot your PIN?** Ask a Manager or Admin to reset it in Settings → Staff Management.
+> **Forgot your PIN?** Ask a Manager or Admin to reset it in Settings → Staff & Pharmacists.
 
 > **Wrong PIN entered?** The system will lock for 30 seconds after several failed attempts. Wait and try again.
 
@@ -301,7 +301,7 @@ Before leaving at the end of the day:
 
 1. Clean the barcode with a dry cloth — smudges cause scan failures
 2. Try typing the Rx number manually in the patient search
-3. Check the WinRx connection: **Settings → API Credentials → WinRx SQL** should show **Connected**
+3. Check the WinRx connection: **Settings → WinRx & McKesson → WinRx Connection** should show **Connected**
 4. If WinRx shows disconnected, call IT support
 
 ### Receipt not printing
@@ -320,7 +320,7 @@ Before leaving at the end of the day:
 ### Cannot log in — PIN not accepted
 
 1. Make sure Caps Lock is not on
-2. Ask a Manager or Admin to reset your PIN in **Settings → Staff Management**
+2. Ask a Manager or Admin to reset your PIN in **Settings → Staff & Pharmacists**
 
 ### Wrong patient loaded by mistake
 

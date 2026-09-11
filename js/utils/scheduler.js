@@ -180,7 +180,7 @@ const Scheduler = (() => {
   }
 
   /* Write a plaintext .sqlite snapshot to the configured folder.
-     Same format as the manual Settings → Export, so Import/Restore works on it.
+     Same format as Settings → Backup & Restore → Export, so Import/Restore works on it.
      Returns { ok, path } or { ok:false, error }. */
   async function runBackupNow(folderOverride) {
     const folder = folderOverride || (await Config.get('auto_backup_folder')) || '';

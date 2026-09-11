@@ -448,3 +448,98 @@ label { font-size: 13px; font-weight: 500; color: var(--text-muted); display: bl
     font-size: 13px !important;
   }
 }
+
+/* ============================================================
+   SETTINGS NAVIGATION v2 — task-based groups + search
+   Scoped to .settings-v2: Reports reuses .settings-nav / .settings-body
+   and must not change.
+   ============================================================ */
+.settings-v2 .settings-body { grid-template-columns: 250px 1fr; }
+.settings-v2 .settings-nav  { padding: 0 0 16px; }
+.sn-search { position: sticky; top: 0; z-index: 1; background: var(--surface2); padding: 12px 12px 8px; }
+.sn-search input { width: 100%; font-size: 13px; padding: 8px 10px; }
+.sn-group {
+  display: flex; align-items: center; gap: 8px;
+  padding: 14px 16px 4px; font-size: 12.5px; font-weight: 700; color: var(--text);
+}
+.sn-icon  { width: 20px; text-align: center; flex-shrink: 0; }
+.sn-lock  { font-size: 10px; opacity: .6; margin-left: 6px; }
+.settings-v2 .settings-nav-item.sn-sub    { padding: 7px 16px 7px 44px; font-size: 13.5px; }
+.settings-v2 .settings-nav-item.sn-single {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 16px; margin-top: 6px; font-size: 13.5px; font-weight: 600;
+}
+.settings-v2 .settings-nav-item.sn-footer { font-weight: 400; margin-top: 0; }
+.sn-sep { border-top: 1px solid var(--border); margin: 14px 16px 4px; }
+
+.sn-result { padding: 8px 16px; cursor: pointer; border-left: 3px solid transparent; }
+.sn-result:hover { background: var(--border); border-left-color: var(--primary); }
+.sn-r-title { font-size: 13.5px; }
+.sn-r-where { font-size: 11.5px; color: var(--text-muted); margin-top: 1px; }
+.sn-empty   { padding: 12px 16px; font-size: 13px; color: var(--text-muted); line-height: 1.5; }
+
+.sn-intro { max-width: 680px; margin-bottom: 16px; }
+.sn-crumb { font-size: 12px; color: var(--text-muted); margin-bottom: 3px; }
+.sn-about { font-size: 13.5px; color: var(--text); line-height: 1.45; }
+
+@keyframes snFlash {
+  0%, 55% { box-shadow: 0 0 0 3px var(--warning); background: rgba(233,169,60,.14); }
+  100%    { box-shadow: 0 0 0 0 transparent;       background: transparent; }
+}
+.sn-flash { animation: snFlash 2.4s ease-out; border-radius: var(--radius); }
+
+/* Save Folders page */
+.fd-row  { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+           padding: 12px 14px; margin-bottom: 12px; }
+.fd-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 4px; }
+.fd-what { font-size: 12.5px; color: var(--text-muted); margin-bottom: 8px; line-height: 1.45; }
+.fd-ok   { font-size: 12px; color: var(--success); white-space: nowrap; }
+.fd-warn { font-size: 12px; color: #856404; text-align: right; }
+.fd-lock { font-size: 12px; color: var(--text-muted); margin-top: 6px; }
+
+/* ── Settings Phase 2: health badges, Overview page, folder checks ── */
+.settings-v2 .settings-nav-item { display: flex; align-items: center; gap: 8px; }
+.sn-badge { margin-left: auto; font-size: 11px; font-weight: 700; line-height: 1; padding: 3px 7px; border-radius: 10px; white-space: nowrap; }
+.sn-badge:empty  { display: none; }
+.sn-badge-warn   { background: rgba(233,169,60,.22); color: #8a5a00; }
+.sn-badge-setup  { color: var(--text-muted); font-size: 15px; padding: 0 4px; }
+
+.home-banner { padding: 12px 16px; border-radius: var(--radius); font-weight: 600; font-size: 14px; margin-bottom: 12px; }
+.home-banner-warn { background: rgba(233,169,60,.14); color: #8a5a00; border: 1px solid rgba(233,169,60,.4); }
+.home-banner-ok   { background: rgba(25,135,84,.08); color: var(--success); border: 1px solid rgba(25,135,84,.25); }
+.home-list  { display: flex; flex-direction: column; gap: 6px; margin-bottom: 18px; }
+.home-issue { display: flex; align-items: center; gap: 10px; padding: 9px 12px; background: var(--surface);
+              border: 1px solid var(--border); border-radius: var(--radius); font-size: 13px; }
+.home-issue-icon { width: 18px; text-align: center; flex-shrink: 0; }
+.home-warn  .home-issue-icon { color: #b7791f; }
+.home-setup .home-issue-icon { color: var(--text-muted); }
+.home-issue-msg   { flex: 1; }
+.home-issue-where { display: block; font-size: 11.5px; color: var(--text-muted); margin-top: 2px; }
+.home-locked { font-size: 12px; color: var(--text-muted); white-space: nowrap; }
+.home-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; margin-bottom: 18px; }
+.home-tile { display: block; padding: 14px; background: var(--surface); border: 1px solid var(--border);
+             border-radius: var(--radius); color: inherit; text-decoration: none; transition: border-color .12s, box-shadow .12s; }
+.home-tile:hover { border-color: var(--primary); box-shadow: 0 2px 8px rgba(0,0,0,.06); }
+.home-tile-head  { display: flex; align-items: center; gap: 8px; font-size: 14px; margin-bottom: 6px; }
+.home-tile-icon  { font-size: 18px; }
+.home-tile-pages { font-size: 12px; color: var(--text-muted); line-height: 1.4; min-height: 34px;
+                   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.home-tile-status { margin-top: 8px; font-size: 12.5px; font-weight: 600; }
+.home-tile-ok { color: var(--success); }  .home-tile-warn { color: #8a5a00; }  .home-tile-setup { color: var(--text-muted); }
+.home-optional { margin-bottom: 16px; font-size: 13px; }
+.home-optional summary { cursor: pointer; color: var(--text-muted); margin-bottom: 8px; }
+.home-tip { font-size: 12.5px; color: var(--text-muted); }
+
+.fd-open     { white-space: nowrap; }
+.fd-checking { font-size: 12px; color: var(--text-muted); }
+
+/* A "Settings → …" phrase inside an error message */
+.settings-link { font-weight: 600; text-decoration: underline; text-underline-offset: 2px; }
+
+/* POS top bar: ⚠ count on the Settings button */
+.pos-settings-badge { margin-left: 6px; font-size: 11px; font-weight: 700; padding: 1px 6px; border-radius: 10px;
+                      background: rgba(233,169,60,.25); color: #8a5a00; }
+
+/* ── Settings Phase 3: email quick setup ── */
+.er-presets { display: flex; flex-wrap: wrap; gap: 8px; }
+.er-preset.active { background: var(--primary); color: #fff; border-color: var(--primary); }

@@ -2,14 +2,14 @@
    clover.js — Clover Local Pay Display integration
    Calls the clover-local-pay Node.js service running on this
    machine (default http://localhost:3001).
-   Configure the URL in Settings → API Credentials → Clover.
+   Configure it in Settings → Card Terminal.
    ============================================================ */
 
 const CloverAPI = (() => {
 
   async function _baseUrl() {
     const url = await Config.get('clover_local_url');
-    if (!url) throw new Error('Clover Local Pay service URL not configured. Go to Settings → API Credentials → Clover.');
+    if (!url) throw new Error('Clover Local Pay service URL not configured. Go to Settings → Card Terminal.');
     return url.replace(/\/$/, '');
   }
 

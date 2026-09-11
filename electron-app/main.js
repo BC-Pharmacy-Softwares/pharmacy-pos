@@ -415,6 +415,44 @@ function registerIpcHandlers() {
     }
   });
 
+  // Folder health for Settings → Save Folders: does the folder exist, and can
+  // the app really write into it? Uses a real test write — on Windows,
+  // access(W_OK) ignores folder permissions. Disconnected network / OneDrive
+  // paths can hang, so every step times out.
+  ipcMain.handle('check-folder', async (_, folderPath) => {
+    const none = { ok: true, exists: false, isDir: false, writable: false };
+    if (!folderPath) return none;
+    const withTimeout = (p, ms = 4000) => Promise.race([p, new Promise((res, rej) =>
+      setTimeout(() => rej(Object.assign(new Error('timed out'), { code: 'ETIMEDOUT' })), ms))]);
+    let st;
+    try { st = await withTimeout(fs.promises.stat(folderPath)); }
+    catch (e) { return { ...none, error: e.code || e.message }; }
+    if (!st.isDirectory()) return { ok: true, exists: true, isDir: false, writable: false };
+    const probe = path.join(folderPath, `.pos-write-test-${process.pid}-${Date.now()}`);
+    try {
+      await withTimeout(fs.promises.writeFile(probe, ''));
+      await fs.promises.unlink(probe).catch(() => {});
+      return { ok: true, exists: true, isDir: true, writable: true };
+    } catch (e) {
+      return { ok: true, exists: true, isDir: true, writable: false, error: e.code || e.message };
+    }
+  });
+
+  // Open a folder in File Explorer. Directories ONLY — shell.openPath would
+  // happily launch a file, so a path typed into Settings must never reach it
+  // unless it is really a folder.
+  ipcMain.handle('open-folder', async (_, folderPath) => {
+    try {
+      if (!folderPath) return { ok: false, error: 'No folder set' };
+      const st = await fs.promises.stat(folderPath);
+      if (!st.isDirectory()) return { ok: false, error: 'That path is not a folder' };
+      const err = await shell.openPath(folderPath);
+      return err ? { ok: false, error: err } : { ok: true };
+    } catch (e) {
+      return { ok: false, error: e.code === 'ENOENT' ? 'Folder not found' : e.message };
+    }
+  });
+
   // Native folder picker — returns the chosen path (or null if cancelled).
   // 'createDirectory' lets the user make a new folder right in the dialog.
   ipcMain.handle('open-external', (_, url) => {

@@ -2,11 +2,167 @@
    screens/settings.js — Settings (Admin only)
    ============================================================ */
 
+/* ── Settings navigation ──────────────────────────────────────
+   Grouped by what someone is trying to DO, in plain words — not by how
+   the code is organised. (The old layout hid the card terminal under
+   "API Credentials" and the sign-off folder under "BTC Records".)
+     admin:true   → Admin-only; Managers see it, locked
+     desktop:true → only exists in the desktop app
+     about        → the one line shown at the top of the page          */
+const SETTINGS_NAV = [
+  { icon: '🏪', group: 'My Pharmacy', pages: [
+    { id: 'pharmacy', label: 'Business Details & Branding',
+      about: 'Name, address and phone, tax numbers and rates, logo and brand colours.' },
+    { id: 'datetime', label: 'Date & Time',
+      about: 'The clock and timezone used on receipts, reports and sign-offs.' },
+  ]},
+  { icon: '👥', group: 'Staff & Pharmacists', pages: [
+    { id: 'staff', label: 'Staff & Pharmacists', admin: true,
+      about: 'Add staff and set PINs. Edit a pharmacist to add their License # and signature — only staff with a License # appear in the sign-off "Sign as" list.' },
+  ]},
+  { icon: '💳', group: 'Card Terminal', pages: [
+    { id: 'clover', label: 'Card Terminal', admin: true,
+      about: 'Connect and pair the Clover terminal that takes card payments.' },
+  ]},
+  { icon: '🔗', group: 'WinRx & McKesson', pages: [
+    { id: 'sql', label: 'WinRx Connection', desktop: true,
+      about: 'Connects to the WinRx database to look up patients and prescriptions.' },
+    { id: 'mckesson', label: 'McKesson Login', admin: true,
+      about: 'Your PharmaClik login and account numbers — used for orders, invoices and the catalog.' },
+    { id: 'catalog', label: 'Catalog Sync',
+      about: 'Pull McKesson prices, descriptions and new items into your product list.' },
+  ]},
+  { icon: '🛒', group: 'Products & Checkout', pages: [
+    { id: 'products', label: 'Products',
+      about: 'Your custom products — prices, stock levels and tax flags.' },
+    { id: 'quickactions', label: 'Quick Action Buttons',
+      about: 'One-tap buttons on the sales screen for common items and discounts.' },
+    { id: 'barcode', label: 'Barcode Scanning',
+      about: 'How scanned barcodes are read, with a box to test one.' },
+  ]},
+  { icon: '🖨️', group: 'Printing', pages: [
+    { id: 'printer', label: 'Receipt Printer', desktop: true,
+      about: 'Which printer receipts are sent to.' },
+    { id: 'receipt', label: 'Receipt Design',
+      about: 'Everything about how receipts print — paper width, fonts, header and footer messages, and which details appear — with a live preview.' },
+    { id: 'shelftags', label: 'Shelf Tags',
+      about: 'Print price stickers and shelf labels with barcodes.' },
+    { id: 'nametags', label: 'Name Tags',
+      about: 'Print staff name badges.' },
+  ]},
+  { icon: '📧', group: 'Email & Reports', pages: [
+    { id: 'emailreports', label: 'Email & Reports',
+      about: 'How the POS sends email, who receives each report (including opening & closing sign-offs), and the automatic report schedule.' },
+  ]},
+  { icon: '📁', group: 'Folders & Backup', pages: [
+    { id: 'folders', label: 'Save Folders',
+      about: 'Every folder the POS saves files into — all in one place.' },
+    { id: 'backup', label: 'Backup & Restore', admin: true,
+      about: 'Nightly backup schedule, back up now, export, and restore from a backup.' },
+  ]},
+];
+const SETTINGS_FOOTER = { id: 'updates', label: 'About & Updates',
+  about: 'Your version number, and checking for a newer one.' };
+
+/* The page Settings opens on: what's set up, what needs attention. */
+const SETTINGS_HOME = { id: 'home', label: 'Overview',
+  about: 'What\'s set up, what needs attention, and a shortcut to every section.' };
+
+/* Old tab ids → new, so an old deep link still lands somewhere sensible. */
+const SETTINGS_TAB_ALIASES = { api: 'clover', btcfolder: 'folders' };
+
+/* Search index — individual settings, not just pages. `sel` is the field
+   to scroll to and flash (blank = just open the page); `k` holds extra
+   words people might type. Page and group names are searched too.      */
+const SETTINGS_SEARCH = [
+  { t: 'Pharmacy name',                     tab: 'pharmacy', sel: '#ph-name',          k: 'business store' },
+  { t: 'Branch code',                       tab: 'pharmacy', sel: '#ph-branch' },
+  { t: 'Phone & fax',                       tab: 'pharmacy', sel: '#ph-phone',         k: 'telephone number' },
+  { t: 'Pharmacy email address',            tab: 'pharmacy', sel: '#ph-email' },
+  { t: 'Website',                           tab: 'pharmacy', sel: '#ph-website' },
+  { t: 'Address',                           tab: 'pharmacy', sel: '#ph-address',       k: 'street city province postal code location' },
+  { t: 'GST registration number',           tab: 'pharmacy', sel: '#ph-gst-number',    k: 'tax business number bn' },
+  { t: 'PST registration number',           tab: 'pharmacy', sel: '#ph-pst-number',    k: 'tax' },
+  { t: 'GST rate',                          tab: 'pharmacy', sel: '#tax-gst-rate',     k: 'tax percent' },
+  { t: 'PST rate',                          tab: 'pharmacy', sel: '#tax-pst-rate',     k: 'tax percent' },
+  { t: 'Pharmacy logo',                     tab: 'pharmacy', sel: '#btn-upload-logo',  k: 'image picture receipt' },
+  { t: 'Receipt header message',            tab: 'receipt', sel: '#rc-header-msg',     k: 'top text' },
+  { t: 'Receipt footer message',            tab: 'receipt', sel: '#rc-footer-msg',     k: 'bottom text thank you' },
+  { t: 'Brand colours',                     tab: 'pharmacy', sel: '#sec-brand-kit',    k: 'colors color theme brand kit' },
+  { t: 'Date, time & timezone',             tab: 'datetime', sel: '',                  k: 'clock time zone' },
+
+  { t: 'Add a staff member',                tab: 'staff', sel: '#new-staff-name',      k: 'employee new user person' },
+  { t: 'Staff PIN / change PIN',            tab: 'staff', sel: '#new-staff-pin',       k: 'password login code' },
+  { t: 'Staff role (Admin / Manager / Cashier)', tab: 'staff', sel: '#new-staff-role', k: 'permission access' },
+  { t: 'Pharmacist License # (CPBC)',       tab: 'staff', sel: '',                     k: 'licence registration rph pharmacist sign as' },
+  { t: 'Saved signature',                   tab: 'staff', sel: '',                     k: 'sign-off signoff pharmacist' },
+  { t: 'Sign-off mode (PIN or tick)',       tab: 'staff', sel: '',                     k: 'signoff attestation pharmacist' },
+  { t: 'Checklist items pre-ticked',        tab: 'staff', sel: '',                     k: 'opening closing default sod eod' },
+
+  { t: 'Clover device IP address',          tab: 'clover', sel: '#cl-device-ip',       k: 'card terminal payment debit credit' },
+  { t: 'Pair with Clover',                  tab: 'clover', sel: '#btn-clover-pair',    k: 'pairing code terminal' },
+  { t: 'Test the card terminal',            tab: 'clover', sel: '#btn-ping-clover',    k: 'clover connection' },
+  { t: 'POS station name',                  tab: 'clover', sel: '#cl-pos-id',          k: 'clover' },
+
+  { t: 'WinRx database connection',         tab: 'sql', sel: '#sql-server',            k: 'sql server patients prescriptions rx' },
+  { t: 'McKesson username & password',      tab: 'mckesson', sel: '#mk-user',          k: 'pharmaclik login' },
+  { t: 'McKesson Account # (orders)',       tab: 'mckesson', sel: '#mk-account',       k: 'pharmaclik ordering' },
+  { t: 'McKesson Customer # (invoices & catalog)', tab: 'mckesson', sel: '#mk-customer', k: 'pharmaclik invoice' },
+  { t: 'Sync McKesson catalog',             tab: 'catalog', sel: '#btn-sync-now',      k: 'prices update descriptions' },
+  { t: 'Import catalog file (WEBCAT)',      tab: 'catalog', sel: '#catalog-file',      k: 'mckesson' },
+
+  { t: 'Products & stock',                  tab: 'products', sel: '#prod-search',      k: 'items inventory price quantity' },
+  { t: 'Add a custom product',              tab: 'products', sel: '#btn-add-product',  k: 'new item' },
+  { t: 'Export products to CSV',            tab: 'products', sel: '#btn-export-products', k: 'spreadsheet excel' },
+  { t: 'Quick action buttons',              tab: 'quickactions', sel: '#btn-add-qa',   k: 'shortcut discount one tap' },
+  { t: 'Barcode parser profile',            tab: 'barcode', sel: '#barcode-profile',   k: 'scanner scan' },
+  { t: 'Test a barcode',                    tab: 'barcode', sel: '#test-barcode',      k: 'scanner scan' },
+
+  { t: 'Receipt printer',                   tab: 'printer', sel: '#sel-printer',       k: 'thermal xprinter' },
+  { t: 'Receipt paper width',               tab: 'receipt', sel: '#rc-paper-width',    k: '80mm 58mm size' },
+  { t: 'Receipt font & size',               tab: 'receipt', sel: '#rc-font',           k: 'text' },
+  { t: 'Receipt title',                     tab: 'receipt', sel: '#rc-title' },
+  { t: 'What shows on the receipt',         tab: 'receipt', sel: '#rc-show-patient-name', k: 'phn rx number din staff patient name tax' },
+  { t: 'Shelf tags / price stickers',       tab: 'shelftags', sel: '#st-preset',       k: 'labels avery barcode print' },
+  { t: 'Staff name tags',                   tab: 'nametags', sel: '#nt-preset',        k: 'badges print' },
+
+  { t: 'Email method (SMTP)',               tab: 'emailreports', sel: '#er-service',   k: 'gmail outlook mail server resend sendgrid brevo mailto' },
+  { t: 'SMTP server & password',            tab: 'emailreports', sel: '#er-service',   k: 'email gmail outlook' },
+  { t: 'Gmail / Outlook email setup',       tab: 'emailreports', sel: '#er-preset-gmail', k: 'smtp app password quick setup microsoft 365 hotmail' },
+  { t: 'Send a test email',                 tab: 'emailreports', sel: '#btn-er-test' },
+  { t: 'Report recipients',                 tab: 'emailreports', sel: '#er-sales',     k: 'email accountant who' },
+  { t: 'Opening & closing sign-off emails', tab: 'emailreports', sel: '#er-signoff',   k: 'shift checklist sod eod recipients' },
+  { t: 'Automatic daily report',            tab: 'emailreports', sel: '#auto-daily-on', k: 'schedule email' },
+  { t: 'Automatic monthly report',          tab: 'emailreports', sel: '#auto-monthly-on', k: 'schedule email' },
+
+  { t: 'WinRx document inbox folder',       tab: 'folders', sel: '#fd-doc',            k: 'receipt pdf barcode upload path' },
+  { t: 'BTC records folder',                tab: 'folders', sel: '#fd-btc',            k: 'schedule ii controlled path' },
+  { t: 'Opening & closing sign-off folder', tab: 'folders', sel: '#fd-shift',          k: 'shift checklist sod eod pdf path' },
+  { t: 'Nightly backup folder',             tab: 'folders', sel: '#fd-backup',         k: 'onedrive path' },
+  { t: 'Nightly backup schedule',           tab: 'backup', sel: '#auto-backup-enabled', k: 'automatic time' },
+  { t: 'Back up now',                       tab: 'backup', sel: '#btn-backup-now' },
+  { t: 'Export database',                   tab: 'backup', sel: '#btn-export',         k: 'download sqlite json' },
+  { t: 'Restore from a backup',             tab: 'backup', sel: '#import-file',        k: 'import' },
+  { t: 'Check for updates',                 tab: 'updates', sel: '#btn-check-update',  k: 'version upgrade about' },
+  { t: 'Settings overview — what needs attention', tab: 'home', sel: '',                k: 'home status problems warnings setup' },
+];
+
+function _settingsPage(id) {
+  for (const g of SETTINGS_NAV) {
+    const page = g.pages.find(p => p.id === id);
+    if (page) return { page, group: g.group, icon: g.icon };
+  }
+  if (id === SETTINGS_HOME.id)   return { page: SETTINGS_HOME, group: SETTINGS_HOME.label, icon: '🏠' };
+  if (id === SETTINGS_FOOTER.id) return { page: SETTINGS_FOOTER, group: SETTINGS_FOOTER.label, icon: 'ℹ️' };
+  return null;
+}
+function _settingsVisible(page) { return !page.desktop || !!window.electronAPI; }
+
 class SettingsScreen {
   constructor({ onNavigate }) {
     this._onNavigate = onNavigate;
     this._el          = null;
-    this._activeTab   = 'pharmacy';
+    this._activeTab   = 'home';
   }
 
   render(params = {}) {
@@ -26,13 +182,14 @@ class SettingsScreen {
       return el;
     }
 
-    /* Tabs that require full Admin (super-admin) access */
-    const ADMIN_ONLY_TABS = new Set(['api', 'staff', 'backup']);
-
     const roleTitle = Auth.isAdmin() ? 'Settings (Admin)' : 'Settings (Manager)';
 
+    // Deep link: navigate('settings', { tab, field })
+    if (params.tab) this._activeTab = SETTINGS_TAB_ALIASES[params.tab] || params.tab;
+    if (!_settingsPage(this._activeTab)) this._activeTab = 'home';
+
     this._el = document.createElement('div');
-    this._el.className = 'settings-screen';
+    this._el.className = 'settings-screen settings-v2';
     this._el.innerHTML = `
       <div class="topbar">
         <button class="btn btn-outline btn-sm" id="btn-back">&#8592; Back</button>
@@ -41,75 +198,53 @@ class SettingsScreen {
       </div>
       <div class="settings-body">
         <div class="settings-nav">
-          ${[
-            ['__hdr__',      'Pharmacy Setup'],
-            ['pharmacy',     'Pharmacy Details',  false, false],
-            ['datetime',     'Date & Time',       false, false],
-            ['staff',        'Staff Management',  false, true ],  // Admin only
-            ['__hdr__',      'Connections'],
-            ['sql',          'SQL Connection',    true,  false],  // desktop only
-            ['api',          'API Credentials',   false, true ],  // Admin only
-            ['catalog',      'Catalog Sync',      false, false],
-            ['__hdr__',      'Products & Pricing'],
-            ['products',     'Products',          false, false],
-            ['quickactions', 'Quick Actions',     false, false],
-            ['barcode',      'Barcode Profiles',  false, false],
-            ['__hdr__',      'Printing & Labels'],
-            ['printer',      'Receipt Printer',   true,  false],  // desktop only
-            ['receipt',      'Receipt Layout',    false, false],
-            ['shelftags',    'Shelf Tags',        false, false],
-            ['nametags',     'Name Tags',         false, false],
-            ['__hdr__',      'Records & Reports'],
-            ['btcfolder',    'BTC Records',       true,  false],  // desktop only
-            ['emailreports', 'Email Reports',     false, false],
-            ['backup',       'Backup',            false, true ],  // Admin only
-            ['updates',      'Updates',           false, false],
-          ].filter(row => row[0] === '__hdr__' || !row[2] || !!window.electronAPI)
-           .map(row => {
-             if (row[0] === '__hdr__') {
-               return `<div style="font-size:10px;font-weight:700;text-transform:uppercase;
-                           letter-spacing:.05em;color:var(--text-muted);opacity:.65;
-                           padding:14px 12px 4px;">${row[1]}</div>`;
-             }
-             const [id, label, , adminOnly] = row;
-             const locked = adminOnly && !Auth.isAdmin();
-             return `<div class="settings-nav-item${id === this._activeTab ? ' active' : ''}"
-                         data-tab="${id}" data-locked="${locked}"
-                         style="${locked ? 'color:var(--text-muted);' : ''}">
-               ${label}${locked ? ' <span style="font-size:10px;opacity:.6;">&#128274;</span>' : ''}
-             </div>`;
-           }).join('')}
+          <div class="sn-search">
+            <input type="search" id="settings-search" placeholder="&#128269; Search settings…" autocomplete="off" />
+          </div>
+          <div id="sn-groups">${this._navHTML()}</div>
+          <div id="sn-results" hidden></div>
         </div>
-        <div class="settings-content" id="settings-content"></div>
+        <div class="settings-content">
+          <div id="settings-intro" class="sn-intro"></div>
+          <div id="settings-content"></div>
+        </div>
       </div>`;
 
     this._el.querySelector('#btn-back').addEventListener('click', () => this._onNavigate('pos'));
-    this._el.querySelectorAll('.settings-nav-item').forEach(item => {
-      item.addEventListener('click', () => {
-        this._el.querySelectorAll('.settings-nav-item').forEach(i => i.classList.remove('active'));
-        item.classList.add('active');
-        this._activeTab = item.dataset.tab;
 
-        /* Block Manager from Admin-only tabs */
-        if (ADMIN_ONLY_TABS.has(item.dataset.tab) && !Auth.isAdmin()) {
-          document.getElementById('settings-content').innerHTML = `
-            <div class="settings-section" style="text-align:center;padding:60px 40px;">
-              <div style="font-size:40px;margin-bottom:14px;">&#128274;</div>
-              <div style="font-weight:700;font-size:16px;margin-bottom:8px;">Admin Access Required</div>
-              <div style="color:var(--text-muted);font-size:13px;">
-                This section is restricted to <strong>Admin</strong> staff only.<br/>
-                Ask your Admin to make changes here.
-              </div>
-            </div>`;
-          return;
-        }
+    // Any setting saved anywhere → re-check the health badges (debounced)
+    this._onConfigChanged = () => {
+      clearTimeout(this._healthTimer);
+      this._healthTimer = setTimeout(() => this._refreshHealth(), 300);
+    };
+    window.addEventListener('config-changed', this._onConfigChanged);
 
-        this._renderTab(item.dataset.tab);
-      });
+    // Nav rows and search results share one handler
+    this._el.querySelector('.settings-nav').addEventListener('click', (e) => {
+      const row = e.target.closest('[data-tab]');
+      if (!row) return;
+      this._clearSearch();
+      this._openTab(row.dataset.tab, row.dataset.sel || '');
     });
 
-    // Delegated handler for all "📁 Browse" folder-picker buttons (any tab)
+    const search = this._el.querySelector('#settings-search');
+    search.addEventListener('input', () => this._runSearch(search.value));
+    search.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') this._clearSearch();
+      if (e.key === 'Enter') {
+        const first = this._el.querySelector('#sn-results [data-tab]');
+        if (first) first.click();
+      }
+    });
+
+    // Delegated, on any page: cross-page links + "📁 Browse" folder pickers
     this._el.querySelector('#settings-content').addEventListener('click', (e) => {
+      const go = e.target.closest('[data-goto]');
+      if (go) {
+        e.preventDefault();
+        this._openTab(go.dataset.goto, go.dataset.gotoField || '');
+        return;
+      }
       const btn = e.target.closest('[data-browse]');
       if (!btn) return;
       const input = this._el.querySelector(btn.dataset.browse);
@@ -119,21 +254,242 @@ class SettingsScreen {
         return;
       }
       window.electronAPI.pickFolder(input.value.trim()).then(res => {
-        if (res && res.ok && res.path) input.value = res.path;
+        if (res && res.ok && res.path) {
+          input.value = res.path;
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+        }
       });
     });
 
-    this._renderTab(this._activeTab);
+    this._openTab(this._activeTab, params.field || '');
     return this._el;
+  }
+
+  /* Sidebar: Overview first; a group with one page is a single row; bigger
+     groups get a heading with their pages indented beneath it. The empty
+     .sn-badge spans are filled in by _applyBadges(). */
+  _navHTML() {
+    const admin = Auth.isAdmin();
+    const row = (p, cls, icon) => {
+      const locked = p.admin && !admin;
+      return `<div class="settings-nav-item ${cls}${p.id === this._activeTab ? ' active' : ''}" data-tab="${p.id}">
+          ${icon ? `<span class="sn-icon">${icon}</span>` : ''}<span class="sn-label">${p.label}</span>${locked ? '<span class="sn-lock" title="Admin only">&#128274;</span>' : ''}<span class="sn-badge" data-badge="${p.id}"></span>
+        </div>`;
+    };
+    const groups = SETTINGS_NAV.map((g, gi) => {
+      const pages = g.pages.filter(_settingsVisible);
+      if (!pages.length) return '';
+      if (pages.length === 1) return row(pages[0], 'sn-single', g.icon);
+      return `<div class="sn-group"><span class="sn-icon">${g.icon}</span>${g.group}<span class="sn-badge" data-badge-group="${gi}"></span></div>` +
+             pages.map(p => row(p, 'sn-sub', '')).join('');
+    }).join('');
+    return row(SETTINGS_HOME, 'sn-single sn-home', '🏠') + groups +
+           '<div class="sn-sep"></div>' + row(SETTINGS_FOOTER, 'sn-single sn-footer', 'ℹ️');
+  }
+
+  /* Open a page (and optionally flash one field on it). */
+  _openTab(tab, sel = '') {
+    tab = SETTINGS_TAB_ALIASES[tab] || tab;
+    const found = _settingsPage(tab);
+    if (!found || !_settingsVisible(found.page)) return;
+    this._activeTab = tab;
+    this._refreshHealth();
+
+    this._el.querySelectorAll('.settings-nav .settings-nav-item').forEach(i =>
+      i.classList.toggle('active', i.dataset.tab === tab));
+
+    const where = found.group === found.page.label ? found.group : `${found.group} › ${found.page.label}`;
+    this._el.querySelector('#settings-intro').innerHTML = `
+      <div class="sn-crumb">${found.icon} ${where}</div>
+      <div class="sn-about">${found.page.about}</div>`;
+
+    const content = this._el.querySelector('#settings-content');
+    const scroller = content.closest('.settings-content');
+    if (scroller) scroller.scrollTop = 0;
+
+    /* Block Manager from Admin-only pages */
+    if (found.page.admin && !Auth.isAdmin()) {
+      content.innerHTML = `
+        <div class="settings-section" style="text-align:center;padding:60px 40px;">
+          <div style="font-size:40px;margin-bottom:14px;">&#128274;</div>
+          <div style="font-weight:700;font-size:16px;margin-bottom:8px;">Admin Access Required</div>
+          <div style="color:var(--text-muted);font-size:13px;">
+            This section is restricted to <strong>Admin</strong> staff only.<br/>
+            Ask your Admin to make changes here.
+          </div>
+        </div>`;
+      return;
+    }
+
+    this._renderTab(tab);
+    if (sel) this._highlight(sel);
+  }
+
+  /* Scroll to a field and flash it. Several pages render asynchronously,
+     so wait briefly for the element to appear. */
+  _highlight(sel) {
+    const content = this._el.querySelector('#settings-content');
+    const tab = this._activeTab;
+    let tries = 0;
+    const tick = () => {
+      if (this._activeTab !== tab) return;          // user moved on
+      const el = content.querySelector(sel);
+      if (!el) { if (++tries < 40) setTimeout(tick, 50); return; }
+      const box = el.closest('.form-group, .fd-row') || el;
+      box.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      box.classList.remove('sn-flash'); void box.offsetWidth; box.classList.add('sn-flash');
+      setTimeout(() => box.classList.remove('sn-flash'), 2600);
+      if (/^(INPUT|SELECT|TEXTAREA)$/.test(el.tagName) && !el.disabled) el.focus({ preventScroll: true });
+    };
+    tick();
+  }
+
+  _runSearch(q) {
+    const groups  = this._el.querySelector('#sn-groups');
+    const results = this._el.querySelector('#sn-results');
+    const words   = q.toLowerCase().split(/\s+/).filter(Boolean);
+    if (!words.length) { groups.hidden = false; results.hidden = true; return; }
+
+    const admin = Auth.isAdmin();
+    const hits = SETTINGS_SEARCH.filter(s => {
+      const f = _settingsPage(s.tab);
+      if (!f || !_settingsVisible(f.page)) return false;
+      const hay = `${s.t} ${s.k || ''} ${f.page.label} ${f.group}`.toLowerCase();
+      return words.every(w => hay.includes(w));
+    });
+
+    const safeQ = q.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    groups.hidden  = true;
+    results.hidden = false;
+    results.innerHTML = hits.length
+      ? hits.slice(0, 30).map(s => {
+          const f = _settingsPage(s.tab);
+          const locked = f.page.admin && !admin;
+          const where = f.group === f.page.label ? f.group : `${f.group} › ${f.page.label}`;
+          return `<div class="sn-result" data-tab="${s.tab}" data-sel="${s.sel || ''}">
+              <div class="sn-r-title">${s.t}${locked ? ' <span class="sn-lock">&#128274;</span>' : ''}</div>
+              <div class="sn-r-where">${f.icon} ${where}</div>
+            </div>`;
+        }).join('')
+      : `<div class="sn-empty">No settings match “${safeQ}”.<br>
+           Try a word like <em>printer</em>, <em>email</em>, <em>clover</em> or <em>backup</em>.</div>`;
+  }
+
+  _clearSearch() {
+    const s = this._el.querySelector('#settings-search');
+    if (s) s.value = '';
+    this._el.querySelector('#sn-groups').hidden  = false;
+    this._el.querySelector('#sn-results').hidden = true;
+  }
+
+  /* ── Health badges in the sidebar ──────────────────────────────
+     Re-checked whenever a page opens and whenever any setting is saved
+     (config.js fires 'config-changed'). Folder checks are cached inside
+     SettingsHealth, so clicking around doesn't hit the disk each time. */
+  async _refreshHealth() {
+    if (!this._el || this._detached || typeof SettingsHealth === 'undefined') return;
+    let issues;
+    try { issues = await SettingsHealth.check(); }
+    catch (e) { console.warn('[settings] health check failed:', e.message); return; }
+    if (this._el) this._applyBadges(issues);
+  }
+
+  _applyBadges(issues) {
+    const byPage = {};
+    issues.forEach(i => { (byPage[i.tab] = byPage[i.tab] || []).push(i); });
+    const paint = (el, list) => {
+      const warn = list.filter(i => i.level === 'warn').length;
+      el.className   = 'sn-badge' + (warn ? ' sn-badge-warn' : list.length ? ' sn-badge-setup' : '');
+      el.textContent = warn ? `⚠${warn > 1 ? ' ' + warn : ''}` : (list.length ? '•' : '');
+      el.title       = list.map(i => (i.level === 'warn' ? '⚠ ' : '○ ') + i.msg).join('\n');
+    };
+    this._el.querySelectorAll('[data-badge]').forEach(el => paint(el, byPage[el.dataset.badge] || []));
+    // Group headings only carry real warnings — never an unused optional feature
+    this._el.querySelectorAll('[data-badge-group]').forEach(el => {
+      const g = SETTINGS_NAV[+el.dataset.badgeGroup];
+      paint(el, g.pages.filter(_settingsVisible).flatMap(p => byPage[p.id] || []).filter(i => i.level === 'warn'));
+    });
+  }
+
+  /* ── Overview — the page Settings opens on ─────────────────── */
+  async _renderHome(content) {
+    const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    content.innerHTML = `
+      <div class="settings-section" style="max-width:860px;">
+        <h3>Settings Overview</h3>
+        <div id="home-body" style="font-size:13px;color:var(--text-muted);"><span class="spinner"></span> Checking your setup…</div>
+      </div>`;
+
+    let issues = [];
+    try { issues = await SettingsHealth.check(); }
+    catch (e) { console.warn('[settings] health check failed:', e.message); }
+    const body = content.querySelector('#home-body');
+    if (this._activeTab !== 'home' || !body) return;        // user moved on
+    body.removeAttribute('style');
+
+    const admin = Auth.isAdmin();
+    const where = f => f.group === f.page.label ? f.group : `${f.group} › ${f.page.label}`;
+    const warn  = issues.filter(i => i.level === 'warn');
+    const setup = issues.filter(i => i.level === 'setup');
+
+    const issueRow = i => {
+      const f = _settingsPage(i.tab);
+      const locked = f && f.page.admin && !admin;
+      return `
+        <div class="home-issue home-${i.level}">
+          <span class="home-issue-icon">${i.level === 'warn' ? '&#9888;' : '&#9675;'}</span>
+          <span class="home-issue-msg">${esc(i.msg)}
+            ${f ? `<span class="home-issue-where">${f.icon} ${where(f)}</span>` : ''}</span>
+          ${locked
+            ? '<span class="home-locked">&#128274; Ask an Admin</span>'
+            : `<a href="#" class="btn btn-outline btn-sm" data-goto="${i.tab}" data-goto-field="${i.field || ''}">Fix &rarr;</a>`}
+        </div>`;
+    };
+
+    const tiles = SETTINGS_NAV.map(g => {
+      const pages = g.pages.filter(_settingsVisible);
+      if (!pages.length) return '';
+      const mine = issues.filter(i => pages.some(p => p.id === i.tab));
+      const w = mine.filter(i => i.level === 'warn').length;
+      const s = mine.length - w;
+      const status = w ? `<span class="home-tile-warn">&#9888; ${w} need${w === 1 ? 's' : ''} attention</span>`
+                   : s ? `<span class="home-tile-setup">&#9675; ${s} not set up</span>`
+                   :     '<span class="home-tile-ok">&#10003; All set</span>';
+      const target = (mine.find(i => i.level === 'warn') || mine[0] || {}).tab || pages[0].id;
+      const blurb  = pages.length === 1 ? pages[0].about : pages.map(p => p.label).join(' · ');
+      return `
+        <a href="#" class="home-tile" data-goto="${target}">
+          <div class="home-tile-head"><span class="home-tile-icon">${g.icon}</span><strong>${g.group}</strong></div>
+          <div class="home-tile-pages">${blurb}</div>
+          <div class="home-tile-status">${status}</div>
+        </a>`;
+    }).join('');
+
+    body.innerHTML = `
+      ${warn.length
+        ? `<div class="home-banner home-banner-warn">&#9888; ${warn.length} thing${warn.length !== 1 ? 's' : ''} need${warn.length === 1 ? 's' : ''} attention</div>
+           <div class="home-list">${warn.map(issueRow).join('')}</div>`
+        : `<div class="home-banner home-banner-ok">&#10003; Nothing needs attention${setup.length
+             ? ` — ${setup.length} optional feature${setup.length !== 1 ? 's are' : ' is'} not set up yet` : ''}.</div>`}
+      <div class="home-grid">${tiles}</div>
+      ${setup.length ? `
+        <details class="home-optional">
+          <summary>Optional features not set up yet (${setup.length})</summary>
+          <div class="home-list">${setup.map(issueRow).join('')}</div>
+        </details>` : ''}
+      <div class="home-tip">Looking for something? Type it into <strong>Search settings</strong> at the top left —
+        for example <em>printer</em>, <em>logo</em>, <em>PIN</em> or <em>backup</em>.</div>`;
   }
 
   _renderTab(tab) {
     const content = this._el.querySelector('#settings-content');
     switch (tab) {
+      case 'home':         this._renderHome(content);         break;
       case 'pharmacy':     this._renderPharmacy(content);     break;
       case 'receipt':      this._renderReceipt(content);      break;
       case 'datetime':     this._renderDateTime(content);     break;
-      case 'api':          this._renderAPI(content);          break;
+      case 'clover':       this._renderClover(content);       break;
+      case 'mckesson':     this._renderMcKesson(content);     break;
       case 'staff':        this._renderStaff(content);        break;
       case 'products':     this._renderProducts(content);     break;
       case 'shelftags':    this._renderShelfTags(content);    break;
@@ -142,9 +498,9 @@ class SettingsScreen {
       case 'catalog':      this._renderCatalog(content);      break;
       case 'sql':     if (window.electronAPI) this._renderSQL(content);     break;
       case 'barcode':      this._renderBarcode(content);      break;
-      case 'printer':    if (window.electronAPI) this._renderPrinter(content);   break;
-      case 'btcfolder':  if (window.electronAPI) this._renderBtcFolder(content); break;
-      case 'emailreports': this._renderEmailReports(content);  break;
+      case 'printer': if (window.electronAPI) this._renderPrinter(content); break;
+      case 'folders':      this._renderFolders(content);      break;
+      case 'emailreports': this._renderEmailReports(content); break;
       case 'backup':       this._renderBackup(content);       break;
       case 'updates':      this._renderUpdates(content);      break;
     }
@@ -153,8 +509,6 @@ class SettingsScreen {
   async _renderPharmacy(content) {
     const cfg       = await Config.getAll();
     const logo      = localStorage.getItem('pharmacy_logo_data') || '';
-    const headerMsg = cfg.receipt_header_msg || '';
-    const footerMsg = cfg.receipt_footer_msg || '';
 
     // Brand Kit (defaults = the brand palette baked into the CSS)
     const BK_DEFAULT = { background:'#f4f3ee', primary:'#1e4031', danger:'#c62f25', warning:'#e9a93c' };
@@ -258,11 +612,11 @@ class SettingsScreen {
           </div>
         </div>
 
-        <!-- ── Receipt Customization ─────────────────────────── -->
-        <h4 style="margin:24px 0 8px;font-size:14px;color:var(--text-muted);">Receipt Customization</h4>
+        <!-- ── Logo (receipts + name badges; header/footer text is on Receipt Design) ── -->
+        <h4 style="margin:24px 0 8px;font-size:14px;color:var(--text-muted);">Logo</h4>
 
         <div class="form-group">
-          <label>Pharmacy Logo</label>
+          <label>Pharmacy Logo <span style="font-weight:400;color:var(--text-muted);">— printed on receipts and name badges</span></label>
           <div style="display:flex;align-items:flex-start;gap:16px;flex-wrap:wrap;">
             <div id="logo-preview-box"
                  style="width:180px;min-height:72px;border:2px dashed var(--border);border-radius:var(--radius);
@@ -293,24 +647,13 @@ class SettingsScreen {
           </div>
         </div>
 
-        <div class="form-group">
-          <label>Custom Header Message
-            <span style="font-weight:400;color:var(--text-muted);"> — shown below address on receipt</span>
-          </label>
-          <textarea id="ph-receipt-header" rows="2" style="resize:vertical;width:100%;"
-                    placeholder="e.g. Free prescription delivery! Ask us about blister packs.">${headerMsg}</textarea>
-        </div>
-
-        <div class="form-group">
-          <label>Custom Footer Message
-            <span style="font-weight:400;color:var(--text-muted);"> — shown at bottom of receipt</span>
-          </label>
-          <textarea id="ph-receipt-footer" rows="2" style="resize:vertical;width:100%;"
-                    placeholder="e.g. Thank you! Follow us @pharmacy or call (604) 555-0100">${footerMsg}</textarea>
+        <div style="font-size:12px;color:var(--text-muted);margin:-4px 0 8px;">
+          Receipt header &amp; footer messages are under
+          <a href="#" data-goto="receipt" data-goto-field="#rc-header-msg">Printing → Receipt Design</a>, next to the live preview.
         </div>
 
         <!-- Brand Kit -->
-        <div class="settings-section-title" style="margin-top:28px;">🎨 Brand Kit</div>
+        <div class="settings-section-title" id="sec-brand-kit" style="margin-top:28px;">🎨 Brand Kit</div>
         <p style="font-size:13px;color:var(--text-muted);margin:-6px 0 12px;">
           Your brand colours are applied across the app and to print templates (name tags, shelf tags, receipts).
         </p>
@@ -467,8 +810,6 @@ class SettingsScreen {
         tax_gst_rate:         content.querySelector('#tax-gst-rate').value.trim(),
         tax_pst_enabled:      content.querySelector('#tax-pst-enabled').checked ? 'true' : 'false',
         tax_pst_rate:         content.querySelector('#tax-pst-rate').value.trim(),
-        receipt_header_msg:   content.querySelector('#ph-receipt-header').value.trim(),
-        receipt_footer_msg:   content.querySelector('#ph-receipt-footer').value.trim(),
         brand_kit:            JSON.stringify(readBrandKit()),
       });
       // Apply brand kit immediately without page reload
@@ -483,17 +824,19 @@ class SettingsScreen {
   }
 
   /* ════════════════════════════════════════════════════════════
-     Receipt Layout — full customisation with live preview
+     Receipt Design — layout, header/footer messages, live preview
      ════════════════════════════════════════════════════════════ */
   async _renderReceipt(content) {
     const cfg = await Config.getAll();
 
     // Helper: get a setting with a default
     const get = (key, def) => (cfg[key] !== undefined && cfg[key] !== '') ? cfg[key] : def;
+    const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    const logoData = localStorage.getItem('pharmacy_logo_data') || '';
 
     content.innerHTML = `
       <div class="settings-section">
-        <h3>Receipt Layout</h3>
+        <h3>Receipt Design</h3>
         <p style="color:var(--text-muted);font-size:13px;margin-bottom:20px;">
           Customise how receipts look for your pharmacy. Changes apply to all future receipts.
         </p>
@@ -555,10 +898,21 @@ class SettingsScreen {
                   <input type="checkbox" id="rc-show-logo" ${get('receipt_show_logo','true')==='true' ? 'checked':''} />
                   Show pharmacy logo
                 </label>
+                <div style="display:flex;align-items:center;gap:10px;margin:-4px 0 2px 26px;font-size:12px;color:var(--text-muted);">
+                  ${logoData
+                    ? `<img src="${logoData}" alt="" style="max-height:28px;max-width:110px;object-fit:contain;background:#fff;border:1px solid var(--border);border-radius:4px;padding:2px;" />`
+                    : '<span>No logo uploaded yet.</span>'}
+                  <a href="#" data-goto="pharmacy" data-goto-field="#btn-upload-logo">${logoData ? 'Change logo' : 'Upload a logo'} &rarr;</a>
+                </div>
                 <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:13px;">
                   <input type="checkbox" id="rc-show-header-msg" ${get('receipt_show_header_msg','true')==='true' ? 'checked':''} />
                   Show custom header message
                 </label>
+                <div class="form-group" style="margin:-4px 0 0 26px;">
+                  <textarea id="rc-header-msg" rows="2" style="resize:vertical;width:100%;font-size:13px;"
+                            placeholder="e.g. Free prescription delivery! Ask us about blister packs.">${esc(cfg.receipt_header_msg || '')}</textarea>
+                  <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">Printed below the address.</div>
+                </div>
               </div>
               <div class="form-group" style="margin-top:12px;margin-bottom:0;">
                 <label style="font-size:12px;">Receipt Title <span style="font-weight:400;color:var(--text-muted);">(blank = "RECEIPT")</span></label>
@@ -612,6 +966,11 @@ class SettingsScreen {
                   <input type="checkbox" id="rc-show-footer-msg" ${get('receipt_show_footer_msg','true')==='true' ? 'checked':''} />
                   Show footer message
                 </label>
+                <div class="form-group" style="margin:-4px 0 0 26px;">
+                  <textarea id="rc-footer-msg" rows="2" style="resize:vertical;width:100%;font-size:13px;"
+                            placeholder="e.g. Thank you! Follow us @pharmacy or call (604) 555-0100">${esc(cfg.receipt_footer_msg || '')}</textarea>
+                  <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">Printed at the bottom of the receipt. Left blank, it prints “Thank you for choosing ${esc(cfg.pharmacy_name || 'your pharmacy')}!”</div>
+                </div>
               </div>
             </div>
 
@@ -664,6 +1023,8 @@ class SettingsScreen {
         receipt_show_staff:        getChecked('#rc-show-staff'),
         receipt_show_txn_id:       getChecked('#rc-show-txn-id'),
         receipt_show_footer_msg:   getChecked('#rc-show-footer-msg'),
+        receipt_header_msg:        content.querySelector('#rc-header-msg').value.trim(),
+        receipt_footer_msg:        content.querySelector('#rc-footer-msg').value.trim(),
       });
       statusEl.textContent = '✓ Saved';
       statusEl.style.color = 'var(--success)';
@@ -697,6 +1058,12 @@ class SettingsScreen {
       const showStaff     = content.querySelector('#rc-show-staff').checked;
       const showTxnId     = content.querySelector('#rc-show-txn-id').checked;
       const showFooter    = content.querySelector('#rc-show-footer-msg').checked;
+      // The real messages, as typed — the preview used to show canned sample text.
+      // Mirrors print.js: printed as-is (line breaks aren't kept), and a blank
+      // footer prints "Thank you for choosing <pharmacy name>!".
+      const headerTxt = esc(content.querySelector('#rc-header-msg').value.trim());
+      const footerTxt = esc(content.querySelector('#rc-footer-msg').value.trim())
+                     || `Thank you for choosing ${esc(cfg.pharmacy_name || 'YOUR PHARMACY NAME')}!`;
 
       const logo = localStorage.getItem('pharmacy_logo_data') || '';
 
@@ -731,7 +1098,7 @@ class SettingsScreen {
             <div class="rhn">123 Main Street, City, Province</div>
             <div class="rhn">Tel: (555) 123-4567</div>
             <div class="rhn">GST#: 123456789 RT 0001</div>
-            ${showHeaderMsg ? `<div class="rhn" style="margin-top:3px;font-style:italic;">Free delivery available!</div>` : ''}
+            ${showHeaderMsg && headerTxt ? `<div class="rhn" style="margin-top:3px;font-style:italic;">${headerTxt}</div>` : ''}
           </div>
           ${sep}
           <div class="rtitle">${title}</div>
@@ -760,7 +1127,7 @@ class SettingsScreen {
           </div>
           ${sep}
           <div class="rf">
-            ${showFooter ? 'Thank you for choosing our pharmacy!<br>Follow us on social media.' : ''}
+            ${showFooter ? footerTxt : ''}
           </div>
         </div>
       </body></html>`;
@@ -787,9 +1154,9 @@ class SettingsScreen {
       _previewTimer = setTimeout(updatePreview, 200);
     };
 
-    content.querySelectorAll('select, input[type=checkbox], input[type=text]')
+    content.querySelectorAll('select, input[type=checkbox], input[type=text], textarea')
       .forEach(el => el.addEventListener('change', schedulePreview));
-    content.querySelectorAll('input[type=text]')
+    content.querySelectorAll('input[type=text], textarea')
       .forEach(el => el.addEventListener('input', schedulePreview));
 
     // Initial preview
@@ -919,42 +1286,12 @@ class SettingsScreen {
     });
   }
 
-  async _renderAPI(content) {
+  /* ── Card Terminal (Clover) — was the middle of "API Credentials" ── */
+  async _renderClover(content) {
     const cfg = await Config.getAll();
     content.innerHTML = `
       <div class="settings-section">
-        <h3>API Credentials</h3>
-        <div class="alert alert-info">Credentials are encrypted with AES-256 and stored locally.</div>
-
-        <h4 style="margin:16px 0 10px;font-size:14px;color:var(--text-muted);">McKesson PharmaClik</h4>
-        <div class="form-group">
-          <label>Username</label>
-          <input type="text" id="mk-user" value="${cfg.mckesson_username||''}" autocomplete="off" />
-        </div>
-        <div class="form-group">
-          <label>Password</label>
-          <input type="password" id="mk-pass" value="${cfg.mckesson_password||''}" />
-        </div>
-        <div class="form-row" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
-          <div class="form-group">
-            <label>Account # <span style="font-weight:400;color:var(--text-muted);">(for orders)</span></label>
-            <input type="text" id="mk-account" value="${cfg.mckesson_account||''}"
-                   placeholder="e.g. 123456" autocomplete="off" />
-            <div style="font-size:11px;color:var(--text-muted);margin-top:3px;">
-              WinRx → Supplier → <strong>Acct#</strong>
-            </div>
-          </div>
-          <div class="form-group">
-            <label>Customer # <span style="font-weight:400;color:var(--text-muted);">(for invoices &amp; catalog)</span></label>
-            <input type="text" id="mk-customer" value="${cfg.mckesson_customer||''}"
-                   placeholder="e.g. 1234567" autocomplete="off" />
-            <div style="font-size:11px;color:var(--text-muted);margin-top:3px;">
-              WinRx → Supplier → <strong>Customer#</strong>
-            </div>
-          </div>
-        </div>
-
-        <h4 style="margin:16px 0 10px;font-size:14px;color:var(--text-muted);">Clover — Network Pay Display</h4>
+        <h3>Clover Card Terminal</h3>
         <div class="alert alert-info" style="font-size:13px;">
           Enter your Clover device details below and click <strong>Save Clover Device</strong>.
           The payment bridge starts automatically inside the app — no separate service to run.
@@ -1009,27 +1346,6 @@ class SettingsScreen {
             then click Pair here. Enter the manager password on the device — a 4-digit code will appear.
           </div>
         </div>
-
-        <h4 style="margin:20px 0 10px;font-size:14px;color:var(--text-muted);">Document Storage (Receipt Upload)</h4>
-        <div class="alert alert-info" style="font-size:13px;">
-          After payment, the POS drops a PDF with a Code 128 barcode into the WinRx document inbox folder.
-          WinRx reads the barcode and auto-attaches the receipt to the correct patient Rx record.
-        </div>
-        <div class="form-group">
-          <label>WinRx Document Inbox Folder</label>
-          <div style="display:flex;gap:8px;">
-            <input type="text" id="doc-folder-path" value="${cfg.doc_folder_path||''}"
-                   placeholder="e.g. C:\\WinRx\\Documents\\Inbox" style="font-family:monospace;flex:1;" />
-            <button class="btn btn-outline" data-browse="#doc-folder-path" style="white-space:nowrap;">📁 Browse</button>
-          </div>
-          <div style="font-size:11px;color:var(--text-muted);margin-top:3px;">
-            PDF files named <code>RCPT{RxNum}A.pdf</code> will be written here after each payment.
-            The folder must exist and WinRx must be configured to watch it.
-          </div>
-        </div>
-
-        <button class="btn btn-primary" id="btn-save-api">Save Settings</button>
-        <div id="api-save-status" style="margin-top:8px;font-size:13px;"></div>
       </div>`;
 
     /* Save Clover device config → writes .env + restarts the in-app bridge */
@@ -1083,6 +1399,12 @@ class SettingsScreen {
       }
     });
 
+    /* The old page saved this URL with a shared "Save Settings" button at
+       the bottom; there's no such button here, so save it as it changes. */
+    content.querySelector('#cl-local-url').addEventListener('change', async (e) => {
+      await Config.set('clover_local_url', e.target.value.trim());
+    });
+
     content.querySelector('#btn-ping-clover').addEventListener('click', async () => {
       const resultEl = content.querySelector('#clover-ping-result');
       const url = content.querySelector('#cl-local-url').value.trim();
@@ -1105,18 +1427,54 @@ class SettingsScreen {
       await Config.set('clover_local_url', svcUrl);
       this._showCloverPairModal(svcUrl);
     });
+  }
 
-    content.querySelector('#btn-save-api').addEventListener('click', async () => {
+  /* ── McKesson Login — was the top of "API Credentials" ── */
+  async _renderMcKesson(content) {
+    const cfg = await Config.getAll();
+    content.innerHTML = `
+      <div class="settings-section">
+        <h3>McKesson PharmaClik</h3>
+        <div class="alert alert-info">Credentials are encrypted with AES-256 and stored locally.</div>
+        <div class="form-group">
+          <label>Username</label>
+          <input type="text" id="mk-user" value="${cfg.mckesson_username||''}" autocomplete="off" />
+        </div>
+        <div class="form-group">
+          <label>Password</label>
+          <input type="password" id="mk-pass" value="${cfg.mckesson_password||''}" />
+        </div>
+        <div class="form-row" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+          <div class="form-group">
+            <label>Account # <span style="font-weight:400;color:var(--text-muted);">(for orders)</span></label>
+            <input type="text" id="mk-account" value="${cfg.mckesson_account||''}"
+                   placeholder="e.g. 123456" autocomplete="off" />
+            <div style="font-size:11px;color:var(--text-muted);margin-top:3px;">
+              WinRx → Supplier → <strong>Acct#</strong>
+            </div>
+          </div>
+          <div class="form-group">
+            <label>Customer # <span style="font-weight:400;color:var(--text-muted);">(for invoices &amp; catalog)</span></label>
+            <input type="text" id="mk-customer" value="${cfg.mckesson_customer||''}"
+                   placeholder="e.g. 1234567" autocomplete="off" />
+            <div style="font-size:11px;color:var(--text-muted);margin-top:3px;">
+              WinRx → Supplier → <strong>Customer#</strong>
+            </div>
+          </div>
+        </div>
+        <button class="btn btn-primary" id="btn-save-mckesson">Save McKesson Login</button>
+        <div id="mk-save-status" style="margin-top:8px;font-size:13px;"></div>
+      </div>`;
+
+    content.querySelector('#btn-save-mckesson').addEventListener('click', async () => {
       await Config.setMany({
         mckesson_username: content.querySelector('#mk-user').value.trim(),
         mckesson_password: content.querySelector('#mk-pass').value,
         mckesson_account:  content.querySelector('#mk-account').value.trim(),
         mckesson_customer: content.querySelector('#mk-customer').value.trim(),
-        clover_local_url:  content.querySelector('#cl-local-url').value.trim(),
-        doc_folder_path:   content.querySelector('#doc-folder-path').value.trim(),
       });
-      Audit.configChange('API settings updated');
-      const status = content.querySelector('#api-save-status');
+      Audit.configChange('McKesson login updated');
+      const status = content.querySelector('#mk-save-status');
       status.textContent = 'Saved.';
       status.style.color = 'var(--success)';
       setTimeout(() => { status.textContent = ''; }, 3000);
@@ -2572,10 +2930,10 @@ class SettingsScreen {
           Products in database: <strong>${count}</strong>
           ${lastSync ? `&bull; Last synced: ${new Date(lastSync).toLocaleString('en-CA')}` : ''}
         </div>
-        <div class="alert alert-warning">
-          <strong>CORS Note:</strong> SOAP calls to McKesson may be blocked by browser CORS policy.
-          If sync fails, use the file upload option below, or configure a CORS proxy in API Credentials.
-        </div>
+        ${window.electronAPI ? '' : `<div class="alert alert-warning">
+          <strong>Browser version:</strong> SOAP calls to McKesson may be blocked by browser CORS policy.
+          If sync fails, use the file upload option below. (The desktop app is not affected.)
+        </div>`}
         <div style="background:var(--surface2);padding:14px;border-radius:var(--radius);margin-bottom:14px;">
           <div style="font-size:13px;font-weight:600;margin-bottom:10px;">Sync Options</div>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:13px;">
@@ -2705,86 +3063,119 @@ class SettingsScreen {
     });
   }
 
-  async _renderBtcFolder(content) {
-    const saved = await Config.get('btc_records_folder') || '';
+  /* ── Save Folders — every folder the POS writes to, on one page ──
+     Replaces the old "BTC Records" tab (which also, confusingly, held
+     the opening/closing sign-off folder) and pulls in the WinRx inbox
+     (was under "API Credentials") and the backup folder (was under
+     "Backup"). Admin-only folders stay Admin-only: a Manager sees them
+     read-only. */
+  async _renderFolders(content) {
+    const cfg      = await Config.getAll();
+    const admin    = Auth.isAdmin();
+    const canCheck = !!window.electronAPI?.checkFolder;
+    const canOpen  = !!window.electronAPI?.openFolder;
+    const ROWS = [
+      { key: 'doc_folder_path', id: 'fd-doc', admin: true,
+        title: 'WinRx Document Inbox',
+        what: 'After each payment a receipt PDF with a barcode (<code>RCPT{RxNum}A.pdf</code>) is dropped here. WinRx watches this folder and attaches the receipt to the patient\'s Rx.',
+        ph: 'e.g. C:\\WinRx\\Documents\\Inbox',
+        unset: 'Receipts are not being sent to WinRx.' },
+      { key: 'btc_records_folder', id: 'fd-btc',
+        title: 'BTC / Schedule II Records',
+        what: 'One PDF per BTC (behind-the-counter) sale, for your records and audits.',
+        ph: 'e.g. C:\\Pharmacy Records\\BTC',
+        unset: 'BTC sale records are not being saved as PDFs.' },
+      { key: 'shift_records_folder', id: 'fd-shift',
+        title: 'Opening & Closing Sign-offs',
+        what: 'Start-of-Day and End-of-Day checklist PDFs (<code>OPEN_…</code> / <code>CLOSE_…</code>). Who they are emailed to is set under <a href="#" data-goto="emailreports" data-goto-field="#er-signoff">Email &amp; Reports</a>.',
+        ph: 'e.g. C:\\Pharmacy Records\\Shift',
+        unset: 'Sign-offs are not being saved as PDFs (they are still kept in Reports → Opening & Closing Logs).' },
+      { key: 'auto_backup_folder', id: 'fd-backup', admin: true,
+        title: 'Nightly Backup',
+        what: 'A copy of the whole database, saved every night. Ideally a OneDrive, network or external-drive folder, so a copy lives off this PC. The schedule is under <a href="#" data-goto="backup" data-goto-field="#auto-backup-enabled">Backup &amp; Restore</a>.',
+        ph: 'e.g. D:\\PharmacyBackups',
+        unset: 'Nightly backups have nowhere to go.' },
+    ];
+
+    const esc  = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    const OK   = t => `<span class="fd-ok">&#10003; ${t}</span>`;
+    const WARN = t => `<span class="fd-warn">&#9888; ${t}</span>`;
+    const val  = r => content.querySelector('#' + r.id)?.value.trim() || '';
+    const setStatus = (r, html) => { const el = content.querySelector(`#${r.id}-status`); if (el) el.innerHTML = html; };
+
+    /* Blank → say what isn't happening. Set → ask the desktop app whether
+       the folder really exists and can be written to. (Builds without the
+       check can't answer, so they just show "Set".) */
+    const checkRow = async (r) => {
+      const v = val(r);
+      if (!v)        { setStatus(r, WARN(`Not set — ${r.unset}`)); return; }
+      if (!canCheck) { setStatus(r, OK('Set')); return; }
+      setStatus(r, '<span class="fd-checking">Checking…</span>');
+      const res = await SettingsHealth.checkFolder(v, { fresh: true });
+      if (val(r) !== v) return;                     // path changed meanwhile; the newer check reports
+      if (!res)               setStatus(r, OK('Set'));
+      else if (!res.exists)   setStatus(r, WARN('Folder not found — check the path, and that the drive or OneDrive is connected.'));
+      else if (!res.isDir)    setStatus(r, WARN('That path is a file, not a folder.'));
+      else if (!res.writable) setStatus(r, WARN('Found, but the POS isn\'t allowed to save files there.'));
+      else                    setStatus(r, OK('Folder found'));
+    };
+
     content.innerHTML = `
-      <div class="settings-section">
-        <h3>BTC / Schedule II Records Folder</h3>
-        <p style="color:var(--text-muted);font-size:13px;margin-bottom:20px;">
-          After each BTC (Behind the Counter) sale, a PDF record is automatically saved to this folder.
-          Use it for your internal records and NAPRA audits. Patient name is optional and for your records only.
-        </p>
-
-        <div class="form-group" style="max-width:540px;">
-          <label>Records Folder Path</label>
-          <div style="display:flex;gap:8px;">
-            <input type="text" id="btc-folder-path" value="${saved}"
-                   placeholder="e.g. C:\\Pharmacy Records\\BTC"
-                   style="font-family:monospace;font-size:13px;flex:1;" />
-            <button class="btn btn-outline" data-browse="#btc-folder-path" style="white-space:nowrap;">📁 Browse</button>
-          </div>
-          <div style="font-size:12px;color:var(--text-muted);margin-top:4px;">
-            The folder must already exist. Monthly subfolders are created automatically.
-            Leave blank to disable auto-save.
-          </div>
+      <div class="settings-section" style="max-width:680px;">
+        <h3>Save Folders</h3>
+        ${ROWS.map(r => {
+          const v = cfg[r.key] || '';
+          const locked = r.admin && !admin;
+          return `
+            <div class="fd-row">
+              <div class="fd-head"><strong>${r.title}</strong><span id="${r.id}-status"></span></div>
+              <div class="fd-what">${r.what}</div>
+              <div style="display:flex;gap:8px;">
+                <input type="text" id="${r.id}" value="${v.replace(/"/g, '&quot;')}" placeholder="${r.ph}"
+                       style="font-family:monospace;font-size:13px;flex:1;" ${locked ? 'disabled' : ''} />
+                ${locked ? '' : `<button class="btn btn-outline" data-browse="#${r.id}" style="white-space:nowrap;">&#128193; Browse</button>`}
+                ${canOpen ? `<button class="btn btn-outline fd-open" data-open="#${r.id}" title="Open this folder in File Explorer">&#128194; Open</button>` : ''}
+              </div>
+              ${locked ? '<div class="fd-lock">&#128274; Only an Admin can change this folder.</div>' : ''}
+            </div>`;
+        }).join('')}
+        <div style="font-size:12px;color:var(--text-muted);margin:4px 0 14px;">
+          Each folder must already exist. Leave a folder blank to turn that kind of saving off.
         </div>
-
-        <div style="background:var(--surface2);border-radius:var(--radius);padding:14px;
-                    max-width:540px;margin-bottom:20px;">
-          <div style="font-weight:700;font-size:13px;margin-bottom:8px;">📁 File naming format</div>
-          <code style="font-size:12px;color:var(--text-muted);">
-            2026-06-14-14-30-22_DrugName_PharmacistRPh.pdf
-          </code>
-          <div style="font-size:12px;color:var(--text-muted);margin-top:6px;">
-            Each PDF contains: date/time, drug name, DIN, quantity, price, pharmacist, counselling confirmation, patient name/phone (if entered).
-          </div>
-        </div>
-
-        <button class="btn btn-primary" id="btn-save-btc-folder">Save Folder Path</button>
-        <div id="btc-folder-status" style="margin-top:8px;font-size:13px;"></div>
-
-        <hr style="margin:24px 0;" />
-
-        <h3>Shift Sign-Off Records (Opening / EOD)</h3>
-        <p style="color:var(--text-muted);font-size:13px;margin-bottom:16px;">
-          Start-of-Day and End-of-Day checklists are saved as PDFs here and emailed to the
-          recipients below. Leave blank to disable.
-        </p>
-        <div class="form-group" style="max-width:540px;">
-          <label>Shift Records Folder Path</label>
-          <div style="display:flex;gap:8px;">
-            <input type="text" id="shift-folder-path" value="${(await Config.get('shift_records_folder'))||''}"
-                   placeholder="e.g. C:\\Pharmacy Records\\Shift" style="font-family:monospace;font-size:13px;flex:1;" />
-            <button class="btn btn-outline" data-browse="#shift-folder-path" style="white-space:nowrap;">📁 Browse</button>
-          </div>
-        </div>
-        <div class="form-group" style="max-width:540px;">
-          <label>Email Recipients <span style="font-weight:400;color:var(--text-muted);">(comma-separated; blank = use Sales recipients)</span></label>
-          <input type="text" id="shift-recipients" value="${(await Config.get('shift_records_recipients'))||''}"
-                 placeholder="owner@pharmacy.ca, rph@pharmacy.ca" />
-        </div>
-        <button class="btn btn-primary" id="btn-save-shift-records">Save Shift Records Settings</button>
-        <div id="shift-records-status" style="margin-top:8px;font-size:13px;"></div>
+        <button class="btn btn-primary" id="btn-save-folders">Save Folders</button>
+        <div id="folders-save-status" style="margin-top:8px;font-size:13px;"></div>
       </div>`;
 
-    content.querySelector('#btn-save-btc-folder').addEventListener('click', async () => {
-      const path   = content.querySelector('#btc-folder-path').value.trim();
-      const status = content.querySelector('#btc-folder-status');
-      await Config.set('btc_records_folder', path);
-      status.textContent  = path ? `✓ Saved — PDFs will be saved to: ${path}` : '✓ Saved — auto-save disabled.';
-      status.style.color  = 'var(--success)';
-      setTimeout(() => { status.textContent = ''; }, 3000);
+    // Check every folder now, and again (debounced) as a path is typed or picked
+    ROWS.forEach(r => {
+      checkRow(r);
+      let t = null;
+      content.querySelector('#' + r.id).addEventListener('input', () => {
+        clearTimeout(t); t = setTimeout(() => checkRow(r), 600);
+      });
     });
 
-    content.querySelector('#btn-save-shift-records').addEventListener('click', async () => {
-      const status = content.querySelector('#shift-records-status');
-      await Config.setMany({
-        shift_records_folder:     content.querySelector('#shift-folder-path').value.trim(),
-        shift_records_recipients: content.querySelector('#shift-recipients').value.trim(),
+    // Open in File Explorer (read-only — allowed even on folders a Manager can't change)
+    content.querySelectorAll('[data-open]').forEach(btn => btn.addEventListener('click', async () => {
+      const r = ROWS.find(x => '#' + x.id === btn.dataset.open);
+      const v = val(r);
+      if (!v) { setStatus(r, WARN('Set a folder first.')); return; }
+      const res = await window.electronAPI.openFolder(v);
+      if (!res?.ok) setStatus(r, WARN(`Can't open: ${esc(res?.error || 'unknown error')}`));
+    }));
+
+    content.querySelector('#btn-save-folders').addEventListener('click', async () => {
+      const updates = {};
+      ROWS.forEach(r => {
+        if (r.admin && !admin) return;               // never overwrite a folder they can't edit
+        updates[r.key] = val(r);
       });
-      status.textContent = '✓ Shift records settings saved.';
-      status.style.color = 'var(--success)';
-      setTimeout(() => { status.textContent = ''; }, 3000);
+      await Config.setMany(updates);
+      Audit.configChange('Save folders updated');
+      const msg = content.querySelector('#folders-save-status');
+      msg.textContent = '✓ Folders saved.';
+      msg.style.color = 'var(--success)';
+      setTimeout(() => { msg.textContent = ''; }, 3000);
     });
   }
 
@@ -2896,28 +3287,41 @@ class SettingsScreen {
   async _renderEmailReports(content) {
     const cfg = await Config.getAll();
     const svc = cfg.email_service || 'mailto';
+    // No longer offered (they need a relay Worker URL that can't be set); shown only if already chosen
+    const LEGACY = { resend: 'Resend', sendgrid: 'SendGrid', brevo: 'Brevo' };
 
     content.innerHTML = `
       <div class="settings-section">
-        <h3>Email Reports</h3>
+        <h3>Email &amp; Reports</h3>
 
         <!-- ── Service selector ── -->
         <div style="background:var(--surface2);border-radius:var(--radius);padding:16px 20px;margin-bottom:20px;">
           <h4 style="margin:0 0 14px;font-size:14px;">Email Method</h4>
           <div class="form-group" style="margin-bottom:0;">
             <select id="er-service">
-              <option value="mailto"   ${svc==='mailto'  ?'selected':''}>mailto: — open system mail client (no setup)</option>
-              <option value="smtp"     ${svc==='smtp'    ?'selected':''}>SMTP — use your own mail server</option>
-              <option value="resend"   ${svc==='resend'  ?'selected':''}>Resend API (free 3,000/month)</option>
-              <option value="sendgrid" ${svc==='sendgrid'?'selected':''}>SendGrid API (free 100/day)</option>
-              <option value="brevo"    ${svc==='brevo'   ?'selected':''}>Brevo / Sendinblue API (free 300/day)</option>
+              <option value="smtp"   ${svc==='smtp'  ?'selected':''}>Send from your email account (SMTP) — recommended</option>
+              <option value="mailto" ${svc==='mailto'?'selected':''}>Not set up — can't send automatically</option>
+              ${LEGACY[svc] ? `<option value="${svc}" selected>${LEGACY[svc]} — can't send from this version</option>` : ''}
             </select>
+          </div>
+          <div style="font-size:12px;color:var(--text-muted);margin:12px 0 8px;">Quick setup — pick your email provider:</div>
+          <div class="er-presets">
+            <button type="button" class="btn btn-outline btn-sm er-preset" id="er-preset-gmail"   data-preset="gmail">Gmail</button>
+            <button type="button" class="btn btn-outline btn-sm er-preset" id="er-preset-outlook" data-preset="outlook">Outlook.com / Hotmail</button>
+            <button type="button" class="btn btn-outline btn-sm er-preset" id="er-preset-m365"    data-preset="m365">Microsoft 365 (work)</button>
+            <button type="button" class="btn btn-outline btn-sm er-preset" id="er-preset-other"   data-preset="other">Other</button>
+          </div>
+          <div id="er-preset-hint" class="alert alert-info" style="font-size:12px;margin:10px 0 0;display:none;"></div>
+          <div id="er-mailto-note" class="alert alert-warning" style="font-size:12.5px;margin:12px 0 0;${svc==='mailto'?'':'display:none;'}">
+            With email not set up, the POS <strong>cannot</strong> send the daily/monthly reports or the
+            opening &amp; closing sign-offs. Pick your email provider above to get started —
+            with Gmail it takes a couple of minutes.
           </div>
         </div>
 
         <!-- ── SMTP settings ── -->
         <div id="er-smtp-section" style="background:var(--surface2);border-radius:var(--radius);padding:16px 20px;margin-bottom:20px;${svc!=='smtp'?'display:none;':''}">
-          <h4 style="margin:0 0 14px;font-size:14px;">SMTP Server</h4>
+          <h4 style="margin:0 0 14px;font-size:14px;">Your email account</h4>
           <div style="display:grid;grid-template-columns:2fr 1fr;gap:12px;">
             <div class="form-group">
               <label>SMTP Host <span style="color:var(--danger);">*</span></label>
@@ -2948,7 +3352,7 @@ class SettingsScreen {
               <input type="password" id="er-smtp-pass" value="${cfg.smtp_password||''}"
                 placeholder="SMTP password or app password" autocomplete="new-password" />
               <div style="font-size:11px;color:var(--text-muted);margin-top:3px;">
-                For Gmail use an App Password (requires 2FA). For Office 365 use your email password.
+                Gmail needs an <strong>App Password</strong>, not your normal password — see Quick setup above.
               </div>
             </div>
           </div>
@@ -2965,17 +3369,18 @@ class SettingsScreen {
                 placeholder="owner@yourpharmacy.ca (optional)" />
             </div>
           </div>
-          <div class="alert alert-info" style="font-size:12px;margin-bottom:0;">
-            <strong>Common SMTP settings:</strong><br>
-            Gmail: host <code>smtp.gmail.com</code> port <code>587</code> STARTTLS — use an App Password<br>
-            Office 365: host <code>smtp.office365.com</code> port <code>587</code> STARTTLS<br>
-            Your own server: ask your IT / hosting provider for SMTP credentials
+          <div style="font-size:12px;color:var(--text-muted);">
+            After saving, use <strong>Send Test Email</strong> below to check it works.
           </div>
         </div>
 
         <!-- ── API-based service settings ── -->
         <div id="er-api-section" style="background:var(--surface2);border-radius:var(--radius);padding:16px 20px;margin-bottom:20px;${svc==='mailto'||svc==='smtp'?'display:none;':''}">
-          <h4 style="margin:0 0 14px;font-size:14px;">API Settings</h4>
+          <h4 style="margin:0 0 10px;font-size:14px;">API Settings</h4>
+          <div class="alert alert-warning" style="font-size:12.5px;margin:0 0 12px;">
+            This service <strong>can't send email from this version</strong> of the POS — it needs a relay
+            "Worker URL" that can't be set here. Choose <strong>Send from your email account (SMTP)</strong> above.
+          </div>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
             <div class="form-group" style="grid-column:span 2;">
               <label>API Key <span style="color:var(--danger);">*</span></label>
@@ -3017,7 +3422,7 @@ class SettingsScreen {
                 placeholder="accountant@example.com, owner@example.com" />
             </div>
             <div class="form-group">
-              <label>Shift Reports</label>
+              <label>Shift Cash Reports</label>
               <input type="text" id="er-shifts" value="${cfg.email_recipients_shifts||''}"
                 placeholder="manager@example.com" />
             </div>
@@ -3030,6 +3435,11 @@ class SettingsScreen {
               <label>Products Sold</label>
               <input type="text" id="er-products" value="${cfg.email_recipients_products||''}"
                 placeholder="owner@example.com" />
+            </div>
+            <div class="form-group" style="grid-column:1 / -1;">
+              <label>Opening &amp; Closing Sign-offs <span style="font-weight:400;color:var(--text-muted);">(blank = use Sales recipients)</span></label>
+              <input type="text" id="er-signoff" value="${cfg.shift_records_recipients||''}"
+                placeholder="owner@example.com, rph@example.com" />
             </div>
           </div>
         </div>
@@ -3046,29 +3456,54 @@ class SettingsScreen {
 
     const smtpSection = content.querySelector('#er-smtp-section');
     const apiSection  = content.querySelector('#er-api-section');
-    const guideEl     = content.querySelector('#er-guide');
-    const apiKeyHint  = content.querySelector('#er-apikey-hint');
     const msgEl       = content.querySelector('#er-msg');
 
-    const API_HINTS = {
-      resend:   'Get your key at resend.com → API Keys. Free tier: 3,000 emails/month.',
-      sendgrid: 'Get your key at app.sendgrid.com → Settings → API Keys (Mail Send scope).',
-      brevo:    'Get your key at app.brevo.com → Account → SMTP & API → API Keys.',
-    };
-    const API_GUIDES = {
-      resend:   `<div class="alert alert-info" style="font-size:12px;margin:10px 0 0;">Resend: sign up → verify domain → create API key. From Email must match verified domain.</div>`,
-      sendgrid: `<div class="alert alert-info" style="font-size:12px;margin:10px 0 0;">SendGrid: sign up → verify a sender → create API key with Mail Send permission.</div>`,
-      brevo:    `<div class="alert alert-info" style="font-size:12px;margin:10px 0 0;">Brevo: sign up → Senders & IP → verify sender → Account → API Keys.</div>`,
-    };
-
+    /* Resend/SendGrid/Brevo can't send from the desktop app (they need a relay
+       Worker URL there is no setting for), so they're no longer offered. A
+       pharmacy already set to one still sees it — labelled — with a warning. */
+    const mailtoNote = content.querySelector('#er-mailto-note');
     const updateService = (val) => {
       smtpSection.style.display = val === 'smtp'   ? '' : 'none';
       apiSection.style.display  = !['mailto','smtp'].includes(val) ? '' : 'none';
-      if (apiKeyHint) apiKeyHint.textContent = API_HINTS[val] || '';
-      if (guideEl)    guideEl.innerHTML      = API_GUIDES[val] || '';
+      if (mailtoNote) mailtoNote.style.display = val === 'mailto' ? '' : 'none';
     };
     updateService(svc);
     content.querySelector('#er-service').addEventListener('change', e => updateService(e.target.value));
+
+    /* Quick setup: fill in the SMTP server for common providers, with that
+       provider's gotchas (Gmail's App Password; Microsoft retiring password sign-in). */
+    const PRESETS = {
+      gmail:   { host: 'smtp.gmail.com',        port: '587', enc: 'starttls',
+                 hint: '<strong>Gmail:</strong> the username is your full Gmail address. For the password, create an <strong>App Password</strong> — your normal Gmail password will not work. Google Account → Security → turn on <strong>2-Step Verification</strong> → <strong>App passwords</strong> → create one (e.g. "Pharmacy POS") and paste the 16-character code.' },
+      outlook: { host: 'smtp-mail.outlook.com', port: '587', enc: 'starttls',
+                 hint: '<strong>Outlook.com / Hotmail:</strong> the username is your full address. Microsoft has been switching off password sign-in for other apps — if the test email fails with a sign-in error, this account may not allow it, and Gmail is the simplest alternative.' },
+      m365:    { host: 'smtp.office365.com',    port: '587', enc: 'starttls',
+                 hint: '<strong>Microsoft 365 (work/school):</strong> your IT administrator must allow <em>SMTP AUTH</em> for this mailbox, and Microsoft is retiring password-only sign-in for it. If the test fails with a sign-in error, ask your IT provider — or use Gmail.' },
+      other:   { hint: 'Ask your email or web-hosting provider for their <strong>SMTP server</strong>, <strong>port</strong> and <strong>encryption</strong>, then enter them below.' },
+    };
+    const presetHint = content.querySelector('#er-preset-hint');
+    const showPreset = (key) => {
+      content.querySelectorAll('.er-preset').forEach(b => b.classList.toggle('active', b.dataset.preset === key));
+      presetHint.innerHTML     = key ? PRESETS[key].hint : '';
+      presetHint.style.display = key ? '' : 'none';
+    };
+    content.querySelectorAll('.er-preset').forEach(btn => btn.addEventListener('click', () => {
+      const p = PRESETS[btn.dataset.preset];
+      const sel = content.querySelector('#er-service');
+      if (sel.value !== 'smtp') { sel.value = 'smtp'; updateService('smtp'); }
+      if (p.host) {
+        content.querySelector('#er-smtp-host').value = p.host;
+        content.querySelector('#er-smtp-port').value = p.port;
+        content.querySelector('#er-smtp-enc').value  = p.enc;
+      }
+      showPreset(btn.dataset.preset);
+      content.querySelector('#er-smtp-user').focus();
+    }));
+    // An account that's already set up: show its provider's tips (only while
+    // SMTP is the chosen method — not beside "Not set up")
+    const curHost = (cfg.smtp_host || '').trim().toLowerCase();
+    const match   = Object.keys(PRESETS).find(k => PRESETS[k].host === curHost);
+    if (match && svc === 'smtp') showPreset(match);
 
     // Auto-fill port when encryption changes
     content.querySelector('#er-smtp-enc')?.addEventListener('change', e => {
@@ -3096,6 +3531,7 @@ class SettingsScreen {
       email_recipients_shifts:   content.querySelector('#er-shifts').value.trim(),
       email_recipients_orders:   content.querySelector('#er-orders').value.trim(),
       email_recipients_products: content.querySelector('#er-products').value.trim(),
+      shift_records_recipients:  content.querySelector('#er-signoff').value.trim(),
     });
 
     content.querySelector('#btn-er-save').addEventListener('click', async () => {
@@ -3108,6 +3544,11 @@ class SettingsScreen {
     content.querySelector('#btn-er-test').addEventListener('click', async () => {
       const addr = content.querySelector('#er-test-addr').value.trim();
       if (!addr) { msgEl.textContent = 'Enter a test recipient address.'; msgEl.style.color='var(--danger)'; return; }
+      // "mailto" would hand the POS window over to a mail app — never from here
+      if (content.querySelector('#er-service').value === 'mailto') {
+        msgEl.textContent = 'Email isn\'t set up yet — choose "Send from your email account (SMTP)" first.';
+        msgEl.style.color = 'var(--danger)'; return;
+      }
       await Config.setMany(collectConfig());
       msgEl.textContent = 'Sending test email…'; msgEl.style.color = 'var(--text-muted)';
       try {
@@ -3117,7 +3558,7 @@ class SettingsScreen {
           : `✓ Test email sent to ${addr}. Check your inbox.`;
         msgEl.style.color = 'var(--success)';
       } catch(e) {
-        msgEl.textContent = `✗ ${e.message}`;
+        msgEl.innerHTML = SettingsLink.linkify(`✗ ${e.message}`);
         msgEl.style.color = 'var(--danger)';
       }
     });
@@ -3311,11 +3752,9 @@ class SettingsScreen {
     if (!window.electronAPI) {
       content.innerHTML = `
         <div class="settings-section">
-          <h3>SQL Connection</h3>
+          <h3>WinRx Connection (SQL Server)</h3>
           <div class="alert alert-info">
-            SQL connection settings are only available in the <strong>Pharmacy POS desktop app</strong>.<br>
-            You are currently using the browser version, which connects via the Cloudflare Worker configured
-            under <strong>API Credentials</strong>.
+            The WinRx connection can only be set up in the <strong>Pharmacy POS desktop app</strong>.
           </div>
         </div>`;
       return;
@@ -3326,7 +3765,7 @@ class SettingsScreen {
 
     content.innerHTML = `
       <div class="settings-section">
-        <h3>SQL Connection</h3>
+        <h3>WinRx Connection (SQL Server)</h3>
         <div class="alert alert-info" style="font-size:13px;">
           Connect directly to your local WinRx SQL Server. Each pharmacy location can have different
           credentials stored in the app's data folder — no Cloudflare Worker needed.
@@ -3466,9 +3905,9 @@ class SettingsScreen {
         </div>
         <div class="form-group">
           <label>Backup folder</label>
-          <div style="display:flex;gap:8px;">
-            <input type="text" id="auto-backup-folder" placeholder="e.g. D:\\PharmacyBackups" style="flex:1;" />
-            <button class="btn btn-outline" data-browse="#auto-backup-folder">&#128193; Browse</button>
+          <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+            <code id="auto-backup-folder-show" style="font-size:13px;">(not set)</code>
+            <a href="#" data-goto="folders" data-goto-field="#fd-backup" style="font-size:13px;">Change in Save Folders &rarr;</a>
           </div>
         </div>
         <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:6px;">
@@ -3496,24 +3935,25 @@ class SettingsScreen {
       const folder  = (await Config.get('auto_backup_folder')) || '';
       const cb = content.querySelector('#auto-backup-enabled');
       const tm = content.querySelector('#auto-backup-time');
-      const fd = content.querySelector('#auto-backup-folder');
+      const fd = content.querySelector('#auto-backup-folder-show');
       if (cb) cb.checked = enabled;
       if (tm) tm.value = time;
-      if (fd) fd.value = folder;
+      if (fd) fd.textContent = folder || '(not set)';
     })();
 
     const backupMsg = content.querySelector('#auto-backup-msg');
     content.querySelector('#btn-save-backup')?.addEventListener('click', async () => {
       const enabled = content.querySelector('#auto-backup-enabled').checked;
       const time    = content.querySelector('#auto-backup-time').value || '23:30';
-      const folder  = content.querySelector('#auto-backup-folder').value.trim();
+      // The folder itself lives in Save Folders now (one place for every path)
+      const folder  = (await Config.get('auto_backup_folder')) || '';
       if (enabled && !folder) {
-        backupMsg.textContent = 'Choose a backup folder first.'; backupMsg.style.color = 'var(--danger)'; return;
+        backupMsg.innerHTML = 'Set the backup folder in <a href="#" data-goto="folders" data-goto-field="#fd-backup">Save Folders</a> first.';
+        backupMsg.style.color = 'var(--danger)'; return;
       }
       await Config.setMany({
         auto_backup_enabled: enabled ? 'true' : 'false',
         auto_backup_time:    time,
-        auto_backup_folder:  folder,
       });
       Audit.configChange('Automatic backup settings updated');
       backupMsg.textContent = enabled
@@ -3523,8 +3963,11 @@ class SettingsScreen {
     });
 
     content.querySelector('#btn-backup-now')?.addEventListener('click', async () => {
-      const folder = content.querySelector('#auto-backup-folder').value.trim();
-      if (!folder) { backupMsg.textContent = 'Choose a backup folder first.'; backupMsg.style.color = 'var(--danger)'; return; }
+      const folder = (await Config.get('auto_backup_folder')) || '';
+      if (!folder) {
+        backupMsg.innerHTML = 'Set the backup folder in <a href="#" data-goto="folders" data-goto-field="#fd-backup">Save Folders</a> first.';
+        backupMsg.style.color = 'var(--danger)'; return;
+      }
       backupMsg.textContent = 'Backing up…'; backupMsg.style.color = 'var(--text-muted)';
       try {
         const res = await Scheduler.runBackupNow(folder);
@@ -3593,7 +4036,11 @@ class SettingsScreen {
     });
   }
 
-  detach() {}
+  detach() {
+    this._detached = true;
+    if (this._onConfigChanged) window.removeEventListener('config-changed', this._onConfigChanged);
+    clearTimeout(this._healthTimer);
+  }
 
   _renderUpdates(content) {
     const REPO = 'BC-Pharmacy-Softwares/pharmacy-pos';
