@@ -1,0 +1,79 @@
+# ──────────────────────────────────────────────────────────────────────────
+#  Release — builds the Windows installer and publishes it as a GitHub Release
+#  whenever a version tag is pushed:
+#
+#      git tag v1.4.9 && git push origin v1.4.9
+#
+#  The POS app's  Settings → About & Updates → Check for Updates  reads these
+#  Releases, so publishing here is what makes an update appear on every PC.
+#  The tag must match js/version.js and electron-app/package.json.
+# ──────────────────────────────────────────────────────────────────────────
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  windows-installer:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag must match the app version
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          APP=$(sed -n "s/.*APP_VERSION = '\([^']*\)'.*/\1/p" js/version.js)
+          PKG=$(node -p "require('./electron-app/package.json').version")
+          echo "tag=$TAG  js/version.js=$APP  electron-app/package.json=$PKG"
+          if [ "$TAG" != "$APP" ] || [ "$TAG" != "$PKG" ]; then
+            echo "::error::Tag v$TAG does not match js/version.js ($APP) / electron-app/package.json ($PKG)"
+            exit 1
+          fi
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # Git-ignored (setup.sh / setup.bat download them), but the app cannot start
+      # without them — same versions as the setup scripts.
+      - name: Download browser libraries (sql.js, bcrypt.js)
+        shell: bash
+        run: |
+          mkdir -p lib
+          curl -fsSL https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.2/sql-wasm.js   -o lib/sql-wasm.js
+          curl -fsSL https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.2/sql-wasm.wasm -o lib/sql-wasm.wasm
+          curl -fsSL https://cdnjs.cloudflare.com/ajax/libs/bcryptjs/2.4.3/bcrypt.min.js -o lib/bcrypt.min.js
+          ls -l lib
+
+      - name: Install Clover bridge dependencies (bundled into the app)
+        working-directory: clover-local-pay
+        run: npm ci
+
+      - name: Install app dependencies
+        working-directory: electron-app
+        run: npm ci
+
+      # Setup installer only — the portable exe runs the new version WITHOUT
+      # upgrading the installed one, so it must never be what staff download.
+      - name: Build Windows installer
+        working-directory: electron-app
+        run: npx electron-builder --win nsis --x64 --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Pharmacy POS ${{ github.ref_name }}
+          files: electron-app/dist/*Setup*.exe
+          fail_on_unmatched_files: true
+          body: |
+            **To install on a POS PC:** Settings → About & Updates → **Check for Updates** → **Download**,
+            then run the downloaded `Pharmacy POS Setup` installer. Your data is kept.
+
+            What changed is recorded in the Work Log in `CLAUDE.md`.
