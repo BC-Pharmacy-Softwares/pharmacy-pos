@@ -270,6 +270,10 @@ const DB = (() => {
       "ALTER TABLE transaction_items ADD COLUMN drug_name TEXT",
       // Unique human-friendly AR account number per patient (e.g. AR-0001)
       "ALTER TABLE patients ADD COLUMN ar_account_no TEXT",
+      // 1.4.11: card/auth details returned by the Clover terminal, as JSON
+      // (brand, last 4, entry method, auth code, reference, EMV app label/AID).
+      // Last 4 only — never the full PAN.
+      "ALTER TABLE payments ADD COLUMN card_details TEXT",
       // 1.4.9: PHNs imported from WinRx could carry its CHAR padding ("9876543210   "),
       // which broke AR's PHN matching. Trim them — unless that would clash with a record.
       "UPDATE patients SET phn = TRIM(phn) WHERE phn != TRIM(phn) AND TRIM(phn) NOT IN (SELECT phn FROM patients)",
@@ -596,10 +600,16 @@ const DB = (() => {
 
   /* ---- Payments ---- */
   function addPayment(p) {
-    run(`INSERT INTO payments(transaction_id,payment_date,amount,method,clover_payment_id,staff_pin,notes)
-         VALUES(?,?,?,?,?,?,?)`,
+    // card_details: JSON blob from the Clover terminal (see the ALTER above).
+    // Accepts an object or an already-stringified blob.
+    let card = p.card_details ?? null;
+    if (card && typeof card === 'object') {
+      try { card = JSON.stringify(card); } catch(_) { card = null; }
+    }
+    run(`INSERT INTO payments(transaction_id,payment_date,amount,method,clover_payment_id,staff_pin,notes,card_details)
+         VALUES(?,?,?,?,?,?,?,?)`,
       [p.transaction_id,p.payment_date,p.amount,p.method,
-       p.clover_payment_id||null,p.staff_pin||null,p.notes||null]);
+       p.clover_payment_id||null,p.staff_pin||null,p.notes||null,card]);
     return lastInsertId();
   }
   function getPaymentsForTransaction(txnId) {
@@ -652,13 +662,38 @@ const DB = (() => {
   }
 
   /* ---- Catalog upsert (WEBCAT sync) ---- */
+
+  /* Run fn() inside a transaction, rolling back on error.
+     Without the rollback a thrown statement leaves the transaction OPEN, and
+     every later write then fails with "cannot start a transaction within a
+     transaction" until the app restarts (CLAUDE.md 1.4.10). */
+  function _inTransaction(fn) {
+    _db.run('BEGIN');
+    try {
+      const out = fn();
+      _db.run('COMMIT');
+      return out;
+    } catch (e) {
+      try { _db.run('ROLLBACK'); } catch(_) {}
+      throw e;
+    }
+  }
+
+  const PRODUCT_COLS = ['mckesson_item_no','description','upc_unit','gtin_unit','din',
+    'suggested_retail','regular_unit_price','gst_applicable','pst_applicable',
+    'narcotic_indicator','product_status','last_synced'];
+
+  function _productValues(p, now) {
+    return [p.mckesson_item_no, p.description, p.upc_unit, p.gtin_unit, p.din,
+            p.suggested_retail, p.regular_unit_price, p.gst_applicable?1:0,
+            p.pst_applicable?1:0, p.narcotic_indicator, p.product_status, now];
+  }
+
   function upsertProducts(products) {
     const now = localISOStr();
     const stmt = _db.prepare(`
-      INSERT INTO products(mckesson_item_no,description,upc_unit,gtin_unit,din,
-        suggested_retail,regular_unit_price,gst_applicable,pst_applicable,
-        narcotic_indicator,product_status,last_synced)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+      INSERT INTO products(${PRODUCT_COLS.join(',')})
+      VALUES(${PRODUCT_COLS.map(() => '?').join(',')})
       ON CONFLICT(mckesson_item_no) DO UPDATE SET
         description=excluded.description,
         upc_unit=excluded.upc_unit,
@@ -672,64 +707,68 @@ const DB = (() => {
         product_status=excluded.product_status,
         last_synced=excluded.last_synced
     `);
-    _db.run('BEGIN');
-    for (const p of products) {
-      stmt.run([p.mckesson_item_no,p.description,p.upc_unit,p.gtin_unit,p.din,
-                p.suggested_retail,p.regular_unit_price,p.gst_applicable?1:0,
-                p.pst_applicable?1:0,p.narcotic_indicator,p.product_status,now]);
-    }
-    _db.run('COMMIT');
-    stmt.free();
+    try {
+      _inTransaction(() => {
+        for (const p of products) stmt.run(_productValues(p, now));
+      });
+    } finally { stmt.free(); }
     _persist();
   }
+
+  /* opts: { newItems, prices, descriptions, taxFlags }
+     newItems=false means "update what we already stock, don't add the rest". */
   function upsertProductsSelective(products, opts = {}) {
     const now = localISOStr();
     const { newItems = true, prices = true, descriptions = true, taxFlags = true } = opts;
-    const updateParts = [];
-    if (prices)       updateParts.push('suggested_retail=excluded.suggested_retail, regular_unit_price=excluded.regular_unit_price');
-    if (descriptions) updateParts.push('description=excluded.description, upc_unit=excluded.upc_unit, gtin_unit=excluded.gtin_unit, din=excluded.din');
-    if (taxFlags)     updateParts.push('gst_applicable=excluded.gst_applicable, pst_applicable=excluded.pst_applicable');
-    updateParts.push('narcotic_indicator=excluded.narcotic_indicator, product_status=excluded.product_status, last_synced=excluded.last_synced');
 
-    const onConflict = updateParts.length
-      ? `DO UPDATE SET ${updateParts.join(', ')}`
-      : 'DO NOTHING';
-
-    const sql = `INSERT INTO products(mckesson_item_no,description,upc_unit,gtin_unit,din,
-        suggested_retail,regular_unit_price,gst_applicable,pst_applicable,
-        narcotic_indicator,product_status,last_synced)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
-      ON CONFLICT(mckesson_item_no) ${onConflict}`;
+    // Columns to refresh on an existing row, as [column, value-getter] pairs so
+    // the UPDATE branch can build matching placeholders. Previously this branch
+    // string-replaced "excluded." away, producing self-assignments like
+    // `suggested_retail=suggested_retail` and binding 10 values into 2
+    // placeholders — it threw `column index out of range` every time.
+    const updatable = [];
+    if (prices) {
+      updatable.push(['suggested_retail',   p => p.suggested_retail]);
+      updatable.push(['regular_unit_price', p => p.regular_unit_price]);
+    }
+    if (descriptions) {
+      updatable.push(['description', p => p.description]);
+      updatable.push(['upc_unit',    p => p.upc_unit]);
+      updatable.push(['gtin_unit',   p => p.gtin_unit]);
+      updatable.push(['din',         p => p.din]);
+    }
+    if (taxFlags) {
+      updatable.push(['gst_applicable', p => p.gst_applicable?1:0]);
+      updatable.push(['pst_applicable', p => p.pst_applicable?1:0]);
+    }
+    // Always kept in step with the catalogue.
+    updatable.push(['narcotic_indicator', p => p.narcotic_indicator]);
+    updatable.push(['product_status',     p => p.product_status]);
+    updatable.push(['last_synced',        () => now]);
 
     if (newItems) {
-      const stmt = _db.prepare(sql);
-      _db.run('BEGIN');
-      for (const p of products) {
-        stmt.run([p.mckesson_item_no,p.description,p.upc_unit,p.gtin_unit,p.din,
-                  p.suggested_retail,p.regular_unit_price,p.gst_applicable?1:0,
-                  p.pst_applicable?1:0,p.narcotic_indicator,p.product_status,now]);
-      }
-      _db.run('COMMIT');
-      stmt.free();
+      const setClause = updatable.map(([c]) => `${c}=excluded.${c}`).join(', ');
+      const stmt = _db.prepare(`
+        INSERT INTO products(${PRODUCT_COLS.join(',')})
+        VALUES(${PRODUCT_COLS.map(() => '?').join(',')})
+        ON CONFLICT(mckesson_item_no) DO UPDATE SET ${setClause}`);
+      try {
+        _inTransaction(() => {
+          for (const p of products) stmt.run(_productValues(p, now));
+        });
+      } finally { stmt.free(); }
     } else {
-      // Update existing only — skip INSERT for new items
-      if (updateParts.length > 1) {
-        const updateSql = `UPDATE products SET ${updateParts.slice(0,-1).join(', ')
-          .replace(/excluded\./g,'')}, last_synced=?
-          WHERE mckesson_item_no=?`;
-        const stmt = _db.prepare(updateSql);
-        _db.run('BEGIN');
-        for (const p of products) {
-          const vals = [];
-          if (prices)       vals.push(p.suggested_retail, p.regular_unit_price);
-          if (descriptions) vals.push(p.description, p.upc_unit, p.gtin_unit, p.din);
-          if (taxFlags)     vals.push(p.gst_applicable?1:0, p.pst_applicable?1:0);
-          vals.push(now, p.mckesson_item_no);
-          stmt.run(vals);
-        }
-        _db.run('COMMIT');
-        stmt.free();
-      }
+      // Update existing rows only — no INSERT, so unstocked items stay out.
+      const stmt = _db.prepare(
+        `UPDATE products SET ${updatable.map(([c]) => `${c}=?`).join(', ')}
+         WHERE mckesson_item_no=?`);
+      try {
+        _inTransaction(() => {
+          for (const p of products) {
+            stmt.run([...updatable.map(([, get]) => get(p)), p.mckesson_item_no]);
+          }
+        });
+      } finally { stmt.free(); }
     }
     _persist();
   }
@@ -781,7 +820,9 @@ const DB = (() => {
 
   function getLowStockProducts() {
     const catalog = all(`SELECT product_id as id,'catalog' as source, description, upc_unit as upc,
-      COALESCE(price_override, suggested_retail, regular_unit_price) as price,
+      -- regular_unit_price is McKesson's COST, not a retail price, so it is not
+      -- part of the price chain (CLAUDE.md 1.4.10).
+      COALESCE(price_override, suggested_retail) as price,
       qty_on_hand, qty_threshold, location
       FROM products WHERE qty_threshold IS NOT NULL AND qty_on_hand IS NOT NULL
         AND qty_on_hand <= qty_threshold ORDER BY description`);

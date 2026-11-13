@@ -212,6 +212,43 @@ function connect() {
 
 // ── Incoming message handler ──────────────────────────────────────────────
 
+/* Build the card/auth details printed on the customer receipt.
+   Source: Clover `Payment.cardTransaction` (com.clover.sdk.v3.payments.CardTransaction)
+   plus the payment's tender. Only the LAST 4 digits are ever taken — never the
+   full PAN, and never first6 — so nothing here is cardholder data that must be
+   protected under PCI DSS. `extra` carries the EMV fields when the card was
+   inserted/tapped; it is absent for swiped and keyed transactions. */
+function cardDetails(txnObj, paymentObj) {
+  const ct    = (txnObj && txnObj.cardTransaction) || {};
+  const extra = ct.extra || {};
+  const pick  = (...keys) => {
+    for (const k of keys) {
+      if (extra[k] != null && String(extra[k]).trim() !== '') return String(extra[k]).trim();
+    }
+    return null;
+  };
+  const clean = v => (v == null || String(v).trim() === '') ? null : String(v).trim();
+
+  const d = {
+    cardType:      clean(ct.cardType),       // VISA / MC / AMEX / DEBIT …
+    last4:         clean(ct.last4),
+    entryType:     clean(ct.entryType),      // SWIPED / KEYED / CONTACTLESS / EMV_CONTACT
+    authCode:      clean(ct.authCode),
+    referenceId:   clean(ct.referenceId),    // RRN
+    transactionNo: clean(ct.transactionNo),
+    txType:        clean(ct.type),           // AUTH / PREAUTH / …
+    tenderLabel:   clean(paymentObj && paymentObj.tender && paymentObj.tender.label),
+    // EMV fields — present only for chip/contactless
+    appLabel:      pick('APPLICATION_LABEL', 'applicationLabel'),
+    aid:           pick('APPLICATION_IDENTIFIER', 'AID', 'applicationIdentifier'),
+    cvm:           pick('CVM', 'cvmResult', 'PIN_STATEMENT'),
+    tipAmount:     (paymentObj && paymentObj.tipAmount != null) ? paymentObj.tipAmount : null,
+  };
+  // Drop empties so the receipt builder can simply skip absent fields.
+  Object.keys(d).forEach(k => { if (d[k] == null) delete d[k]; });
+  return Object.keys(d).length ? d : null;
+}
+
 function handleMessage(method, payload) {
   console.log('[clover] ←', method);
 
@@ -295,6 +332,7 @@ function handleMessage(method, payload) {
           amount:   credit.amount != null ? Math.abs(credit.amount) : null,
           cardType: credit.cardTransaction?.cardType || null,
           last4:    credit.cardTransaction?.last4    || null,
+          card:     cardDetails(credit, credit),
           result:   'SUCCESS',
         });
         pendingRefund = null;
@@ -303,12 +341,15 @@ function handleMessage(method, payload) {
       if (!pendingSale) break;
       clearTimeout(pendingSale.timer);
       const payment = payload.payment || {};
+      console.log('[clover] FINISH_OK (sale):', JSON.stringify(payload));
       pendingSale.resolve({
         ok:        true,
         paymentId: payment.id,
         amount:    payment.amount,
         cardType:  payment.cardTransaction?.cardType || null,
         last4:     payment.cardTransaction?.last4    || null,
+        // Full card/auth detail set for the printed receipt.
+        card:      cardDetails(payment, payment),
         result:    'SUCCESS',
       });
       pendingSale = null;
@@ -351,6 +392,7 @@ function handleMessage(method, payload) {
           ok:       true,
           refundId: refund.id   || null,
           amount:   refund.amount || null,
+          card:     cardDetails(refund, refund),
           result:   'SUCCESS',
         });
       } else {

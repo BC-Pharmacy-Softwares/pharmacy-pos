@@ -190,6 +190,21 @@ const McKessonAPI = (() => {
     };
   }
 
+  /* One honest summary line per parse. A catalogue that silently dropped every
+     promotion record, or truncated half its lines, used to report plain success
+     (CLAUDE.md 1.4.10). */
+  function _logParse(onLog, parsed) {
+    onLog(`Parsed ${parsed.products.length} products from ${parsed.total} records.`);
+    if (parsed.specials)   onLog(`  ${parsed.specials} promotion (S) record(s) skipped — not products.`);
+    if (parsed.duplicates) onLog(`  ${parsed.duplicates} duplicate item number(s); last record kept.`);
+    if (parsed.truncated)  onLog(`  WARNING: ${parsed.truncated} line(s) shorter than ${WebcatParser.PRODUCT_LEN} chars — price/GTIN may be missing.`);
+    if (parsed.skipped)    onLog(`  ${parsed.skipped} line(s) skipped (unrecognised record type or bad item number).`);
+    if (parsed.layout === 'no-record-id')
+      onLog('  NOTE: file has no record-ID column; every line treated as a product.');
+    if (!parsed.products.length)
+      onLog('  ERROR: no products parsed — check the file is the "General and regular pricing" export.');
+  }
+
   /* Full catalog sync with polling.
      opts: { newItems, prices, descriptions, taxFlags, skipDisco } */
   async function runCatalogSync(onLog, opts = {}) {
@@ -216,7 +231,7 @@ const McKessonAPI = (() => {
       onLog(`Catalogue size: ${flatFile.length} chars`);
       onLog('Parsing WEBCAT V6…');
       const parsed = WebcatParser.parseFile(flatFile);
-      onLog(`Parsed ${parsed.products.length} products (${parsed.skipped} skipped, ${parsed.total} lines)`);
+      _logParse(onLog, parsed);
       const {
         newItems = true, prices = true, descriptions = true,
         taxFlags = true, skipDisco = false,
@@ -271,8 +286,9 @@ const McKessonAPI = (() => {
 
     // Step 4: Parse
     onLog('Parsing WEBCAT Version 6 flat file...');
-    const { products: allParsed, skipped, total } = WebcatParser.parseFile(flatFile);
-    onLog(`Parsed ${allParsed.length} products (${skipped} skipped, ${total} total lines)`);
+    const parsedWS = WebcatParser.parseFile(flatFile);
+    _logParse(onLog, parsedWS);
+    const allParsed = parsedWS.products;
 
     // Step 4b: Apply sync options filter
     const {
@@ -299,8 +315,9 @@ const McKessonAPI = (() => {
   async function importFromFile(text, onLog) {
     onLog = onLog || console.log;
     onLog('Parsing uploaded WEBCAT file...');
-    const { products, skipped, total } = WebcatParser.parseFile(text);
-    onLog(`Parsed ${products.length} products (${skipped} skipped, ${total} total lines)`);
+    const parsed = WebcatParser.parseFile(text);
+    _logParse(onLog, parsed);
+    const products = parsed.products;
     onLog('Saving to database...');
     DB.upsertProducts(products);
     onLog(`Import complete. ${products.length} products saved.`);

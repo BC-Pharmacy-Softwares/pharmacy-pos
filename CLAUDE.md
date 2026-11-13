@@ -42,7 +42,7 @@ is a Mac (this repo). **Claude cannot run the app** — the user tests on Window
 - **Must stay in sync with** `electron-app/package.json` `"version"` (that names the installer `.exe`).
 - Shown in-app on the **login screen** and **Settings top-right**.
 - Scheme: `MAJOR.MINOR.PATCH`. Most builds = PATCH bump.
-- **Current version: 1.4.9**
+- **Current version: 1.4.11**
 - When making a build, bump both files and note it in the Work Log below.
 
 ---
@@ -143,7 +143,18 @@ pharmacy-pos/
     sale's linked patient; Rx numbers compare via `AR.normRx` (no leading zeros), PHNs via `AR.normPhn`;
     unmatched POS money becomes credit, never dropped. **`/getPatientProfile` is `TOP 60` — it's for the POS
     pick list only; AR must use `/getPatientBilled` (uncapped).**
-13. **`lib/sql-wasm.js`, `lib/sql-wasm.wasm`, `lib/bcrypt.min.js` are git-ignored** (the setup scripts
+13. **WEBCAT catalogue files mix record types — ALWAYS check position 1.** `P` = product (396 chars),
+    `S` = specials/promotions (345 chars, a completely different layout, spec §2.4.2.2). Both carry the item
+    number at 2–7, so parsing an `S` row as a product **overwrites the real product** via
+    `ON CONFLICT(mckesson_item_no) DO UPDATE` — description becomes `REG00120…`, DIN/GTIN/prices go NULL.
+    Three more field traps in the same spec (§2.4.2.1), all of which bit us:
+    **GST/PST `F` = "Forced" means the tax APPLIES** (only `N`/blank are untaxed);
+    **narcotic `N` = "narcotic, non-controlled" — it does NOT mean "no"** (`C` = controlled, blank = neither),
+    so never write `narcotic_indicator !== 'N'` — use `WebcatParser.isNarcotic()` / `.narcoticClass()`;
+    and **`regular_unit_price` is McKesson's unit COST**, never a retail price — don't put it in a price
+    `COALESCE`. The UPC is three fields (104, 105–111, 112–116), and the spec says prefer GTIN anyway.
+    Tests: `node tests/webcat.test.js` (needs `lib/`).
+14. **`lib/sql-wasm.js`, `lib/sql-wasm.wasm`, `lib/bcrypt.min.js` are git-ignored** (the setup scripts
     download them). Any build from a fresh checkout — e.g. the release workflow — must download them first
     (sql.js 1.10.2, bcryptjs 2.4.3) or the app ships without its database engine and won't start.
 
@@ -184,7 +195,91 @@ pharmacy-pos/
 
 ## Work Log (newest first — append new entries here)
 
-### 1.4.9 — (current)
+### 1.4.11 — (current)
+**Clover card/auth details on the receipt, and the committed WinRx password removed.**
+**⚠ `clover-local-pay/server.js` changed → rebuild (or copy it into `resources/app/`).**
+- **Receipts now print the card details the terminal returns.** The bridge only ever surfaced
+  `cardType` and `last4`, and `buildPaymentRows` printed neither — a card receipt showed just
+  "Paid (CARD) $38.47". New **`cardDetails()`** in `server.js` reads `Payment.cardTransaction` and the
+  tender, returning brand, last 4, entry method, auth code, reference (RRN), transaction #, EMV app label,
+  AID, CVM and tip. Returned as `card` on sale, manual-refund and linked-refund results.
+- **Stored, not just displayed:** new `payments.card_details` column (JSON, added via the ALTER list so
+  existing installs migrate silently). `DB.addPayment` accepts an object or a string. Both POS payment
+  paths (split and single) pass `cardDetails` through.
+- **`print.js` `_cardBlock()`** renders it indented under its payment line, on thermal and A5 receipts.
+  Every field is optional, so cash/AR lines print nothing, pre-1.4.11 card sales still print normally, and
+  malformed JSON is swallowed rather than breaking the receipt.
+- **PCI:** the capture is an explicit allow-list of 12 fields. **`last4` only — `first6`, the full PAN and
+  track data are never read**, so nothing stored or printed is protected cardholder data.
+- Verified in Node: a 5-line payment mix (chip VISA with full EMV data, cash, contactless MC, a legacy card
+  row with no details, AR) renders correctly; cash/AR print no card block; malformed and empty JSON print
+  nothing; the column migration is idempotent and leaves existing rows NULL.
+
+**SECURITY — the WinRx SQL Server password was committed to git.** `electron-app/sql-config.json` was
+tracked with a real `server`/`user`/`password` since `50a1d63` (and again in `a129075`).
+- `git rm --cached`'d, added to `.gitignore`, and replaced with a tracked
+  **`electron-app/sql-config.example.json`**. The local file is untouched, so running from source still works.
+- **Good news — it was never shipped.** electron-builder's `files` lists only `main.js`/`preload.js`/
+  `package.json`/`node_modules`, and `extraResources` excludes `electron-app/**`, so the installer never
+  contained it. `getSqlConfigPath()` checks `%AppData%` first and returns null if nothing is found, so
+  removing it from the repo changes nothing at runtime.
+- **STILL OUTSTANDING (owner action):** the password is in public git history, so it must be **rotated in
+  SQL Server** — removing the file does not unpublish it. History rewrite (`git filter-repo` + force-push)
+  was NOT run; it rewrites published history and needs an explicit decision.
+- `?v=`: `version.js`(16), `db.js`(35), `print.js`(36), `pos.js`(85).
+
+### 1.4.10
+**Reported: "WEBCAT file not being read or being imported properly."** Confirmed against McKesson's
+*Third-Party System Integration Document* (Nov 2021) §2.4.2. The field POSITIONS in `webcat.js` were all
+correct; everything around them was not. Each fault below was reproduced by running the real parser and the
+real `upsertProducts` in Node against spec-exact 396-char `P` and 345-char `S` records.
+- **CRITICAL — promotion (`S`) records were imported as products and destroyed the real rows.** `parseLine`
+  never looked at position 1 (Record ID). An `S` record carries the same item number at 2–7, so the upsert's
+  `ON CONFLICT DO UPDATE` overwrote the product: description became `REG0012020240101…`, and DIN, GTIN,
+  suggested retail and cost were all set to NULL. The log still said "Parsed N products, 0 skipped", which is
+  why it looked like it had worked.
+- **`upsertProductsSelective` with `newItems:false` threw every time and then poisoned the database.**
+  It built the UPDATE by string-replacing `excluded.` away, producing self-assignments
+  (`suggested_retail=suggested_retail`) and binding 10 values into 2 placeholders →
+  `column index out of range`. Because `BEGIN` had already run and `COMMIT` never did, **the transaction was
+  left open** and every later write failed with `cannot start a transaction within a transaction` until the
+  app restarted. Rewritten around a `[column, getter]` list so placeholders and values cannot drift apart,
+  and all catalogue writes now go through **`_inTransaction()`**, which ROLLBACKs on error.
+- **GST/PST `F` (Forced) was read as not taxable** (`=== 'Y'` only) → tax silently under-collected on those
+  items. Now `Y` or `F` → taxable.
+- **Narcotics imported as ordinary OTC.** Spec: `C` = controlled, **`N` = narcotic non-controlled**,
+  blank = neither. `pos.js` and `reports.js` both tested `narcotic_indicator !== 'N'`, so every plain
+  narcotic fell through. *Also* the POS mapped a match to `_schedule_flag:'narcotic'` — **a value nothing
+  acts on**: no badge (`pos.js` ~546), no counselling popup (~1643), no BTC log. So controlled drugs were
+  silently skipping the popup too. Now mapped onto the live tiers: `C` → `btc_ctrl` (patient name required),
+  `N` → `btc` (name optional). **Expect the counselling popup on more items after this update — that is the
+  point.** New helpers `WebcatParser.narcoticClass()` / `.isNarcotic()` are the single place this is decided.
+- **Items with no suggested retail price were sold at McKesson's COST.** Spec: "Regular Unit Price — the
+  regular unit *cost* price for this customer." `pos.js` `_addOTCItem` and `db.js` `getLowStockProducts` both
+  COALESCEd down to it. Removed from both price chains; such an item now lands at $0.00 with a red
+  **"NO RETAIL PRICE SET"** status instead of quietly going out at zero margin.
+- **UPC was malformed.** Positions 104 / 105–111 / 112–116 are three fields read as one, so every product
+  without a UPC stored `"0000000000000"` — thousands of rows sharing a lookup key. Now joined properly and
+  null when absent. (Spec: the GTIN field has replaced the UPC; GTIN unit/pack/case are all parsed now.)
+- **Truncated and CRLF lines.** The only guard was `length < 100` (a real `P` record is 396), so a short line
+  silently yielded null price and null GTIN while `skipped` stayed 0. Lines are now split on CRLF/LF/CR,
+  short lines are counted and reported, and duplicate item numbers are counted (last record wins).
+- **Import log is honest now** (`_logParse` in `mckesson.js`): products parsed, promotion records skipped,
+  duplicates, truncated lines, unrecognised lines, and an explicit ERROR when nothing parsed.
+- **Defensive:** if no line starts with `P`/`S` the file is treated as having no record-ID column and every
+  field is read one character earlier (`parseLine(line, true)`), rather than importing zero products. A file
+  that is neither layout imports nothing — the numeric item-number check rejects it — instead of garbage.
+- **Tests added — `node tests/webcat.test.js` (52 assertions, needs `lib/`).** `tests/webcat-fixtures.js`
+  builds spec-exact records. Covers record-type separation, the S-overwrite regression, tax `F`, the narcotic
+  tiers, 7,2 price scaling, UPC joining, CRLF, truncation, the headerless fallback (real field values, not
+  just a count), junk input, duplicates, the `newItems:false` path, and that a failed write rolls back.
+  **First automated tests in the repo** — see the review note about 21k untested lines.
+- **Not verified against a real McKesson file** — no sample was available. All fixtures are built from the
+  spec. Worth re-running `tests/webcat.test.js` plus one real catalogue import before relying on it.
+- `?v=`: `version.js`(15), `db.js`(34), `webcat.js`(4), `mckesson.js`(13), `pos.js`(84), `reports.js`(29).
+  **`main.js`/`preload.js` untouched** — but rebuild anyway so `app.asar` and `js/` stay in step.
+
+### 1.4.9
 **Reported: "check if AR is getting properly connected to patients."** It wasn't. Patients were matched
 WinRx↔POS by PHN correctly in the simple case, but money was mis-credited or dropped in common cases. Every
 failure below was reproduced by running the real AR code against a fake WinRx that mirrored its SQL:

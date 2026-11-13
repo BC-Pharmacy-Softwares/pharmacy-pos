@@ -384,10 +384,14 @@ class POSScreen {
   }
 
   _addOTCItem(product, barcode) {
-    // price_override wins; fall back to suggested_retail (catalog) or price (custom)
+    // price_override wins, then the catalogue's suggested retail, then a custom
+    // product's own price. NEVER regular_unit_price — per the McKesson spec that
+    // is the unit COST price, so falling back to it sold stock at cost with no
+    // margin and no warning (CLAUDE.md 1.4.10).
     const price = product.price_override != null
       ? product.price_override
-      : (product.suggested_retail || product.regular_unit_price || product.price || 0);
+      : (product.suggested_retail || product.price || 0);
+    const noRetailPrice = !(price > 0);
     // Determine source and ID so stock can be deducted on save
     const isCustom = product.custom_product_id != null;
     this._cart.push({
@@ -402,10 +406,18 @@ class POSScreen {
       line_total:      price,
       _product_id:     isCustom ? product.custom_product_id : product.product_id,
       _product_source: isCustom ? 'custom' : 'catalog',
-      // schedule_flag from DB, or fall back to checking narcotic_indicator (McKesson catalog)
-      // or notes containing "CTRL" (legacy workaround before Phase 3)
+      // schedule_flag from DB, or fall back to the McKesson catalogue's narcotic
+      // indicator, or notes containing "CTRL" (legacy workaround before Phase 3).
+      // Two fixes here (CLAUDE.md 1.4.10):
+      //  - 'N' means "narcotic, non-controlled" in the spec, NOT "no". Reading it
+      //    as "no" let real narcotics through as ordinary OTC.
+      //  - the old code mapped these to 'narcotic', a value nothing acts on — no
+      //    badge (line ~546), no counselling popup (~1643), no BTC log. Map onto
+      //    the live tiers instead: controlled -> btc_ctrl (name required),
+      //    narcotic non-controlled -> btc (name optional).
       _schedule_flag:  product.schedule_flag ||
-                       (product.narcotic_indicator && product.narcotic_indicator !== 'N' ? 'narcotic' : null) ||
+                       ({ controlled: 'btc_ctrl', narcotic: 'btc' })[
+                          WebcatParser.narcoticClass(product.narcotic_indicator)] ||
                        (/CTRL/i.test(product.notes||'') || /\bBTC\b/i.test(product.location||'') ? 'btc' : null),
     });
 
@@ -417,7 +429,15 @@ class POSScreen {
       '| location:', product.location,
       '| detected flag:', flag);
 
-    this._setStatus('success', `Added: ${product.description} — ${Tax.fmt(price)}${flag ? ` [${flag.toUpperCase()}]` : ''}`);
+    if (noRetailPrice) {
+      // The catalogue had no suggested retail price for this item. It used to be
+      // added silently at McKesson's cost; now it lands at $0.00 and says so, so
+      // staff set a real price instead of selling at cost by accident.
+      this._setStatus('error',
+        `Added: ${product.description} — NO RETAIL PRICE SET. Tap the line to enter a price.`);
+    } else {
+      this._setStatus('success', `Added: ${product.description} — ${Tax.fmt(price)}${flag ? ` [${flag.toUpperCase()}]` : ''}`);
+    }
     this._updateDisplay();
   }
 
@@ -1662,7 +1682,7 @@ class POSScreen {
       return;
     }
 
-    // Payment lines: [{method, amount, tendered, notes, cloverPaymentId}]
+    // Payment lines: [{method, amount, tendered, notes, cloverPaymentId, cardDetails}]
     const lines = [];
 
     const modal = document.createElement('div');
@@ -1968,6 +1988,8 @@ class POSScreen {
                 result.cardType, result.last4 ? `****${result.last4}` : null,
               ].filter(Boolean).join(' ') || null,
               cloverPaymentId: result.paymentId || null,
+              // Card/auth details from the terminal, printed on the receipt.
+              cardDetails:     result.card || null,
             });
             resetEntry();
             updateTotals();
@@ -2145,6 +2167,7 @@ class POSScreen {
             tendered:        null,
             notes,
             cloverPaymentId: result.paymentId || null,
+            cardDetails:     result.card || null,
           }], totals);
           const savedPatient = this._patient;
           setTimeout(() => {
@@ -2180,7 +2203,7 @@ class POSScreen {
   }
 
   /* Save a transaction with one or more payment lines.
-     paymentLines: [{method, amount, tendered, notes, cloverPaymentId}] */
+     paymentLines: [{method, amount, tendered, notes, cloverPaymentId, cardDetails}] */
   async _saveTransactionMulti(paymentLines, totals) {
     const now      = localISOStr();
     const txnType  = this._cart.some(i => i.item_type === 'RX')
@@ -2225,6 +2248,7 @@ class POSScreen {
           clover_payment_id: pay.cloverPaymentId || null,
           staff_pin:        Auth.current()?.name || null,
           notes:            pay.notes || null,
+          card_details:     pay.cardDetails || null,
         });
       }
     }

@@ -3,6 +3,13 @@
 # Safe to publish: each pharmacy fills in their own config.
 # ============================================================
 
+# --- WinRx SQL Server credentials (NEVER commit) ---
+# Real server/user/password for the pharmacy's WinRx database. The app reads it
+# from %AppData%\pharmacy-pos\ first (written by Settings -> WinRx Connection),
+# so this file is only ever a local dev convenience.
+# Copy sql-config.example.json to sql-config.json and fill it in.
+electron-app/sql-config.json
+
 # --- Clover bridge service ---
 clover-local-pay/.env            # contains your Clover device IP & port
 clover-local-pay/.clover-token   # pairing token saved after first connect

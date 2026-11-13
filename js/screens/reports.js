@@ -1533,7 +1533,10 @@ class ReportsScreen {
             category = 'unmatched'; include = false;
           } else if (prod.schedule_flag === 'btc' || prod.schedule_flag === 'btc_ctrl') {
             category = 'BTC'; include = true;
-          } else if ((prod.narcotic_indicator && prod.narcotic_indicator !== 'N')) {
+          } else if (WebcatParser.isNarcotic(prod.narcotic_indicator)) {
+            // 'C' = controlled, 'N' = narcotic non-controlled, blank = neither.
+            // 'N' is NOT "no" — treating it as such put narcotics in the OTC
+            // receive list (CLAUDE.md 1.4.10).
             category = 'Rx/Narcotic'; include = false;        // Rx — managed in WinRx, skip
           } else if (prod.din && !(prod.suggested_retail || prod.price_override)) {
             category = 'Rx?'; include = false;                 // has DIN, no POS retail price → likely Rx

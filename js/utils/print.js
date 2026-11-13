@@ -277,10 +277,53 @@ const Print = (() => {
     return html;
   }
 
+  /* Card / authorisation details captured from the Clover terminal.
+     Stored as JSON on payments.card_details (see db.js addPayment); only the
+     last 4 digits are ever held, never the full PAN. Every field is optional —
+     EMV app label / AID appear for chip and contactless only, and nothing at
+     all is printed for cash, AR or a card paid before 1.4.11. */
+  function _cardBlock(p) {
+    var d = p && p.card_details;
+    if (!d) return '';
+    if (typeof d === 'string') {
+      try { d = JSON.parse(d); } catch (_) { return ''; }
+    }
+    if (!d || typeof d !== 'object') return '';
+
+    var ENTRY = {
+      SWIPED: 'Swiped', KEYED: 'Manual entry', MANUAL: 'Manual entry',
+      CONTACTLESS: 'Contactless', EMV_CONTACT: 'Chip', EMV_CONTACTLESS: 'Contactless',
+      VAULTED: 'Stored card',
+    };
+    var rows = [];
+    function row(label, value) {
+      if (value == null || String(value).trim() === '') return;
+      rows.push('<div class="rtl cd"><span>' + esc(label) + '</span><span>' + esc(String(value)) + '</span></div>');
+    }
+
+    var brand = d.cardType || d.tenderLabel;
+    if (brand && d.last4)      row(String(brand), '**** **** **** ' + d.last4);
+    else if (brand)            row('Card', String(brand));
+    else if (d.last4)          row('Card', '**** **** **** ' + d.last4);
+
+    row('Entry',      d.entryType ? (ENTRY[String(d.entryType).toUpperCase()] || d.entryType) : null);
+    row('Auth code',  d.authCode);
+    row('Reference',  d.referenceId);
+    row('Trans #',    d.transactionNo);
+    row('App',        d.appLabel);
+    row('AID',        d.aid);
+    row('CVM',        d.cvm);
+    if (d.tipAmount != null && Number(d.tipAmount) > 0) row('Tip', Tax.fmt(Number(d.tipAmount) / 100));
+
+    if (!rows.length) return '';
+    return '<div class="cdw">' + rows.join('') + '</div>';
+  }
+
   function buildPaymentRows(payments) {
     return (payments||[]).map(function(p) {
       return '<div class="rtl"><span>Paid (' + esc(p.method) + ')</span>' +
-             '<span>' + Tax.fmt(Number(p.amount||0)) + '</span></div>';
+             '<span>' + Tax.fmt(Number(p.amount||0)) + '</span></div>' +
+             _cardBlock(p);
     }).join('');
   }
 
@@ -435,6 +478,9 @@ const Print = (() => {
       '.rrx{font-size:' + (fontSize-1) + 'px;color:#555;margin:-2px 0 3px 6px;}' +
       '.rt{margin-top:4px;}.rtl{display:flex;justify-content:space-between;margin-bottom:2px;}' +
       '.rtl.grand{font-weight:bold;font-size:' + (fontSize+1) + 'px;margin-top:3px;}' +
+      // Clover card/auth details, indented under their payment line
+      '.cdw{margin:1px 0 4px 8px;}' +
+      '.rtl.cd{font-size:' + Math.max(7, fontSize-2) + 'px;margin-bottom:1px;}' +
       '.rf{text-align:center;margin-top:8px;font-size:' + (fontSize-1) + 'px;line-height:1.4;}' +
       '</style></head><body>' + body + '</body></html>';
   }
@@ -592,6 +638,8 @@ const Print = (() => {
       '.rd{border:none;border-top:1px dashed #000;margin:5px 0;}' +
       '.rtl{display:flex;justify-content:space-between;margin-bottom:3px;}' +
       '.rtl.grand{font-weight:bold;font-size:13pt;margin-top:4px;}' +
+      '.cdw{margin:1px 0 5px 10px;}' +
+      '.rtl.cd{font-size:8pt;color:#333;margin-bottom:1px;}' +
       '.rt{font-size:10pt;}' +
       '</style></head><body>' + body + '</body></html>';
   }

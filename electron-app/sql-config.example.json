@@ -1,0 +1,11 @@
+{
+  "_comment": "Copy this file to sql-config.json and fill in your WinRx SQL Server details. sql-config.json is git-ignored and must never be committed. The packaged app reads %AppData%\\pharmacy-pos\\sql-config.json first, which Settings -> WinRx & McKesson -> WinRx Connection writes for you — so you normally do not need this file at all; it is a convenience for running from source. Use the read-only login described in SQL-SETUP.md, never the sa account.",
+  "server": "",
+  "database": "winrxdata",
+  "user": "",
+  "password": "",
+  "options": {
+    "trustServerCertificate": true,
+    "enableArithAbort": true
+  }
+}
