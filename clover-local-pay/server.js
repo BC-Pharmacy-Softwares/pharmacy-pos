@@ -173,8 +173,14 @@ function connect() {
     let msg;
     try { msg = JSON.parse(text); } catch (_) { return; }
     // Log full raw message for debugging (truncated)
-    const preview = text.length > 300 ? text.substring(0, 300) + '…' : text;
-    if (msg.method !== 'ACK') console.log('[clover] RAW ←', preview);
+    // Clover's envelope opens with a run of null fields (asyncInfo, attachment,
+    // attachmentEncoding …), so a 300-char cap spent the whole budget on
+    // boilerplate and cut off the payload — and often the method too, which made
+    // the log useless for diagnosing a card fault (CLAUDE.md 1.4.13).
+    if (msg.method !== 'ACK') {
+      const preview = text.length > 8000 ? text.substring(0, 8000) + '…[truncated]' : text;
+      console.log(`[clover] RAW ← method=${msg.method || '?'} ${preview}`);
+    }
     // Clover sends payload as a JSON string — parse it
     let payload = msg.payload;
     if (typeof payload === 'string') {
@@ -232,6 +238,8 @@ const FORBIDDEN_KEYS = new Set([
   'trackdata','track1data','track2data','first6','firstsix','bin','cvv','cvc',
   'cvv2','cid','pin','pinblock','expiry','expirationdate','expdate','expmonth',
   'expyear','cardholdername','encrypteddata','emvdata',
+  // seen in a real Network Pay Display payload: expiry as 'exp', plus card tokens
+  'exp','token','expirationdate','vaultedcard',
 ]);
 
 // Masked card numbers: safe to look at, but only the trailing 4 digits are kept.
@@ -252,6 +260,35 @@ const CARD_FIELD_ALIASES = {
 };
 
 const normKey = k => String(k).toLowerCase().replace(/[^a-z0-9]/g, '');
+
+/* Clover nests JSON INSIDE JSON. The outer RemoteMessage.payload is a JSON
+   string (already parsed on receipt), but `payment` / `credit` / `refund` inside
+   it are themselves JSON strings, and `extra.card` is a third level. Before
+   1.4.13 the bridge parsed only the outer one, so `payload.payment` was a
+   string: it had no .cardTransaction and no .id, which meant no card details on
+   the receipt AND a null clover_payment_id, silently forcing every refund down
+   the unlinked path (CLAUDE.md 1.4.13). */
+function parseMaybeJson(v) {
+  if (typeof v !== 'string') return v;
+  const t = v.trim();
+  if (t.length < 2 || t.length > 200000) return v;
+  if (t[0] !== '{' && t[0] !== '[') return v;
+  try { return JSON.parse(t); } catch (_) { return v; }
+}
+
+/* Clover sends the EMV application label as hex-encoded ASCII
+   ("4D617374657263617264" = "Mastercard"). Decode when it plainly is hex. */
+function decodeHexLabel(v) {
+  const t = String(v == null ? '' : v).trim();
+  if (!/^[0-9A-Fa-f]+$/.test(t) || t.length < 4 || t.length % 2 !== 0) return t || null;
+  let out = '';
+  for (let i = 0; i < t.length; i += 2) {
+    const c = parseInt(t.substr(i, 2), 16);
+    if (c < 0x20 || c > 0x7e) return t;        // not printable ASCII — leave as-is
+    out += String.fromCharCode(c);
+  }
+  return out.trim() || t;
+}
 
 function cleanVal(v) {
   if (v == null) return null;
@@ -292,13 +329,14 @@ function searchCardFields(root) {
       }
       const field = byAlias.get(k);
       if (field && found[field] == null) {
-        const cv = cleanVal(val);
+        const cv = (field === 'appLabel') ? decodeHexLabel(cleanVal(val)) : cleanVal(val);
         if (cv != null) {
           // A "last4" that arrived longer than 4 chars is a masked PAN; trim it.
           found[field] = (field === 'last4') ? cv.replace(/\D/g, '').slice(-4) : cv;
         }
       }
-      if (val && typeof val === 'object') queue.push({ node: val, depth: depth + 1 });
+      const child = parseMaybeJson(val);
+      if (child && typeof child === 'object') queue.push({ node: child, depth: depth + 1 });
     }
   }
   return found;
@@ -307,8 +345,10 @@ function searchCardFields(root) {
 /* txnObj  — the payment or credit object (its .cardTransaction is checked first)
    paymentObj — the same object, used for tender label and tip                   */
 function cardDetails(txnObj, paymentObj) {
-  const ct    = (txnObj && txnObj.cardTransaction) || {};
-  const extra = ct.extra || {};
+  txnObj     = parseMaybeJson(txnObj);
+  paymentObj = parseMaybeJson(paymentObj);
+  const ct    = parseMaybeJson(txnObj && txnObj.cardTransaction) || {};
+  const extra = parseMaybeJson(ct.extra) || {};
   const pickExtra = (...keys) => {
     for (const k of keys) {
       const v = cleanVal(extra[k]);
@@ -327,7 +367,7 @@ function cardDetails(txnObj, paymentObj) {
     transactionNo: cleanVal(ct.transactionNo),
     txType:        cleanVal(ct.type),
     tenderLabel:   cleanVal(paymentObj && paymentObj.tender && paymentObj.tender.label),
-    appLabel:      pickExtra('APPLICATION_LABEL', 'applicationLabel'),
+    appLabel:      decodeHexLabel(pickExtra('APPLICATION_LABEL', 'applicationLabel')),
     aid:           pickExtra('APPLICATION_IDENTIFIER', 'AID', 'applicationIdentifier'),
     cvm:           pickExtra('CVM', 'cvmResult', 'PIN_STATEMENT'),
   };
@@ -443,7 +483,7 @@ function handleMessage(method, payload) {
       // and to run it again on the terminal → customer refunded TWICE.
       if (pendingRefund) {
         clearTimeout(pendingRefund.timer);
-        const credit = payload.credit || payload.refund || {};
+        const credit = parseMaybeJson(payload.credit || payload.refund) || {};
         logPayload('FINISH_OK (manual refund)', payload);
         pendingRefund.resolve({
           ok:       true,
@@ -461,7 +501,7 @@ function handleMessage(method, payload) {
       }
       if (!pendingSale) break;
       clearTimeout(pendingSale.timer);
-      const payment = payload.payment || {};
+      const payment = parseMaybeJson(payload.payment) || {};
       logPayload('FINISH_OK (sale)', payload);
       pendingSale.resolve({
         ok:        true,
@@ -508,7 +548,7 @@ function handleMessage(method, payload) {
       clearTimeout(pendingRefund.timer);
       const result = (payload.result || '').toUpperCase();
       if (result === 'SUCCESS' || result === 'APPROVED') {
-        const refund = payload.refund || {};
+        const refund = parseMaybeJson(payload.refund) || {};
         pendingRefund.resolve({
           ok:       true,
           refundId: refund.id   || null,

@@ -42,7 +42,7 @@ is a Mac (this repo). **Claude cannot run the app** — the user tests on Window
 - **Must stay in sync with** `electron-app/package.json` `"version"` (that names the installer `.exe`).
 - Shown in-app on the **login screen** and **Settings top-right**.
 - Scheme: `MAJOR.MINOR.PATCH`. Most builds = PATCH bump.
-- **Current version: 1.4.12**
+- **Current version: 1.4.13**
 - When making a build, bump both files and note it in the Work Log below.
 
 ---
@@ -195,7 +195,41 @@ pharmacy-pos/
 
 ## Work Log (newest first — append new entries here)
 
-### 1.4.12 — (current)
+### 1.4.13 — (current)
+**ROOT CAUSE FOUND — Clover nests JSON inside JSON, and the bridge only parsed the outer layer.**
+Found by reading an actual `FINISH_OK` payload off the terminal (the log added in 1.4.12 is what made this
+possible). **⚠ `server.js` changed → rebuild.**
+- The RemoteMessage envelope's `payload` is a JSON string — already parsed. But **`payment` INSIDE it is
+  *also* a JSON string**, and `cardTransaction.extra.card` is a third level. The bridge did
+  `payload.payment || {}`, so `payment` was a **string**: no `.cardTransaction`, no `.id`. Two consequences,
+  one of them serious:
+  - `cardDetails()` saw a string, found nothing, returned null → **no card block on any receipt**. This was
+    never about field names; 1.4.11's and 1.4.12's alias hunting were both chasing the wrong thing.
+  - **`payment.id` was undefined, so `clover_payment_id` has been stored as NULL for every card sale ever.**
+    `pos.js:1171` picks the refund path with `!!cardPayment?.clover_payment_id`, so **every refund has
+    silently used the UNLINKED path** — the one behind the 1.4.4 double-refund and the 1.4.5 wrong-sign
+    charge. Linked refunds have never actually run. Fixed as a side-effect of parsing the payment properly.
+- **`parseMaybeJson()`** applied to `payload.payment` / `.credit` / `.refund`, to `cardTransaction`, to
+  `extra`, and inside `searchCardFields()` so the walker descends into nested JSON strings as well as objects.
+- **EMV application label is hex-encoded ASCII** — `4D617374657263617264` = "Mastercard". New
+  `decodeHexLabel()` decodes it when the value plainly is hex and the result is printable, else leaves it be.
+- **Forbidden keys extended** from what the real payload actually contained: `exp`, `token`,
+  `expirationDate`, `vaultedCard` — alongside pan/first6/track/cvv/cardholderName. Verified against the real
+  message that first6 `558490`, expiry `203012` and `exp` `1230` reach neither the stored object nor the log.
+- **The RAW logger was useless and is fixed.** It truncated every message at **300 characters**, and Clover's
+  envelope opens with a run of nulls (`asyncInfo`, `attachment`, `attachmentEncoding`…), so the cap was spent
+  on boilerplate and cut off the payload — often the `method` too. Now logs `method=` explicitly and allows
+  8 KB. *This truncation is why 1.4.12's "send me the log line" step appeared to find nothing.*
+- **Tests — `node tests/clover-payload.test.js` (29 assertions).** Fixture mirrors the real message's
+  STRUCTURE (nested JSON strings, hex label, forbidden fields present) with every value replaced by a test
+  value — no real cardholder data in the repo. Covers the nested parse, every rendered field, the hex decode,
+  that forbidden data reaches neither the object nor the redacted log, and that cardless payloads print nothing.
+- **Verified against the real captured payload**: `paymentId` recovered (`BDE01FX7V63TG`), full block renders
+  (MC ****0182, Contactless, auth 05047E, ref 631700584684, trans 005018, Mastercard, AID A0000000041010,
+  NO_CVM_REQUIRED), no PAN/expiry leakage.
+- `?v=`: `version.js`(18). No renderer logic changed — `print.js`, `db.js`, `pos.js` untouched since 1.4.11.
+
+### 1.4.12
 **Reported: card details still not printing on 1.4.11.** Confirmed on the floor with v1.4.11 installed, so
 not a stale build. **⚠ `main.js` + `preload.js` + `server.js` changed → REBUILD REQUIRED.**
 - **ROOT CAUSE — 1.4.11 read the card fields from ONE place.** `cardDetails()` took them from
