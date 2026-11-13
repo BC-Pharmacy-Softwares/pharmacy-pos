@@ -212,41 +212,162 @@ function connect() {
 
 // ── Incoming message handler ──────────────────────────────────────────────
 
-/* Build the card/auth details printed on the customer receipt.
-   Source: Clover `Payment.cardTransaction` (com.clover.sdk.v3.payments.CardTransaction)
-   plus the payment's tender. Only the LAST 4 digits are ever taken — never the
-   full PAN, and never first6 — so nothing here is cardholder data that must be
-   protected under PCI DSS. `extra` carries the EMV fields when the card was
-   inserted/tapped; it is absent for swiped and keyed transactions. */
+/* ── Card / auth details for the customer receipt ─────────────────────────
+   Clover's Network Pay Display serialises its payment payload differently from
+   the Android SDK's Payment/CardTransaction model, and the shape varies by
+   firmware. 1.4.11 read only `payment.cardTransaction.*`; when the terminal put
+   those fields anywhere else the result was null and the receipt printed no card
+   block at all (CLAUDE.md 1.4.12). So: try the documented location first, then
+   search the whole payload for the same fields by name.
+
+   NEVER captured, wherever they appear: the full PAN, first6, track data, CVV,
+   PIN or expiry. Only the LAST 4 digits are taken, so nothing here is protected
+   cardholder data under PCI DSS.
+   ───────────────────────────────────────────────────────────────────────── */
+
+// Key names we refuse to read or log, matched after normalising to lowercase
+// alphanumerics (so "card_number", "cardNumber" and "CARD-NUMBER" all match).
+const FORBIDDEN_KEYS = new Set([
+  'pan','cardnumber','accountnumber','acctnumber','track1','track2','track3',
+  'trackdata','track1data','track2data','first6','firstsix','bin','cvv','cvc',
+  'cvv2','cid','pin','pinblock','expiry','expirationdate','expdate','expmonth',
+  'expyear','cardholdername','encrypteddata','emvdata',
+]);
+
+// Masked card numbers: safe to look at, but only the trailing 4 digits are kept.
+const MASKED_PAN_KEYS = new Set(['maskedpan','maskedcardnumber','cardnumbermasked','displaypan']);
+
+// field -> the key names that may carry it, normalised
+const CARD_FIELD_ALIASES = {
+  cardType:      ['cardtype','cardbrand','brand','paymentbrand','scheme'],
+  last4:         ['last4','lastfour','cardlast4','last4digits','lastfourdigits'],
+  entryType:     ['entrytype','entrymethod','cardentrytype','entrymode','cardentrymethod'],
+  authCode:      ['authcode','authorizationcode','approvalcode','authorizationnumber','authnumber'],
+  referenceId:   ['referenceid','rrn','retrievalreferencenumber','referencenumber'],
+  transactionNo: ['transactionno','transactionnumber','transno','traceno','tracenumber'],
+  appLabel:      ['applicationlabel','applabel'],
+  aid:           ['applicationidentifier','aid','applicationid'],
+  cvm:           ['cvm','cvmresult','pinstatement','cardholderverificationmethod'],
+  tenderLabel:   ['tenderlabel'],
+};
+
+const normKey = k => String(k).toLowerCase().replace(/[^a-z0-9]/g, '');
+
+function cleanVal(v) {
+  if (v == null) return null;
+  if (typeof v === 'number') return String(v);
+  if (typeof v !== 'string') return null;
+  const t = v.trim();
+  return t === '' ? null : t;
+}
+
+// Walk the payload breadth-first, collecting the first non-empty value for each
+// known field. Depth- and node-limited so a cyclic or huge payload cannot hang
+// the bridge mid-sale.
+function searchCardFields(root) {
+  const found = {};
+  const byAlias = new Map();
+  for (const [field, aliases] of Object.entries(CARD_FIELD_ALIASES)) {
+    for (const a of aliases) byAlias.set(a, field);
+  }
+  const seen = new Set();
+  let queue = [{ node: root, depth: 0 }];
+  let visited = 0;
+
+  while (queue.length && visited < 2000) {
+    const { node, depth } = queue.shift();
+    if (!node || typeof node !== 'object' || depth > 6) continue;
+    if (seen.has(node)) continue;
+    seen.add(node);
+    visited++;
+
+    for (const [rawKey, val] of Object.entries(node)) {
+      const k = normKey(rawKey);
+      if (FORBIDDEN_KEYS.has(k)) continue;              // never read it, never descend
+
+      if (MASKED_PAN_KEYS.has(k) && found.last4 == null) {
+        const digits = String(val == null ? '' : val).replace(/\D/g, '');
+        if (digits.length >= 4) found.last4 = digits.slice(-4);
+        continue;
+      }
+      const field = byAlias.get(k);
+      if (field && found[field] == null) {
+        const cv = cleanVal(val);
+        if (cv != null) {
+          // A "last4" that arrived longer than 4 chars is a masked PAN; trim it.
+          found[field] = (field === 'last4') ? cv.replace(/\D/g, '').slice(-4) : cv;
+        }
+      }
+      if (val && typeof val === 'object') queue.push({ node: val, depth: depth + 1 });
+    }
+  }
+  return found;
+}
+
+/* txnObj  — the payment or credit object (its .cardTransaction is checked first)
+   paymentObj — the same object, used for tender label and tip                   */
 function cardDetails(txnObj, paymentObj) {
   const ct    = (txnObj && txnObj.cardTransaction) || {};
   const extra = ct.extra || {};
-  const pick  = (...keys) => {
+  const pickExtra = (...keys) => {
     for (const k of keys) {
-      if (extra[k] != null && String(extra[k]).trim() !== '') return String(extra[k]).trim();
+      const v = cleanVal(extra[k]);
+      if (v != null) return v;
     }
     return null;
   };
-  const clean = v => (v == null || String(v).trim() === '') ? null : String(v).trim();
 
+  // 1. the documented SDK location
   const d = {
-    cardType:      clean(ct.cardType),       // VISA / MC / AMEX / DEBIT …
-    last4:         clean(ct.last4),
-    entryType:     clean(ct.entryType),      // SWIPED / KEYED / CONTACTLESS / EMV_CONTACT
-    authCode:      clean(ct.authCode),
-    referenceId:   clean(ct.referenceId),    // RRN
-    transactionNo: clean(ct.transactionNo),
-    txType:        clean(ct.type),           // AUTH / PREAUTH / …
-    tenderLabel:   clean(paymentObj && paymentObj.tender && paymentObj.tender.label),
-    // EMV fields — present only for chip/contactless
-    appLabel:      pick('APPLICATION_LABEL', 'applicationLabel'),
-    aid:           pick('APPLICATION_IDENTIFIER', 'AID', 'applicationIdentifier'),
-    cvm:           pick('CVM', 'cvmResult', 'PIN_STATEMENT'),
-    tipAmount:     (paymentObj && paymentObj.tipAmount != null) ? paymentObj.tipAmount : null,
+    cardType:      cleanVal(ct.cardType),
+    last4:         cleanVal(ct.last4),
+    entryType:     cleanVal(ct.entryType),
+    authCode:      cleanVal(ct.authCode),
+    referenceId:   cleanVal(ct.referenceId),
+    transactionNo: cleanVal(ct.transactionNo),
+    txType:        cleanVal(ct.type),
+    tenderLabel:   cleanVal(paymentObj && paymentObj.tender && paymentObj.tender.label),
+    appLabel:      pickExtra('APPLICATION_LABEL', 'applicationLabel'),
+    aid:           pickExtra('APPLICATION_IDENTIFIER', 'AID', 'applicationIdentifier'),
+    cvm:           pickExtra('CVM', 'cvmResult', 'PIN_STATEMENT'),
   };
-  // Drop empties so the receipt builder can simply skip absent fields.
+
+  // 2. fill the gaps from anywhere else in the payload
+  const searched = searchCardFields(txnObj);
+  for (const [k, v] of Object.entries(searched)) {
+    if (d[k] == null) d[k] = v;
+  }
+
+  // A tip alone is not "card details" — 1.4.11 returned {tipAmount: 0} for a
+  // payload with no card fields, which printed an empty block.
+  const identifying = ['cardType','last4','entryType','authCode','referenceId',
+                       'transactionNo','appLabel','aid','tenderLabel'];
+  const haveSomething = identifying.some(k => d[k] != null);
+  if (!haveSomething) return null;
+
+  const tip = paymentObj && paymentObj.tipAmount;
+  if (tip != null && Number(tip) > 0) d.tipAmount = tip;
+
   Object.keys(d).forEach(k => { if (d[k] == null) delete d[k]; });
-  return Object.keys(d).length ? d : null;
+  return d;
+}
+
+/* A copy of a payload safe to write to the bridge log — any forbidden key's
+   value is replaced, so the log can be sent for support without carrying
+   cardholder data. */
+function redactForLog(value, depth = 0) {
+  if (depth > 8 || value == null || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map(v => redactForLog(v, depth + 1));
+  const out = {};
+  for (const [k, v] of Object.entries(value)) {
+    out[k] = FORBIDDEN_KEYS.has(normKey(k)) ? '[redacted]' : redactForLog(v, depth + 1);
+  }
+  return out;
+}
+
+function logPayload(label, payload) {
+  try { console.log(`[clover] ${label}: ${JSON.stringify(redactForLog(payload))}`); }
+  catch (e) { console.log(`[clover] ${label}: <unloggable: ${e.message}>`); }
 }
 
 function handleMessage(method, payload) {
@@ -323,7 +444,7 @@ function handleMessage(method, payload) {
       if (pendingRefund) {
         clearTimeout(pendingRefund.timer);
         const credit = payload.credit || payload.refund || {};
-        console.log('[clover] FINISH_OK (manual refund):', JSON.stringify(payload));
+        logPayload('FINISH_OK (manual refund)', payload);
         pendingRefund.resolve({
           ok:       true,
           refundId: credit.id || null,
@@ -341,7 +462,7 @@ function handleMessage(method, payload) {
       if (!pendingSale) break;
       clearTimeout(pendingSale.timer);
       const payment = payload.payment || {};
-      console.log('[clover] FINISH_OK (sale):', JSON.stringify(payload));
+      logPayload('FINISH_OK (sale)', payload);
       pendingSale.resolve({
         ok:        true,
         paymentId: payment.id,
@@ -382,7 +503,7 @@ function handleMessage(method, payload) {
     }
 
     case 'REFUND_RESPONSE': {
-      console.log('[clover] REFUND_RESPONSE:', JSON.stringify(payload));
+      logPayload('REFUND_RESPONSE', payload);
       if (!pendingRefund) break;
       clearTimeout(pendingRefund.timer);
       const result = (payload.result || '').toUpperCase();

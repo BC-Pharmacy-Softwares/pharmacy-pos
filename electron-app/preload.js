@@ -39,6 +39,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   /** Write Clover .env from Settings and restart the bridge — returns { ok, error? } */
   saveCloverEnv: (vals) => ipcRenderer.invoke('save-clover-env', vals),
+  /** Where the Clover bridge writes its log — { path, dir, exists } */
+  getCloverLogPath: () => ipcRenderer.invoke('get-clover-log-path'),
 
   /** Open the native folder picker — returns { ok, path?, canceled? } */
   pickFolder: (current) => ipcRenderer.invoke('pick-folder', { current }),

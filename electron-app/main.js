@@ -28,6 +28,12 @@ let cloverProcess = null;
    Start Clover Local Pay bridge (clover-local-pay/server.js)
    Runs as a background child process — killed when app closes.
 ------------------------------------------------------------------ */
+/* Where the Clover bridge's output is written. Kept in userData so it survives
+   reinstalls and is writable in a packaged app. Shown in Settings -> Card Terminal. */
+function getCloverLogPath() {
+  return path.join(app.getPath('userData'), 'clover-bridge.log');
+}
+
 function startCloverBridge() {
   const cloverDir = app.isPackaged
     ? path.join(process.resourcesPath, 'app', 'clover-local-pay')
@@ -67,12 +73,31 @@ function startCloverBridge() {
   if (cloverProcess) { try { cloverProcess.kill(); } catch(_) {} cloverProcess = null; }
 
   console.log('Starting Clover Local Pay bridge (in-app, using Electron runtime)...');
+
+  // The bridge used to run with stdio:'ignore', so everything it printed —
+  // including the terminal's full payment payload — was discarded, and a card
+  // problem could not be diagnosed at all (CLAUDE.md 1.4.12). Send its output to
+  // a log file instead, trimmed when it gets large so it cannot grow unbounded.
+  let stdioTarget = 'ignore';
+  try {
+    const logPath = getCloverLogPath();
+    try {
+      const st = fs.statSync(logPath);
+      if (st.size > 2 * 1024 * 1024) fs.truncateSync(logPath, 0);
+    } catch (_) { /* no log yet */ }
+    const fd = fs.openSync(logPath, 'a');
+    fs.writeSync(fd, `\n=== bridge started ${new Date().toISOString()} ===\n`);
+    stdioTarget = ['ignore', fd, fd];
+  } catch (e) {
+    console.warn('Clover bridge: could not open log file —', e.message);
+  }
+
   // Run the bridge with Electron's OWN bundled Node runtime — no separate Node.js
   // install needed. ELECTRON_RUN_AS_NODE=1 makes the app binary behave as plain Node.
   cloverProcess = spawn(process.execPath, [serverJs], {
     cwd:   cloverDir,
     env:   { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
-    stdio: 'ignore',
+    stdio: stdioTarget,
     detached: false,
   });
 
@@ -80,7 +105,7 @@ function startCloverBridge() {
     console.warn('Clover bridge spawn error:', err.message, '— trying system node as fallback');
     try {
       cloverProcess = spawn('node', [serverJs], {
-        cwd: cloverDir, env: { ...process.env }, stdio: 'ignore', detached: false,
+        cwd: cloverDir, env: { ...process.env }, stdio: stdioTarget, detached: false,
       });
       cloverProcess.on('error', e => console.warn('Clover bridge unavailable:', e.message));
     } catch (e) { console.warn('Clover bridge unavailable:', e.message); }
@@ -477,6 +502,14 @@ function registerIpcHandlers() {
 
   // Write the Clover .env from Settings, then restart the in-app bridge.
   // Body: { CLOVER_DEVICE_IP, CLOVER_DEVICE_PORT, CLOVER_POS_ID, PORT }
+  // Path to the bridge log, so Settings can show it and offer to open the folder.
+  ipcMain.handle('get-clover-log-path', () => {
+    try {
+      const p = getCloverLogPath();
+      return { path: p, dir: path.dirname(p), exists: fs.existsSync(p) };
+    } catch (e) { return { path: null, dir: null, exists: false, error: e.message }; }
+  });
+
   ipcMain.handle('save-clover-env', async (_, vals) => {
     try {
       const cloverDir = app.isPackaged

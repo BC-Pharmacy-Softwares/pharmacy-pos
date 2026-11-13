@@ -42,7 +42,7 @@ is a Mac (this repo). **Claude cannot run the app** — the user tests on Window
 - **Must stay in sync with** `electron-app/package.json` `"version"` (that names the installer `.exe`).
 - Shown in-app on the **login screen** and **Settings top-right**.
 - Scheme: `MAJOR.MINOR.PATCH`. Most builds = PATCH bump.
-- **Current version: 1.4.11**
+- **Current version: 1.4.12**
 - When making a build, bump both files and note it in the Work Log below.
 
 ---
@@ -195,7 +195,44 @@ pharmacy-pos/
 
 ## Work Log (newest first — append new entries here)
 
-### 1.4.11 — (current)
+### 1.4.12 — (current)
+**Reported: card details still not printing on 1.4.11.** Confirmed on the floor with v1.4.11 installed, so
+not a stale build. **⚠ `main.js` + `preload.js` + `server.js` changed → REBUILD REQUIRED.**
+- **ROOT CAUSE — 1.4.11 read the card fields from ONE place.** `cardDetails()` took them from
+  `payment.cardTransaction.*`, which is the **Android SDK's** `Payment`/`CardTransaction` model. Network Pay
+  Display serialises its WebSocket payload differently and the shape varies by firmware, so when the fields
+  sat anywhere else the function returned null and the receipt printed no card block. Reproduced by running
+  the real `cardDetails()` against payload shapes: bare payment → null, fields flat on `payment` → null,
+  fields nested under another key → null. The renderer and the DB column were fine all along.
+- **Fix — try the documented location first, then search the whole payload by field name.** New
+  `searchCardFields()` walks the payload breadth-first (depth ≤ 6, ≤ 2000 nodes, cycle-safe so a odd payload
+  cannot hang the bridge mid-sale), matching key names normalised to lowercase alphanumerics, so
+  `card_number`, `cardNumber` and `CARD-NUMBER` all compare equal. Aliases cover the common spellings
+  (`cardType`/`cardBrand`/`brand`, `last4`/`lastFour`, `authCode`/`approvalCode`/`authorizationCode`,
+  `referenceId`/`rrn`, `entryType`/`entryMode`, …). Verified: flat, nested-under-another-name and
+  deeply-nested-with-a-masked-PAN payloads all now produce a full card block.
+- **A tip alone is no longer "card details".** 1.4.11 returned `{"tipAmount":0}` for a payload with no card
+  fields, which stored a row and printed an empty block. Now at least one *identifying* field is required,
+  else it returns null and nothing prints.
+- **PCI, tightened.** An explicit `FORBIDDEN_KEYS` set (pan, cardNumber, track1/2/3, first6, bin, cvv, cid,
+  pin, expiry, cardholderName, …) is never read **and never descended into**, wherever it appears. A masked
+  PAN is reduced to its trailing 4 digits; a `last4` that arrives longer than 4 chars is trimmed the same way.
+  Verified against a payload deliberately carrying a full PAN, first6, track2 and CVV — none reached the
+  stored object.
+- **The bridge log existed but went nowhere.** `main.js` spawned it with `stdio: 'ignore'`, so every line it
+  printed — including the payment payload — was discarded, and a card fault could not be diagnosed at all.
+  Now written to **`clover-bridge.log` in userData**, truncated past 2 MB, with a `=== bridge started ===`
+  banner per launch. New `getCloverLogPath()` + `get-clover-log-path` IPC + `electronAPI.getCloverLogPath`;
+  **Settings → Card Terminal** shows the path with an **Open folder** button (search entry added, per
+  gotcha 11). Payload logging goes through **`redactForLog()`**, which replaces forbidden values with
+  `[redacted]` — so the log is safe to send for support. Verified the redaction keeps a planted PAN and CVV
+  out of the written line.
+- **Not yet confirmed against the real terminal** — the field-name search is built from the plausible
+  spellings, not from a captured payload. If a card sale still prints no block on 1.4.12, the log now holds
+  the exact message and the aliases can be mapped to it directly. That is what the logging is for.
+- `?v=`: `version.js`(17), `settings.js`(61). `print.js`/`db.js`/`pos.js` unchanged from 1.4.11.
+
+### 1.4.11
 **Clover card/auth details on the receipt, and the committed WinRx password removed.**
 **⚠ `clover-local-pay/server.js` changed → rebuild (or copy it into `resources/app/`).**
 - **Receipts now print the card details the terminal returns.** The bridge only ever surfaced

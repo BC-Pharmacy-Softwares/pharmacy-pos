@@ -103,6 +103,7 @@ const SETTINGS_SEARCH = [
   { t: 'Pair with Clover',                  tab: 'clover', sel: '#btn-clover-pair',    k: 'pairing code terminal' },
   { t: 'Test the card terminal',            tab: 'clover', sel: '#btn-ping-clover',    k: 'clover connection' },
   { t: 'POS station name',                  tab: 'clover', sel: '#cl-pos-id',          k: 'clover' },
+  { t: 'Card terminal log',                 tab: 'clover', sel: '#cl-log-path',        k: 'clover bridge log diagnostics troubleshoot card payment receipt details' },
 
   { t: 'WinRx database connection',         tab: 'sql', sel: '#sql-server',            k: 'sql server patients prescriptions rx' },
   { t: 'McKesson username & password',      tab: 'mckesson', sel: '#mk-user',          k: 'pharmaclik login' },
@@ -1346,7 +1347,43 @@ class SettingsScreen {
             then click Pair here. Enter the manager password on the device — a 4-digit code will appear.
           </div>
         </div>
+
+        <div class="settings-section" style="margin-top:18px;">
+          <h4 style="font-size:14px;margin-bottom:6px;">Card terminal log</h4>
+          <div class="text-muted" style="font-size:12px;margin-bottom:8px;">
+            Everything the payment bridge reports — including what the terminal sends back
+            for each card payment. Useful when a card problem needs diagnosing.
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+            <code id="cl-log-path" style="font-size:12px;word-break:break-all;">Checking…</code>
+            <button class="btn btn-outline btn-sm" id="btn-open-clover-log" style="display:none;">&#128193; Open folder</button>
+          </div>
+        </div>
       </div>`;
+
+    /* Card terminal log path (desktop only) */
+    (async () => {
+      const el  = content.querySelector('#cl-log-path');
+      const btn = content.querySelector('#btn-open-clover-log');
+      if (!el) return;
+      if (!window.electronAPI?.getCloverLogPath) {
+        el.textContent = 'Only available in the desktop app.';
+        return;
+      }
+      try {
+        const info = await window.electronAPI.getCloverLogPath();
+        el.textContent = info?.path || 'Not available.';
+        if (info?.dir && btn) {
+          btn.style.display = '';
+          btn.addEventListener('click', () => window.electronAPI.openFolder(info.dir));
+        }
+        if (info && info.exists === false) {
+          el.textContent += '  (no entries yet — it is written when the bridge runs)';
+        }
+      } catch (e) {
+        el.textContent = 'Could not read the log path: ' + e.message;
+      }
+    })();
 
     /* Save Clover device config → writes .env + restarts the in-app bridge */
     content.querySelector('#btn-save-clover-device')?.addEventListener('click', async () => {
