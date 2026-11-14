@@ -104,6 +104,7 @@ const SETTINGS_SEARCH = [
   { t: 'Test the card terminal',            tab: 'clover', sel: '#btn-ping-clover',    k: 'clover connection' },
   { t: 'POS station name',                  tab: 'clover', sel: '#cl-pos-id',          k: 'clover' },
   { t: 'Card terminal log',                 tab: 'clover', sel: '#cl-log-path',        k: 'clover bridge log diagnostics troubleshoot card payment receipt details' },
+  { t: 'Ask to print or email a receipt',   tab: 'printer', sel: '#sel-receipt-mode',  k: 'after sale receipt print email both none prompt automatic' },
 
   { t: 'WinRx database connection',         tab: 'sql', sel: '#sql-server',            k: 'sql server patients prescriptions rx' },
   { t: 'McKesson username & password',      tab: 'mckesson', sel: '#mk-user',          k: 'pharmaclik login' },
@@ -3245,6 +3246,7 @@ class SettingsScreen {
     }
 
     const saved = await Config.get('receipt_printer') || '';
+    const mode  = await Config.get('receipt_delivery_mode') || 'ask';
 
     // Sort: default printer first, then alphabetical
     printers.sort((a, b) => (b.isDefault ? 1 : 0) - (a.isDefault ? 1 : 0) || a.name.localeCompare(b.name));
@@ -3274,8 +3276,28 @@ class SettingsScreen {
             : `${printers.length} printer${printers.length !== 1 ? 's' : ''} found.`}
         </div>
       </div>
+      <hr style="margin:18px 0;" />
+      <div class="form-group" style="max-width:420px;">
+        <label>After a sale</label>
+        <select id="sel-receipt-mode"
+                style="width:100%;padding:8px 10px;border:1px solid var(--border);
+                       border-radius:var(--radius);background:var(--surface2);
+                       color:var(--text);font-size:13px;">
+          <option value="ask"${mode === 'ask' ? ' selected' : ''}>Ask — Print / Email / Both / None</option>
+          <option value="always"${mode === 'always' ? ' selected' : ''}>Always print, don't ask</option>
+          <option value="never"${mode === 'never' ? ' selected' : ''}>Never print automatically</option>
+        </select>
+        <div class="text-muted" style="font-size:12px;margin-top:6px;">
+          <strong>Ask</strong> shows a small prompt at the corner of the screen after each sale
+          (keys: <strong>P</strong> print, <strong>E</strong> email, <strong>B</strong> both, <strong>Esc</strong> none).
+          If nobody chooses within 15 seconds it <strong>prints</strong>, so a receipt is never missed.
+          Email is only offered when email is set up in Email &amp; Reports.<br/>
+          Refunds always print, whichever option is chosen. Any sale can be reprinted later
+          from the POS with <strong>Find Paid Receipt</strong>.
+        </div>
+      </div>
       <div style="display:flex;gap:10px;margin-top:16px;flex-wrap:wrap;">
-        <button class="btn btn-primary" id="btn-save-printer">Save Printer</button>
+        <button class="btn btn-primary" id="btn-save-printer">Save</button>
         <button class="btn btn-outline" id="btn-test-print"
                 style="${!saved ? 'display:none;' : ''}">&#128438; Test Print</button>
       </div>`;
@@ -3289,11 +3311,16 @@ class SettingsScreen {
     };
 
     content.querySelector('#btn-save-printer').addEventListener('click', async () => {
-      const name = content.querySelector('#sel-printer').value;
-      await Config.set('receipt_printer', name || '');
+      const name    = content.querySelector('#sel-printer').value;
+      const newMode = content.querySelector('#sel-receipt-mode').value;
+      // setMany, not two Config.set calls — those race (CLAUDE.md gotcha 4).
+      await Config.setMany({ receipt_printer: name || '', receipt_delivery_mode: newMode });
       const testBtn = content.querySelector('#btn-test-print');
       testBtn.style.display = name ? '' : 'none';
-      showMsg(name ? `Receipt printer set to: ${name}` : 'No printer selected — print dialog will be shown.', 'success');
+      const modeTxt = newMode === 'always' ? 'prints automatically'
+                    : newMode === 'never'  ? 'is not printed automatically'
+                    : 'asks Print / Email / Both';
+      showMsg(`${name ? `Printer: ${name}` : 'No printer selected — a print dialog will be shown'} · After a sale: ${modeTxt}.`, 'success');
     });
 
     content.querySelector('#btn-test-print')?.addEventListener('click', async () => {

@@ -485,11 +485,29 @@ const Print = (() => {
       '</style></head><body>' + body + '</body></html>';
   }
 
-  /* Print thermal receipt at the counter */
+  /* Print thermal receipt at the counter.
+
+     Returns { ok, via, reason } so the caller can SAY what happened:
+       { ok:true,  via:'printer' }          went silently to the configured printer
+       { ok:true,  via:'dialog', reason }   a print dialog was opened instead
+       { ok:false, reason }                 nothing was printed
+
+     Before 1.4.14 this returned nothing and swallowed every failure into a
+     console.warn, and all four callers invoked it without `await` or `.catch()`.
+     A receipt could fail to print with no trace anywhere (CLAUDE.md 1.4.14).
+     NB 'dialog' means the dialog was OPENED — whether the user then printed or
+     cancelled is not observable, so it is reported as a fallback, not success. */
   async function printReceipt(txn, items, payments, patient) {
-    var ph      = await loadPharmacy();
-    var html    = await generateReceiptHTML(txn, items, payments, patient, null);
-    var fullDoc = wrapThermal(html, ph);
+    var fullDoc, ph;
+    try {
+      ph          = await loadPharmacy();
+      var html    = await generateReceiptHTML(txn, items, payments, patient, null);
+      fullDoc     = wrapThermal(html, ph);
+    } catch (e) {
+      return { ok: false, reason: 'Could not build the receipt: ' + e.message };
+    }
+
+    var fallbackReason = null;
 
     if (window.electronAPI && window.electronAPI.printReceiptHtml) {
       var printerName = await Config.get('receipt_printer');
@@ -497,30 +515,39 @@ const Print = (() => {
         try {
           var paperMm = parseInt((ph && ph.paperWidth) || '80') || 80;
           var result = await window.electronAPI.printReceiptHtml(fullDoc, printerName, paperMm);
-          if (result && result.ok) return;
-          console.warn('Silent print failed:', result && result.reason, '— falling back to dialog');
+          if (result && result.ok) return { ok: true, via: 'printer' };
+          fallbackReason = (result && result.reason) || 'the printer did not accept the job';
         } catch (e) {
-          console.warn('printReceiptHtml error:', e.message, '— falling back to dialog');
+          fallbackReason = e.message;
         }
+      } else {
+        fallbackReason = 'no receipt printer is set in Settings → Printing → Receipt Printer';
       }
     }
 
     /* Print via browser dialog — inject an iframe with the full styled document
        so the thermal CSS (@page 80mm, .rf, .rd, etc.) is applied correctly.     */
-    var frame = document.getElementById('receipt-print-frame');
-    if (frame) frame.remove();
-    frame = document.createElement('iframe');
-    frame.id    = 'receipt-print-frame';
-    frame.style.cssText = 'position:fixed;left:-9999px;top:0;width:302px;height:800px;border:none;';
-    document.body.appendChild(frame);
-    frame.contentDocument.open();
-    frame.contentDocument.write(fullDoc);
-    frame.contentDocument.close();
-    setTimeout(function() {
-      frame.contentWindow.focus();
-      frame.contentWindow.print();
-      setTimeout(function() { frame.remove(); }, 1000);
-    }, 300);
+    try {
+      var frame = document.getElementById('receipt-print-frame');
+      if (frame) frame.remove();
+      frame = document.createElement('iframe');
+      frame.id    = 'receipt-print-frame';
+      frame.style.cssText = 'position:fixed;left:-9999px;top:0;width:302px;height:800px;border:none;';
+      document.body.appendChild(frame);
+      frame.contentDocument.open();
+      frame.contentDocument.write(fullDoc);
+      frame.contentDocument.close();
+      setTimeout(function() {
+        try {
+          frame.contentWindow.focus();
+          frame.contentWindow.print();
+        } catch (_) { /* window closed before the dialog opened */ }
+        setTimeout(function() { try { frame.remove(); } catch (_) {} }, 1000);
+      }, 300);
+      return { ok: true, via: 'dialog', reason: fallbackReason };
+    } catch (e) {
+      return { ok: false, reason: fallbackReason || e.message };
+    }
   }
 
   /* Generate receipt as base64 PDF — for SQL INSERT into WinRx */

@@ -104,7 +104,13 @@ const SettingsHealth = (() => {
     return out;
   }
 
-  return { check, checkFolder, FOLDERS };
+  /* canEmail() — exported so the POS can decide whether to OFFER emailing a
+     receipt. One definition of "email works", not two (CLAUDE.md 1.4.14). */
+  async function canEmail() {
+    try { return !emailProblem(await Config.getAll()); } catch (_) { return false; }
+  }
+
+  return { check, checkFolder, canEmail, emailProblem, FOLDERS };
 })();
 
 

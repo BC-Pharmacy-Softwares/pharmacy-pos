@@ -1209,7 +1209,13 @@ class POSScreen {
         const refundedItems = DB.getItemsForTransaction(refundTxnId);
         const patient     = txn.patient_id ? DB.getPatient(txn.patient_id) : null;
         refundTxn.notes   = `↩ Refund for Txn #${txnId} — ${reason}`;
-        Print.printReceipt(refundTxn, refundedItems, [], patient);
+        // A refund always prints — money leaving the till should produce paper
+        // whatever the receipt-delivery mode says. Report it if it doesn't.
+        Print.printReceipt(refundTxn, refundedItems, [], patient)
+          .then(r => { if (!r || !r.ok || r.via !== 'printer') {
+            this._setStatus('error', `Refund saved, but printing failed — ${(r && r.reason) || 'unknown error'}`);
+          } })
+          .catch(e => this._setStatus('error', 'Refund saved, but printing failed — ' + e.message));
 
         confirmBtn.textContent      = '✓ Refund Complete';
         confirmBtn.style.background = 'var(--success)';
@@ -1678,6 +1684,8 @@ class POSScreen {
         if (savedPatient?.phn) {
           this._showRphSignatureModal(saved.txn, saved.items, saved.payments, savedPatient);
         }
+        // $0 pick-ups used to print via _saveTransactionMulti; now they ask too.
+        this._offerPostSaleReceipt(saved, savedPatient);
       }).catch(e => alert('Error saving transaction: ' + e.message));
       return;
     }
@@ -2031,8 +2039,8 @@ class POSScreen {
         if (savedPatient?.phn) {
           this._showRphSignatureModal(saved.txn, saved.items, saved.payments, savedPatient);
         }
-        // Offer to email the receipt (corner prompt — won't block the RPh modal)
-        this._offerPostSaleEmail(saved, savedPatient);
+        // Print / email the receipt (corner prompt — won't block the RPh modal)
+        this._offerPostSaleReceipt(saved, savedPatient);
       } catch(e) {
         errEl.style.display = 'block'; errEl.textContent = 'Error: ' + e.message;
       }
@@ -2269,8 +2277,8 @@ class POSScreen {
     const txn      = DB.getTransaction(txnId);
     const items    = DB.getItemsForTransaction(txnId);
     const payments = DB.getPaymentsForTransaction(txnId);
-    Print.printReceipt(txn, items, payments, this._patient);
-
+    // Printing is decided by _offerPostSaleReceipt (Settings → Receipt Printer),
+    // which every completion path calls. Don't print here as well.
     return { txnId, txn, items, payments };
   }
 
@@ -3753,13 +3761,20 @@ class POSScreen {
     });
   }
 
-  async _emailReceipt(txn, items, payments, patient) {
+  /* opts.silent — don't write to the status bar; the caller reports instead
+     (used by _deliverReceipt so "Both" can say one combined thing).
+     Returns { ok, addr, error, cancelled }. */
+  async _emailReceipt(txn, items, payments, patient, opts = {}) {
+    const say = (type, msg) => { if (!opts.silent) this._setStatus(type, msg); };
     const preset = patient?.email || '';
     const addr = await this._askEmailAddress(preset);
-    if (addr === null) return;          // cancelled
-    if (!/.+@.+\..+/.test(addr)) { this._setStatus('error', 'Enter a valid email address.'); return; }
+    if (addr === null) return { ok: false, cancelled: true };
+    if (!/.+@.+\..+/.test(addr)) {
+      say('error', 'Enter a valid email address.');
+      return { ok: false, error: 'invalid address' };
+    }
 
-    this._setStatus('loading', 'Emailing receipt…');
+    say('loading', 'Emailing receipt…');
     try {
       const ph     = await Config.getAll();
       const inner  = await Print.generateReceiptHTML(txn, items, payments, patient, null);
@@ -3775,41 +3790,130 @@ class POSScreen {
         textBody: `Receipt #${txn.transaction_id} — total ${Tax.fmt(txn.total_amount)}`,
       });
       if (res && res.ok === false) throw new Error(res.error || 'send failed');
-      this._setStatus('success', `Receipt emailed to ${addr}`);
+      say('success', `Receipt emailed to ${addr}`);
+      return { ok: true, addr };
     } catch(e) {
-      this._setStatus('error', 'Email failed: ' + e.message);
+      say('error', 'Email failed: ' + e.message);
+      return { ok: false, addr, error: e.message };
     }
   }
 
-  /* ---- After a sale: offer to email the receipt (non-intrusive corner prompt) ---- */
-  _offerPostSaleEmail(saved, patient) {
+  /* ---- After a sale: how should the customer get their receipt? ----
+
+     Modes (Config `receipt_delivery_mode`, set in Settings → Receipt Printer):
+       'always' — print, no prompt (what the POS did before 1.4.14)
+       'ask'    — the corner prompt below (default)
+       'never'  — nothing; staff reprint from Find Paid Receipt if asked
+
+     The prompt PRINTS when it times out rather than doing nothing. Gating a
+     receipt on someone clicking would mean a distracted cashier or a customer
+     who walks off ends up with no receipt at all, which the old unconditional
+     print could never do (CLAUDE.md 1.4.14).                                  */
+  async _offerPostSaleReceipt(saved, patient) {
     if (!saved?.txn) return;
-    // Remove any existing prompt
-    document.getElementById('post-sale-email')?.remove();
+    let mode = 'ask';
+    try { mode = (await Config.get('receipt_delivery_mode')) || 'ask'; } catch(_) {}
+
+    if (mode === 'never')  return;
+    if (mode === 'always') { await this._deliverReceipt(saved, patient, 'print'); return; }
+
+    document.getElementById('post-sale-receipt')?.remove();
+
+    // Only offer Email when it can actually send — promising a customer an
+    // email that then fails is worse than not offering it.
+    let canEmail = false;
+    try { canEmail = await SettingsHealth.canEmail(); } catch(_) {}
+
+    const SECS = 15;
+    let   left = SECS;
+    let   done = false;
 
     const box = document.createElement('div');
-    box.id = 'post-sale-email';
+    box.id = 'post-sale-receipt';
     box.style.cssText = `position:fixed;bottom:16px;right:16px;z-index:9000;
       background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
-      box-shadow:0 4px 20px rgba(0,0,0,.25);padding:14px 16px;max-width:300px;`;
+      box-shadow:0 4px 20px rgba(0,0,0,.25);padding:14px 16px;max-width:330px;`;
     box.innerHTML = `
-      <div style="font-weight:700;font-size:14px;margin-bottom:4px;">✓ Sale complete — #${saved.txn.transaction_id}</div>
-      <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px;">
-        ${patient?.email ? `Email receipt to ${patient.email}?` : 'Email a copy of the receipt?'}
+      <div style="font-weight:700;font-size:14px;margin-bottom:2px;">
+        &#10003; Sale complete — #${saved.txn.transaction_id}
+        <span style="float:right;">${Tax.fmt(saved.txn.total_amount || 0)}</span>
       </div>
-      <div style="display:flex;gap:8px;">
-        <button id="pse-email" class="btn btn-primary btn-sm" style="flex:1;">✉ Email Receipt</button>
-        <button id="pse-no" class="btn btn-outline btn-sm">No</button>
+      <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px;">How should they get the receipt?</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;">
+        <button id="psr-print" class="btn btn-primary btn-sm" style="flex:1;">&#128424; Print <u>P</u></button>
+        ${canEmail ? '<button id="psr-email" class="btn btn-outline btn-sm" style="flex:1;">&#9993; Email <u>E</u></button>' : ''}
+        ${canEmail ? '<button id="psr-both" class="btn btn-outline btn-sm" style="flex:1;">Both <u>B</u></button>' : ''}
+        <button id="psr-none" class="btn btn-outline btn-sm">None</button>
+      </div>
+      <div id="psr-count" style="font-size:11px;color:var(--text-muted);margin-top:8px;">
+        Printing in ${SECS}s…
       </div>`;
     document.body.appendChild(box);
 
-    box.querySelector('#pse-no').addEventListener('click', () => box.remove());
-    box.querySelector('#pse-email').addEventListener('click', () => {
+    const cleanup = () => {
+      done = true;
+      clearInterval(tick);
+      document.removeEventListener('keydown', onKey, true);
       box.remove();
-      this._emailReceipt(saved.txn, saved.items, saved.payments, patient);
-    });
-    // Auto-dismiss after 20s
-    setTimeout(() => box.remove(), 20000);
+    };
+    const choose = (action) => {
+      if (done) return;
+      cleanup();
+      this._deliverReceipt(saved, patient, action);
+    };
+
+    const onKey = (e) => {
+      const k = (e.key || '').toLowerCase();
+      if (k === 'p')                  { e.preventDefault(); e.stopPropagation(); choose('print'); }
+      else if (k === 'e' && canEmail) { e.preventDefault(); e.stopPropagation(); choose('email'); }
+      else if (k === 'b' && canEmail) { e.preventDefault(); e.stopPropagation(); choose('both'); }
+      else if (k === 'enter')         { e.preventDefault(); e.stopPropagation(); choose('print'); }
+      else if (k === 'escape')        { e.preventDefault(); e.stopPropagation(); cleanup(); }
+    };
+    document.addEventListener('keydown', onKey, true);
+
+    box.querySelector('#psr-print').addEventListener('click', () => choose('print'));
+    box.querySelector('#psr-email')?.addEventListener('click', () => choose('email'));
+    box.querySelector('#psr-both')?.addEventListener('click', () => choose('both'));
+    box.querySelector('#psr-none').addEventListener('click', cleanup);
+
+    const tick = setInterval(() => {
+      left--;
+      const el = box.querySelector('#psr-count');
+      if (el) el.textContent = `Printing in ${left}s…`;
+      if (left <= 0) choose('print');          // timeout prints — never nothing
+    }, 1000);
+  }
+
+  /* Carry out the chosen delivery and SAY what actually happened.
+     action: 'print' | 'email' | 'both'                                        */
+  async _deliverReceipt(saved, patient, action) {
+    const notes = [];
+    let worst = 'success';
+
+    if (action === 'print' || action === 'both') {
+      let r;
+      try { r = await Print.printReceipt(saved.txn, saved.items, saved.payments, patient); }
+      catch (e) { r = { ok: false, reason: e.message }; }
+
+      if (r && r.ok && r.via === 'printer')      notes.push('Printed');
+      else if (r && r.ok && r.via === 'dialog') {
+        notes.push(`Print dialog opened${r.reason ? ` — ${r.reason}` : ''}`);
+        worst = 'error';
+      } else {
+        notes.push(`Print failed — ${(r && r.reason) || 'unknown error'}`);
+        worst = 'error';
+      }
+    }
+
+    if (action === 'email' || action === 'both') {
+      const r = await this._emailReceipt(saved.txn, saved.items, saved.payments, patient, { silent: true });
+      if (r && r.ok)            notes.push(`Emailed to ${r.addr}`);
+      else if (r && r.cancelled) notes.push('Email cancelled');
+      else { notes.push(`Email failed — ${(r && r.error) || 'unknown error'}`); worst = 'error'; }
+    }
+
+    if (notes.length) this._setStatus(worst, notes.join(' · '));
   }
 
   /* ---- Find a paid receipt by transaction # and reprint ---- */
@@ -3867,8 +3971,13 @@ class POSScreen {
           <button class="btn btn-outline" id="fr-email" style="flex:1;">✉ Email Receipt</button>
         </div>`;
       resultEl.querySelector('#fr-reprint').addEventListener('click', () => {
-        Print.printReceipt(txn, items, payments, patient);
-        this._setStatus('success', `Reprinted receipt #${id}`);
+        Print.printReceipt(txn, items, payments, patient)
+          .then(r => {
+            if (r && r.ok && r.via === 'printer') this._setStatus('success', `Reprinted receipt #${id}`);
+            else if (r && r.ok)                   this._setStatus('error', `Print dialog opened for #${id}${r.reason ? ` — ${r.reason}` : ''}`);
+            else this._setStatus('error', `Reprint failed — ${(r && r.reason) || 'unknown error'}`);
+          })
+          .catch(e => this._setStatus('error', 'Reprint failed — ' + e.message));
         close();
       });
       resultEl.querySelector('#fr-email').addEventListener('click', () => {

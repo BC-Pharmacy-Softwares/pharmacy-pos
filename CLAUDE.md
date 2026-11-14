@@ -42,7 +42,7 @@ is a Mac (this repo). **Claude cannot run the app** — the user tests on Window
 - **Must stay in sync with** `electron-app/package.json` `"version"` (that names the installer `.exe`).
 - Shown in-app on the **login screen** and **Settings top-right**.
 - Scheme: `MAJOR.MINOR.PATCH`. Most builds = PATCH bump.
-- **Current version: 1.4.13**
+- **Current version: 1.4.14**
 - When making a build, bump both files and note it in the Work Log below.
 
 ---
@@ -195,7 +195,42 @@ pharmacy-pos/
 
 ## Work Log (newest first — append new entries here)
 
-### 1.4.13 — (current)
+### 1.4.14 — (current)
+**"Ask before printing" — the receipt prompt now offers Print / Email / Both / None.**
+No `main.js`/`preload.js` change, but rebuild so `resources/app/` stays in step.
+- **Why.** Every sale printed, unconditionally, including $0 pick-ups — paper nobody took. The old corner
+  prompt only offered *email*, after the receipt had already printed.
+- **New `_offerPostSaleReceipt()`** replaces `_offerPostSaleEmail`, driven by Config
+  **`receipt_delivery_mode`** (`ask` default | `always` | `never`), set in **Settings → Printing → Receipt
+  Printer**. Corner prompt, keyboard-first: **P** print · **E** email · **B** both · **Esc** none · Enter =
+  print. Listener is capture-phase and removed on dismiss.
+- **The timeout PRINTS — it never does nothing.** 15 s with a visible countdown. Gating a receipt on a click
+  would mean a distracted cashier or a customer who walks off ends up with nothing, which the old
+  unconditional print could never do. "None" stays a deliberate choice.
+- **Email is only offered when it can actually send** — `SettingsHealth.canEmail()`, newly exported so the
+  rule lives in ONE place rather than being re-derived in `pos.js` (same reasoning as gotcha 12). Promising a
+  customer an email that then fails is worse than not offering.
+- **`Print.printReceipt()` now returns `{ ok, via, reason }`** instead of returning nothing and swallowing
+  failures into `console.warn`. `via:'printer'` = printed silently; `via:'dialog'` = a dialog was opened
+  (reported as a problem, since whether the user then printed is not observable); `ok:false` = nothing
+  printed. All four call sites now `await`/`.catch()` it — **previously none did**, so a receipt could fail
+  to print with no trace anywhere (the review's "silent failure" pattern again).
+- **Staff are told what happened**: `Printed` · `Emailed to <addr>` · `Print failed — printer offline` ·
+  `Print dialog opened — no receipt printer is set…`, combined for "Both" (`Printed · Emailed to …`).
+- **Deliberately NOT behind the prompt**: refunds always print (money leaving the till should produce paper)
+  — and now report if printing fails; the WinRx pickup document and the BTC/controlled PDF keep saving
+  automatically, as regulatory records rather than customer receipts.
+- `_saveTransactionMulti` no longer prints — **both** completion paths call the prompt instead (the $0
+  pick-up path previously relied on that print and would otherwise have lost its receipt).
+- `Config.setMany` used to save printer + mode together (gotcha 4), search entry added (gotcha 11).
+- **Tests — `node tests/receipt-delivery.test.js` (18 assertions)**: pulls the real `_deliverReceipt` out of
+  `pos.js` and drives it with stubbed outcomes, so the exact wording staff see is asserted — silent print,
+  dialog fallback, print failure, a thrown print, email success/failure/cancel, and Both with one side failing.
+- **Not yet exercised on the Windows POS** — logic is verified in Node; the prompt itself (countdown, keys,
+  focus behaviour alongside the RPh modal) needs a real sale to confirm.
+- `?v=`: `version.js`(19), `settings-health.js`(3), `print.js`(37), `pos.js`(86), `settings.js`(62).
+
+### 1.4.13
 **ROOT CAUSE FOUND — Clover nests JSON inside JSON, and the bridge only parsed the outer layer.**
 Found by reading an actual `FINISH_OK` payload off the terminal (the log added in 1.4.12 is what made this
 possible). **⚠ `server.js` changed → rebuild.**
