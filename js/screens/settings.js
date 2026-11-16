@@ -1893,9 +1893,11 @@ class SettingsScreen {
 
     const toTag = p => ({
       description: p.description,
-      price:       p.price != null ? p.price
-                  : (p.price_override != null ? p.price_override
-                  : (p.suggested_retail || p.regular_unit_price || 0)),
+      // DB.effectivePrice is the single price rule (sale → override → retail).
+      // It NEVER falls back to regular_unit_price — that is McKesson's COST, and
+      // a shelf tag is a public price. 1.4.10 removed that fallback from the POS
+      // and the low-stock report but missed this third site (CLAUDE.md 1.4.17).
+      price:       DB.effectivePrice(p).price,
       barcode:     p.upc || p.upc_unit || p.gtin_unit || '',
       sku:         p.mckesson_item_no || '',
       din:         p.din || '',
@@ -2124,40 +2126,72 @@ class SettingsScreen {
           </div>
           <div class="modal-body">
 
-            ${isCatalog ? `
-              <div style="background:var(--surface2);border-radius:var(--radius);padding:8px 14px;margin-bottom:14px;font-size:12px;color:var(--text-muted);">
-                McKesson# ${p.mckesson_item_no||'—'} &nbsp;·&nbsp; Sync price: ${Tax.fmt(p.suggested_retail||0)}
-              </div>
-              <div style="display:grid;grid-template-columns:2fr 1fr;gap:12px;margin-bottom:14px;">
-                <div class="form-group" style="margin:0;">
-                  <label>Description</label>
-                  <input type="text" id="mp-desc" value="${(p.description||'').replace(/"/g,'&quot;')}" placeholder="Product name" />
-                </div>
-                <div class="form-group" style="margin:0;">
-                  <label>UPC / Barcode</label>
-                  <input type="text" id="mp-upc" value="${(p.upc_unit||p.gtin_unit||'').replace(/"/g,'&quot;')}" placeholder="Optional" />
-                </div>
-              </div>` : ''}
+            <!-- Both product types get the SAME card (1.4.17). Only the source
+                 line and the price hint differ, because a catalogue price comes
+                 from McKesson and a custom one does not. -->
+            <div style="background:var(--surface2);border-radius:var(--radius);padding:8px 14px;margin-bottom:14px;font-size:12px;color:var(--text-muted);">
+              ${isCatalog
+                ? `McKesson# ${p.mckesson_item_no||'—'} &nbsp;·&nbsp; Catalogue price: ${Tax.fmt(p.suggested_retail||0)}`
+                  + (p.regular_unit_price ? ` &nbsp;·&nbsp; McKesson cost: ${Tax.fmt(p.regular_unit_price)}` : '')
+                : (isNew ? 'Custom product — added by you, not from the McKesson catalogue'
+                         : 'Custom product &nbsp;·&nbsp; not synced from McKesson')}
+            </div>
 
-            ${!isCatalog ? `
-              <div style="display:grid;grid-template-columns:2fr 1fr;gap:12px;">
-                <div class="form-group">
-                  <label>Description <span style="color:var(--danger);">*</span></label>
-                  <input type="text" id="mp-desc" value="${p?.description||''}" placeholder="Product name" />
-                </div>
-                <div class="form-group">
-                  <label>UPC / Barcode</label>
-                  <input type="text" id="mp-upc" value="${p?.upc||''}" placeholder="Optional" />
-                </div>
+            <div style="display:grid;grid-template-columns:2fr 1fr;gap:12px;">
+              <div class="form-group">
+                <label>Description <span style="color:var(--danger);">*</span></label>
+                <input type="text" id="mp-desc" value="${((isCatalog ? p.description : p?.description)||'').replace(/"/g,'&quot;')}" placeholder="Product name" />
               </div>
               <div class="form-group">
-                <label>Price</label>
-                <input type="number" id="mp-price" step="0.01" min="0" value="${p?.price??''}" placeholder="0.00" style="max-width:160px;" />
-              </div>` : `
+                <label>UPC / Barcode</label>
+                <input type="text" id="mp-upc" value="${((isCatalog ? (p.upc_unit||p.gtin_unit) : p?.upc)||'').replace(/"/g,'&quot;')}" placeholder="Optional" />
+              </div>
+            </div>
+
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;align-items:start;">
               <div class="form-group">
-                <label>Price Override <span style="font-weight:400;color:var(--text-muted);">(leave blank to use sync price)</span></label>
-                <input type="number" id="mp-price" step="0.01" min="0" value="${p?.price_override??''}" placeholder="${Tax.fmt(p?.suggested_retail||0)}" style="max-width:160px;" />
-              </div>`}
+                <label>Cost <span style="font-weight:400;color:var(--text-muted);">(what you pay)</span></label>
+                <input type="number" id="mp-cost" step="0.01" min="0"
+                  value="${p?.unit_cost??''}"
+                  placeholder="${isCatalog && p?.regular_unit_price ? Number(p.regular_unit_price).toFixed(2) : '0.00'}" />
+                ${isCatalog ? `<div style="font-size:11px;color:var(--text-muted);margin-top:3px;">Blank = McKesson's cost</div>` : ''}
+              </div>
+              <div class="form-group">
+                <label>Selling Price</label>
+                <input type="number" id="mp-price" step="0.01" min="0"
+                  value="${isCatalog ? (p?.price_override??'') : (p?.price??'')}"
+                  placeholder="${isCatalog ? Number(p?.suggested_retail||0).toFixed(2) : '0.00'}" />
+                ${isCatalog ? `<div style="font-size:11px;color:var(--text-muted);margin-top:3px;">Blank = catalogue price</div>` : ''}
+              </div>
+              <div class="form-group">
+                <label>Margin</label>
+                <div id="mp-margin" style="padding:9px 0;font-weight:700;font-size:15px;">—</div>
+                <div style="font-size:11px;color:var(--text-muted);">Price − cost, before tax</div>
+              </div>
+            </div>
+
+            <!-- In-house promotion: the pharmacy's own sale, not McKesson's -->
+            <div class="form-group" style="background:var(--surface2);border-radius:var(--radius);padding:12px 14px;margin-bottom:14px;">
+              <label style="font-weight:700;display:block;margin-bottom:8px;">
+                In-house promotion <span style="font-weight:400;color:var(--text-muted);">(optional)</span>
+              </label>
+              <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;">
+                <div class="form-group" style="margin:0;">
+                  <label>Sale Price</label>
+                  <input type="number" id="mp-sale-price" step="0.01" min="0"
+                    value="${p?.sale_price??''}" placeholder="0.00" />
+                </div>
+                <div class="form-group" style="margin:0;">
+                  <label>Starts</label>
+                  <input type="date" id="mp-sale-start" value="${p?.sale_start||''}" />
+                </div>
+                <div class="form-group" style="margin:0;">
+                  <label>Ends</label>
+                  <input type="date" id="mp-sale-end" value="${p?.sale_end||''}" />
+                </div>
+              </div>
+              <div id="mp-sale-status" style="font-size:12px;margin-top:8px;color:var(--text-muted);"></div>
+            </div>
 
             <div style="display:flex;gap:20px;margin-bottom:14px;">
               <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
@@ -2234,10 +2268,83 @@ class SettingsScreen {
       modal.querySelector('.modal-close').addEventListener('click', close);
       modal.querySelector('#mp-cancel').addEventListener('click', close);
 
+      /* Live margin. Falls back to the figures the card shows as placeholders,
+         so a catalogue product with neither field filled still shows its real
+         McKesson margin rather than a dash. */
+      const fallbackCost  = isCatalog ? Number(p?.regular_unit_price || 0) : 0;
+      const fallbackPrice = isCatalog ? Number(p?.suggested_retail  || 0) : 0;
+      const updateMargin = () => {
+        const el = modal.querySelector('#mp-margin');
+        if (!el) return;
+        const costRaw  = modal.querySelector('#mp-cost').value;
+        const priceRaw = modal.querySelector('#mp-price').value;
+        const cost  = costRaw  !== '' ? parseFloat(costRaw)  : fallbackCost;
+        const price = priceRaw !== '' ? parseFloat(priceRaw) : fallbackPrice;
+        if (!(price > 0) || !(cost > 0)) {
+          el.textContent = '—';
+          el.style.color = 'var(--text-muted)';
+          return;
+        }
+        const diff = Tax.round2(price - cost);
+        const pctN = Math.round((diff / price) * 100);
+        el.textContent = `${Tax.fmt(diff)} · ${pctN}%`;
+        el.style.color = diff < 0 ? 'var(--danger)' : 'var(--success)';
+      };
+      /* Says plainly whether the sale is running TODAY, so nobody sets one up
+         and assumes it is live when the dates say otherwise. */
+      const updateSaleStatus = () => {
+        const el = modal.querySelector('#mp-sale-status');
+        if (!el) return;
+        const sp    = parseFloat(modal.querySelector('#mp-sale-price').value);
+        const start = modal.querySelector('#mp-sale-start').value;
+        const end   = modal.querySelector('#mp-sale-end').value;
+        if (!(sp > 0)) {
+          el.textContent = 'No promotion — the selling price above is charged.';
+          el.style.color = 'var(--text-muted)';
+          return;
+        }
+        if (end && start && end < start) {
+          el.textContent = '⚠ The end date is before the start date — this sale will never run.';
+          el.style.color = 'var(--danger)';
+          return;
+        }
+        const live = DB.saleIsActive({ sale_price: sp, sale_start: start, sale_end: end });
+        if (live) {
+          el.textContent = `✓ Running today — ${Tax.fmt(sp)} will be charged${end ? `, until ${end}` : ' until you remove it'}.`;
+          el.style.color = 'var(--success)';
+        } else if (start && !end) {
+          el.textContent = `Scheduled — starts ${start}.`;
+          el.style.color = 'var(--text-muted)';
+        } else if (end && end < (new Date()).toISOString().slice(0,10)) {
+          el.textContent = `Finished on ${end} — the normal price is being charged.`;
+          el.style.color = 'var(--text-muted)';
+        } else {
+          el.textContent = `Scheduled — ${start || 'any time'} to ${end || 'no end date'}.`;
+          el.style.color = 'var(--text-muted)';
+        }
+      };
+      ['#mp-cost', '#mp-price'].forEach(sel =>
+        modal.querySelector(sel).addEventListener('input', updateMargin));
+      ['#mp-sale-price', '#mp-sale-start', '#mp-sale-end'].forEach(sel =>
+        modal.querySelector(sel).addEventListener('input', updateSaleStatus));
+      updateMargin();
+      updateSaleStatus();
+
       modal.querySelector('#mp-save').addEventListener('click', () => {
         const errEl    = modal.querySelector('#mp-err');
         const priceVal = modal.querySelector('#mp-price').value;
         const price    = priceVal !== '' ? parseFloat(priceVal) : null;
+        const costVal  = modal.querySelector('#mp-cost').value;
+        const unitCost = costVal !== '' ? parseFloat(costVal) : null;
+        const salePriceVal = modal.querySelector('#mp-sale-price').value;
+        const salePrice    = salePriceVal !== '' ? parseFloat(salePriceVal) : null;
+        const saleStart    = modal.querySelector('#mp-sale-start').value || null;
+        const saleEnd      = modal.querySelector('#mp-sale-end').value || null;
+        if (salePrice != null && saleStart && saleEnd && saleEnd < saleStart) {
+          errEl.style.display = 'block';
+          errEl.textContent = 'The promotion end date is before its start date.';
+          return;
+        }
         const qty      = modal.querySelector('#mp-qty').value !== '' ? parseFloat(modal.querySelector('#mp-qty').value) : null;
         const threshold= modal.querySelector('#mp-threshold').value !== '' ? parseFloat(modal.querySelector('#mp-threshold').value) : null;
         const gst      = modal.querySelector('#mp-gst').checked;
@@ -2252,7 +2359,9 @@ class SettingsScreen {
           const upc  = modal.querySelector('#mp-upc').value.trim();
           DB.updateCatalogProduct(p.product_id, {
             description: desc || p.description, upc_unit: upc || null,
-            price_override: price, gst_applicable: gst, pst_applicable: pst,
+            price_override: price, unit_cost: unitCost,
+            sale_price: salePrice, sale_start: saleStart, sale_end: saleEnd,
+            gst_applicable: gst, pst_applicable: pst,
             qty_on_hand: qty, qty_threshold: threshold, location, notes,
             schedule_flag: scheduleSave,
           });
@@ -2262,27 +2371,39 @@ class SettingsScreen {
           if (!desc) { errEl.style.display='block'; errEl.textContent='Description is required.'; return; }
           if (p) {
             DB.updateCustomProduct(p.custom_product_id, {
-              description: desc, upc, price: price ?? 0, gst_applicable: gst, pst_applicable: pst,
+              description: desc, upc, price: price ?? 0, unit_cost: unitCost,
+              sale_price: salePrice, sale_start: saleStart, sale_end: saleEnd,
+              gst_applicable: gst, pst_applicable: pst,
               qty_on_hand: qty, qty_threshold: threshold, location, notes,
               schedule_flag: scheduleSave,
             });
           } else {
-            DB.saveCustomProduct({ description: desc, upc, price: price ?? 0, gst_applicable: gst,
-              pst_applicable: pst, created_by: Auth.current()?.name, schedule_flag: scheduleSave });
+            // Before 1.4.17 this passed none of qty / threshold / location / notes,
+            // so anything typed into those boxes on ADD was silently discarded.
+            DB.saveCustomProduct({ description: desc, upc, price: price ?? 0, unit_cost: unitCost,
+              sale_price: salePrice, sale_start: saleStart, sale_end: saleEnd,
+              gst_applicable: gst, pst_applicable: pst, created_by: Auth.current()?.name,
+              qty_on_hand: qty, qty_threshold: threshold, location, notes,
+              schedule_flag: scheduleSave });
           }
         }
         close();
         renderList(content.querySelector('#prod-search').value, content.querySelector('#prod-filter').value);
       });
 
-      modal.querySelector(isCatalog ? '#mp-qty' : '#mp-desc').focus();
+      modal.querySelector('#mp-desc').focus();
     };
 
     const exportCSV = () => {
       const customs = DB.getAllCustomProducts();
       const rows = [
-        ['Source','Description','UPC','Price','Price Override','GST','PST','Qty on Hand','Reorder Threshold','Location','Notes'],
-        ...customs.map(p => ['Custom', p.description, p.upc||'', p.price, '', p.gst_applicable?'Y':'N', p.pst_applicable?'Y':'N', p.qty_on_hand??'', p.qty_threshold??'', p.location||'', p.notes||'']),
+        ['Source','Description','UPC','Cost','Price','Price Override','Margin','GST','PST','Qty on Hand','Reorder Threshold','Location','Notes'],
+        ...customs.map(p => {
+          const margin = (p.price > 0 && p.unit_cost > 0) ? Tax.round2(p.price - p.unit_cost) : '';
+          return ['Custom', p.description, p.upc||'', p.unit_cost??'', p.price, '', margin,
+                  p.gst_applicable?'Y':'N', p.pst_applicable?'Y':'N', p.qty_on_hand??'',
+                  p.qty_threshold??'', p.location||'', p.notes||''];
+        }),
       ];
       const csv = rows.map(r => r.map(v => `"${String(v??'').replace(/"/g,'""')}"`).join(',')).join('\n');
       _downloadBlob(new Blob([csv], { type: 'text/csv' }), `products_export_${_dateStr()}.csv`);

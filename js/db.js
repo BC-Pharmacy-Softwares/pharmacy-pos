@@ -274,6 +274,21 @@ const DB = (() => {
       // (brand, last 4, entry method, auth code, reference, EMV app label/AID).
       // Last 4 only — never the full PAN.
       "ALTER TABLE payments ADD COLUMN card_details TEXT",
+      // 1.4.17: what the pharmacy PAYS for an item, so margin can be shown.
+      // Catalogue products already receive McKesson's cost in regular_unit_price;
+      // unit_cost is the pharmacy's own figure and wins when both are present.
+      "ALTER TABLE products ADD COLUMN unit_cost REAL",
+      "ALTER TABLE custom_products ADD COLUMN unit_cost REAL",
+      // 1.4.17: in-house promotions — the pharmacy's own sale price and the dates
+      // it runs between (YYYY-MM-DD, inclusive; blank end = runs until removed).
+      // Same shape as McKesson's Special Unit Price / Special Start+End Date, so
+      // catalogue promotions can later populate these same columns.
+      "ALTER TABLE products ADD COLUMN sale_price REAL",
+      "ALTER TABLE products ADD COLUMN sale_start TEXT",
+      "ALTER TABLE products ADD COLUMN sale_end   TEXT",
+      "ALTER TABLE custom_products ADD COLUMN sale_price REAL",
+      "ALTER TABLE custom_products ADD COLUMN sale_start TEXT",
+      "ALTER TABLE custom_products ADD COLUMN sale_end   TEXT",
       // 1.4.9: PHNs imported from WinRx could carry its CHAR padding ("9876543210   "),
       // which broke AR's PHN matching. Trim them — unless that would clash with a record.
       "UPDATE patients SET phn = TRIM(phn) WHERE phn != TRIM(phn) AND TRIM(phn) NOT IN (SELECT phn FROM patients)",
@@ -636,22 +651,31 @@ const DB = (() => {
       [barcode, barcode]
     );
   }
+  /* NB the Add Product form collects qty / threshold / location / notes / cost,
+     but before 1.4.17 this function ignored all of them — you typed them in and
+     they vanished on save (they only stuck when EDITING an existing product). */
   function saveCustomProduct(p) {
+    const n = v => (v === undefined || v === '' ? null : v);
     if (p.upc) {
       const existing = findCustomProductByBarcode(p.upc);
       if (existing) {
-        run(`UPDATE custom_products SET description=?,price=?,gst_applicable=?,pst_applicable=?,
-             schedule_flag=? WHERE upc=?`,
-          [p.description, p.price, p.gst_applicable?1:0, p.pst_applicable?1:0,
-           p.schedule_flag||null, p.upc]);
+        run(`UPDATE custom_products SET description=?,price=?,unit_cost=?,gst_applicable=?,
+             pst_applicable=?,qty_on_hand=?,qty_threshold=?,location=?,notes=?,
+             schedule_flag=?,sale_price=?,sale_start=?,sale_end=? WHERE upc=?`,
+          [p.description, p.price, n(p.unit_cost), p.gst_applicable?1:0, p.pst_applicable?1:0,
+           n(p.qty_on_hand), n(p.qty_threshold), p.location||null, p.notes||null,
+           p.schedule_flag||null, n(p.sale_price), p.sale_start||null, p.sale_end||null, p.upc]);
         return existing.custom_product_id;
       }
     }
     run(`INSERT INTO custom_products
-         (description,upc,price,gst_applicable,pst_applicable,created_by,schedule_flag)
-         VALUES(?,?,?,?,?,?,?)`,
-      [p.description, p.upc||null, p.price, p.gst_applicable?1:0, p.pst_applicable?1:0,
-       p.created_by||null, p.schedule_flag||null]);
+         (description,upc,price,unit_cost,gst_applicable,pst_applicable,created_by,
+          qty_on_hand,qty_threshold,location,notes,schedule_flag,sale_price,sale_start,sale_end)
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [p.description, p.upc||null, p.price, n(p.unit_cost), p.gst_applicable?1:0,
+       p.pst_applicable?1:0, p.created_by||null, n(p.qty_on_hand), n(p.qty_threshold),
+       p.location||null, p.notes||null, p.schedule_flag||null,
+       n(p.sale_price), p.sale_start||null, p.sale_end||null]);
     return lastInsertId();
   }
   function getAllCustomProducts() {
@@ -786,20 +810,53 @@ const DB = (() => {
     return all(`SELECT * FROM products WHERE (description LIKE ? OR upc_unit LIKE ? OR din LIKE ? OR mckesson_item_no LIKE ?)
                 AND product_status != 'D' ORDER BY description LIMIT ?`, [t, t, t, t, limit]);
   }
+  /* ─────────────────────────────────────────────────────────────────────
+     THE one place a product's selling price is decided. POS, shelf tags and
+     reports must all call this — two price calculations is how the old app
+     came to show two different AR balances (gotcha 12), and the shelf tags
+     already drifted once by falling back to McKesson's cost.
+
+     Order: an ACTIVE in-house sale wins, then a manual price override, then
+     the catalogue's suggested retail (or a custom product's own price).
+     NEVER regular_unit_price — that is cost.
+     Returns { price, isSale, saleEnds, regular }.                           */
+  function saleIsActive(p, today) {
+    if (!p || !(p.sale_price > 0)) return false;
+    const d = today || localDateStr(new Date());
+    if (p.sale_start && d < p.sale_start) return false;   // not started
+    if (p.sale_end   && d > p.sale_end)   return false;   // finished
+    return true;
+  }
+
+  function effectivePrice(p, today) {
+    if (!p) return { price: 0, isSale: false, saleEnds: null, regular: 0 };
+    const regular = p.price_override != null ? p.price_override
+                  : (p.price != null ? p.price
+                  : (p.suggested_retail || 0));
+    if (saleIsActive(p, today)) {
+      return { price: p.sale_price, isSale: true, saleEnds: p.sale_end || null, regular };
+    }
+    return { price: regular || 0, isSale: false, saleEnds: null, regular: regular || 0 };
+  }
+
   function updateCustomProduct(id, p) {
-    run(`UPDATE custom_products SET description=?,upc=?,price=?,gst_applicable=?,pst_applicable=?,
-         qty_on_hand=?,qty_threshold=?,location=?,notes=?,schedule_flag=? WHERE custom_product_id=?`,
-      [p.description, p.upc||null, p.price, p.gst_applicable?1:0, p.pst_applicable?1:0,
-       p.qty_on_hand??null, p.qty_threshold??null, p.location||null, p.notes||null,
-       p.schedule_flag??null, id]);
+    run(`UPDATE custom_products SET description=?,upc=?,price=?,unit_cost=?,gst_applicable=?,
+         pst_applicable=?,qty_on_hand=?,qty_threshold=?,location=?,notes=?,schedule_flag=?,
+         sale_price=?,sale_start=?,sale_end=? WHERE custom_product_id=?`,
+      [p.description, p.upc||null, p.price, p.unit_cost??null, p.gst_applicable?1:0,
+       p.pst_applicable?1:0, p.qty_on_hand??null, p.qty_threshold??null, p.location||null,
+       p.notes||null, p.schedule_flag??null,
+       p.sale_price??null, p.sale_start||null, p.sale_end||null, id]);
   }
 
   function updateCatalogProduct(id, p) {
-    const sets = ['price_override=?','gst_applicable=?','pst_applicable=?',
-                  'qty_on_hand=?','qty_threshold=?','location=?','notes=?','schedule_flag=?'];
-    const vals = [p.price_override??null, p.gst_applicable?1:0, p.pst_applicable?1:0,
+    const sets = ['price_override=?','unit_cost=?','gst_applicable=?','pst_applicable=?',
+                  'qty_on_hand=?','qty_threshold=?','location=?','notes=?','schedule_flag=?',
+                  'sale_price=?','sale_start=?','sale_end=?'];
+    const vals = [p.price_override??null, p.unit_cost??null, p.gst_applicable?1:0, p.pst_applicable?1:0,
                   p.qty_on_hand??null, p.qty_threshold??null, p.location||null, p.notes||null,
-                  p.schedule_flag??null];
+                  p.schedule_flag??null,
+                  p.sale_price??null, p.sale_start||null, p.sale_end||null];
     if (p.description !== undefined) { sets.push('description=?'); vals.push(p.description||null); }
     if (p.upc_unit    !== undefined) { sets.push('upc_unit=?');    vals.push(p.upc_unit||null); }
     vals.push(id);
@@ -1098,6 +1155,7 @@ const DB = (() => {
     addPayment, getPaymentsForTransaction,
     findProductByBarcode, findCustomProductByBarcode, saveCustomProduct,
     getAllCustomProducts, deleteCustomProduct, updateCustomProduct,
+    effectivePrice, saleIsActive,
     exportDb, updateCatalogProduct, adjustStock, getLowStockProducts, searchProducts,
     upsertProducts, upsertProductsSelective, getProductCount, getLastSyncTime,
     getSalesSummary, getInventoryValuation, getTotalCollectedInRange, getSalesByMethod, getSoldProducts, getTransactionsInRange,

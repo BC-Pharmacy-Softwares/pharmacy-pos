@@ -42,7 +42,7 @@ is a Mac (this repo). **Claude cannot run the app** — the user tests on Window
 - **Must stay in sync with** `electron-app/package.json` `"version"` (that names the installer `.exe`).
 - Shown in-app on the **login screen** and **Settings top-right**.
 - Scheme: `MAJOR.MINOR.PATCH`. Most builds = PATCH bump.
-- **Current version: 1.4.16**
+- **Current version: 1.4.17**
 - When making a build, bump both files and note it in the Work Log below.
 
 ---
@@ -195,7 +195,40 @@ pharmacy-pos/
 
 ## Work Log (newest first — append new entries here)
 
-### 1.4.16 — (current)
+### 1.4.17 — (current)
+**Reported: "every product card should be the same"** — plus cost, and in-house promotions.
+No `main.js`/`preload.js` change.
+- **One card for both product types.** `showProductModal` branched on `isCatalog` and produced two
+  different-looking forms (catalogue got a grey info bar and "Price Override"; custom got "Price" and no
+  bar). Now identical: same source line, same fields, same order, same focus. Only the hints differ, because
+  a catalogue price comes from McKesson and a custom one does not.
+- **Cost is now visible and editable.** New `unit_cost` on **both** `products` and `custom_products`.
+  Catalogue items already received McKesson's cost in `regular_unit_price` but **nothing ever displayed it**;
+  custom products had nowhere to record one at all. The card shows Cost · Selling Price · **live Margin**
+  ($ and %, red when negative), with McKesson's cost as the placeholder for catalogue items.
+- **In-house promotions.** `sale_price` + `sale_start` + `sale_end` on both tables, with a live status line:
+  *"✓ Running today — $6.00 will be charged, until 2026-11-30"*, *"Scheduled — starts …"*, *"Finished on …"*,
+  and a refusal if the end date precedes the start. Deliberately the same shape as McKesson's Special Unit
+  Price / Special Start+End Date, so catalogue promotions can later fill the same columns.
+- **`DB.effectivePrice()` is now the ONLY place a selling price is decided** — active sale → price override →
+  suggested retail (or a custom product's own price), and **never** `regular_unit_price`. POS, shelf tags and
+  the product list all call it. Same reasoning as gotcha 12: two price calculations is how the old app came to
+  show two different AR balances.
+- **BUG — shelf tags printed McKesson's COST.** `settings.js` `toTag` fell back to `regular_unit_price` when a
+  product had no suggested retail, so a *public shelf price* could be what the pharmacy paid. 1.4.10 removed
+  that fallback from `pos.js` and `db.js` but missed this third site; the grep then was not thorough enough.
+- **BUG — Add Product silently discarded fields.** `saveCustomProduct` never passed qty_on_hand,
+  qty_threshold, location or notes, so anything typed into those boxes on **Add** vanished (editing an
+  existing product worked, which is why it went unnoticed). Now saved on insert and on the UPC-match update.
+- POS says so when a sale price is applied: *"Added: X — $6.00 SALE (was $10.00)"*.
+- CSV export gains Cost and Margin columns.
+- **Tests — `node tests/pricing.test.js` (23 assertions)**: price order, that cost is never a selling price,
+  every sale-window boundary (first day, last day, day before, day after, open-ended, future), expiry
+  fallback, the "was $X" figure, and junk input.
+- **Not yet exercised on Windows** — the card layout, the date pickers and the live margin want a real look.
+- `?v=`: `version.js`(22), `db.js`(36), `pos.js`(88), `settings.js`(63).
+
+### 1.4.16
 **Asked: "is the POS capturing GST from WEBCAT?"** It is — verified end to end by running a WEBCAT file
 through the real parser, the real `upsertProducts` and the real `Tax.calcCartTotals` (Y and **F** both
 taxable, N not; $5.00 → GST $0.25). But that confidence came from a test I had to write on the spot, and

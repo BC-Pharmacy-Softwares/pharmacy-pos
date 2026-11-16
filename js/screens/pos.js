@@ -384,13 +384,12 @@ class POSScreen {
   }
 
   _addOTCItem(product, barcode) {
-    // price_override wins, then the catalogue's suggested retail, then a custom
-    // product's own price. NEVER regular_unit_price — per the McKesson spec that
-    // is the unit COST price, so falling back to it sold stock at cost with no
-    // margin and no warning (CLAUDE.md 1.4.10).
-    const price = product.price_override != null
-      ? product.price_override
-      : (product.suggested_retail || product.price || 0);
+    // DB.effectivePrice is the ONE place a selling price is decided — an active
+    // in-house sale wins, then a manual override, then the catalogue's suggested
+    // retail (or a custom product's own price). It never falls back to
+    // regular_unit_price, which is McKesson's COST (CLAUDE.md 1.4.10 / 1.4.17).
+    const pricing = DB.effectivePrice(product);
+    const price = pricing.price;
     const noRetailPrice = !(price > 0);
     // Determine source and ID so stock can be deducted on save
     const isCustom = product.custom_product_id != null;
@@ -435,6 +434,11 @@ class POSScreen {
       // staff set a real price instead of selling at cost by accident.
       this._setStatus('error',
         `Added: ${product.description} — NO RETAIL PRICE SET. Tap the line to enter a price.`);
+    } else if (pricing.isSale) {
+      // Say it out loud, so staff can tell a customer the sale was applied.
+      const was = pricing.regular > pricing.price ? ` (was ${Tax.fmt(pricing.regular)})` : '';
+      this._setStatus('success',
+        `Added: ${product.description} — ${Tax.fmt(price)} SALE${was}${flag ? ` [${flag.toUpperCase()}]` : ''}`);
     } else {
       this._setStatus('success', `Added: ${product.description} — ${Tax.fmt(price)}${flag ? ` [${flag.toUpperCase()}]` : ''}`);
     }
