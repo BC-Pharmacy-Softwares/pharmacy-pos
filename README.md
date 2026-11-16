@@ -4,7 +4,7 @@ A point-of-sale system for pharmacies. It rings up prescriptions and OTC product
 takes payments, keeps compliance records, tracks patient accounts, talks to WinRx and
 McKesson, and prints receipts, shelf tags, and reports — all from one Windows app.
 
-> **Version 1.4.9.** The installed version is shown on the login screen and at the
+> **Version 1.4.16.** The installed version is shown on the login screen and at the
 > top-right of Settings. Check it before reporting a problem.
 
 ---
@@ -59,7 +59,7 @@ Patients also never see drug cost or markup — only their copay and quantity.
 
 ## 2. Installing on a New Computer
 
-You only need **one file**: `Pharmacy POS Setup 1.4.9.exe` (the installer).
+You only need **one file**: `Pharmacy POS Setup 1.4.16.exe` (the installer).
 
 ### Steps
 1. Copy the installer to the new PC (USB or network share)
@@ -216,6 +216,11 @@ Click **Test Connection** → should say Connected → **Save**.
 Click **Save Clover Device** → the payment bridge restarts automatically →
 click **Pair with Device** → enter the 4-digit code shown on the Clover screen.
 
+**Card terminal log.** Further down the same page is the path to `clover-bridge.log`, with an
+**📂 Open folder** button. It records everything the terminal sends back. If a card problem
+ever needs looking at, this file is the first thing to send — card numbers are removed from it
+automatically, so it is safe to share.
+
 ### 4f. Folders & Backup → Save Folders
 Every folder the POS saves into, on one page. Use **📁 Browse** rather than typing the path.
 Each folder shows **✓ Folder found**, or a warning if it's missing (e.g. a disconnected drive
@@ -232,7 +237,18 @@ Each folder must already exist. PDFs are written **directly into it** — no sub
 
 ### 4g. Printing → Receipt Printer — *desktop only*
 Select your 80mm thermal printer from the dropdown → **Save** → **Test Print**.
-When selected, receipts print silently (no dialog).
+When selected, receipts print silently (no dialog). With no printer selected, Windows shows
+a print dialog for every sale.
+
+**After a sale** — what happens once a sale is complete:
+
+| Option | Behaviour |
+|--------|-----------|
+| **Ask** *(default)* | Shows the Print / Email / Both / None prompt (see section 6). Prints anyway after 15 seconds if nobody chooses. |
+| **Always print, don't ask** | Prints immediately, no prompt |
+| **Never print automatically** | Nothing prints; staff reprint from **📋 Find Paid Receipt** if asked |
+
+Refunds always print regardless of this setting.
 
 ### 4h. Staff & Pharmacists *(Admin only)*
 Add staff with their own PIN and role:
@@ -313,6 +329,7 @@ If the patient has **allergies**, a yellow ⚠️ banner shows above the Charge 
 - **F1** = new transaction
 - **F2** = search patient
 - **ESC** = remove last item
+- At the receipt prompt: **P** print · **E** email · **B** both · **Enter** print · **Esc** none
 
 ---
 
@@ -329,8 +346,28 @@ Click **Charge Patient**. Choose a method:
 | **AR (Account)** | Charges to the patient's account (requires a linked patient) |
 | **Split** | Add multiple payment lines until the total is covered |
 
-A **receipt prints automatically**. For Rx pickups, the **pharmacist sign-off** screen
-appears (counselling checklist + signature) and an A5 PDF is filed to WinRx.
+### After the sale — the receipt prompt
+For an Rx pickup the **pharmacist sign-off** screen comes first (counselling checklist +
+signature), and an A5 PDF is filed to WinRx. Then a large box appears in the middle of the
+screen:
+
+> **How should they get the receipt?**
+> **🖨 Print** · **✉ Email** · **📬 Both** · **✕ None**
+
+- Press **P**, **E**, **B** or **Esc** — or just press **Enter** for Print.
+- **If nobody chooses within 15 seconds it prints**, so a receipt is never missed.
+- **Email** only appears when email is set up (Settings → Email & Reports).
+- Afterwards the status bar says what happened: *Printed*, *Emailed to …*, or
+  *Print failed — printer offline*.
+
+You can turn the prompt off — Settings → **Printing → Receipt Printer → After a sale**
+(see 4g). **Refunds always print** whichever option you pick.
+
+### What's on a card receipt
+A card payment prints the terminal's own details under the payment line — card type and
+last 4 digits, entry method (Chip / Contactless / Manual entry), authorisation code,
+reference and transaction numbers, and the EMV application label and AID where the
+terminal supplies them. Only the **last 4 digits** are ever stored or printed.
 
 > **Manual Card Entry** also has to be enabled on the terminal itself:
 > **Setup → Payments** on the Clover device. On the customer screen the option may sit
@@ -346,6 +383,11 @@ Settings → Products → edit the product → **Schedule / Dispensing Category*
 - **None** — regular product
 - **🟡 BTC — Schedule II** — sold without Rx, patient name optional
 - **🟠 Controlled BTC** — patient name **required**
+
+**Products from the McKesson catalogue flag themselves.** The catalogue marks each item as
+controlled, narcotic, or neither, and the POS now follows it: controlled items behave as
+**Controlled BTC** (name required) and narcotics as **BTC**. You only need to set the category
+by hand for your own custom products, or to override what the catalogue says.
 
 ### Selling a BTC item
 When a BTC item is in the cart and you click Charge:
@@ -467,6 +509,19 @@ Each completed checklist is saved as a PDF to your Shift Records folder and emai
 ### Catalog sync (get products)
 Settings → **Catalog Sync** → **Sync via SOAP API**. Pulls the latest products,
 prices, and item numbers. (Uses your Customer #.)
+
+**Read the log when it finishes.** It reports what it actually imported, not just "done":
+
+```
+Parsed 1204 products from 1250 records.
+  46 promotion (S) record(s) skipped — not products.
+  Tax flags read: 890 GST (74%), 0 PST (0%), 0 both, 314 untaxed (26%).
+```
+
+Worth a glance each time. If it warns that **no product is GST-taxable**, or that almost
+everything came back untaxed, stop and check before trusting the prices — it usually means the
+file is not the *General and regular pricing* export. The log also notes whether GST and PST are
+switched on in Settings → Taxes, so you can see what the till will actually charge.
 
 ### Placing an order
 **Reports → Order Suggestions**:
@@ -642,6 +697,26 @@ Console tab → read the red error.
 - Settings → Printing → Receipt Printer → select the correct thermal printer
 - Settings → Printing → Receipt Design → confirm paper width (usually 80mm)
 
+### No receipt came out
+The status bar says what happened — *Print failed — printer offline* means the job was
+refused, and *Print dialog opened* means no printer is set in Settings → Printing →
+Receipt Printer. Nothing is lost either way: reprint from **📋 Find Paid Receipt**.
+If someone pressed **None** or **Esc** at the prompt, that sale deliberately printed nothing.
+
+### Card details missing from a card receipt
+Card type, last 4 and the authorisation code only appear on sales taken from **1.4.13
+onwards**. Older sales did not capture them and never will — reprinting an old receipt
+will not add them. If a *new* card sale still prints no card block, send
+`clover-bridge.log` (Settings → Card Terminal → 📂 Open folder).
+
+### GST isn't being charged, or PST is charged when it shouldn't be
+1. Settings → Products & Checkout → **Taxes** — check which taxes are ticked. **Both are on
+   by default**, so a pharmacy that charges GST only must untick PST.
+2. Run a catalogue sync and read the log — it reports how many products are flagged GST and
+   PST, and states which taxes are switched on.
+3. Catalogues imported before **1.4.10** stored some tax flags incorrectly. A fresh sync with
+   *Update GST/PST flags* ticked corrects them.
+
 ### Rx copay shows $0.00
 The Rx was found but WinRx returned no copay for that Rx/branch combination.
 Click the price on the cart line to enter it manually and continue the sale.
@@ -692,4 +767,4 @@ Copy it from the old account to the new one.
 
 ---
 
-*Pharmacy POS — User & Setup Guide · v1.4.9*
+*Pharmacy POS — User & Setup Guide · v1.4.16*
