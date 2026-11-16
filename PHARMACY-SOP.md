@@ -121,6 +121,26 @@
 
 - Click **Cash**, **Card**, or **AR**
 
+### Controlled / behind-the-counter (BTC) items
+
+Some products stop you before payment with a **counselling popup**. This is a legal record —
+it is not optional and it cannot be skipped.
+
+1. The popup lists the item(s) and asks you to confirm the patient was **counselled**
+2. Tick the counselling box
+3. Enter the **patient name and phone**:
+   - 🟡 **BTC** — name is optional
+   - 🟠 **Controlled BTC** — name is **required**
+4. Click through to payment as normal
+
+A PDF record of the sale is filed automatically, and it is listed in
+**Reports → BTC / Controlled Log**.
+
+> **You may see this popup on more products than you used to.** Items that McKesson's
+> catalogue marks as narcotic or controlled now flag themselves, instead of relying on
+> someone having set the category by hand. If a product prompts that you do not expect, that
+> is why — complete the counselling step as normal, and tell your Manager if it looks wrong.
+
 ---
 
 ## 5. Processing a $0 / Covered Prescription
@@ -146,8 +166,8 @@ Some prescriptions have a **$0 copay** — fully covered by the patient's drug p
 4. The **Change Due** appears instantly (e.g. `$4.75`)
 5. Give the patient their change
 6. Click **Confirm Payment**
-7. The receipt prints automatically
-8. The [Pick Up Confirmation](#9-pick-up-confirmation-rph-sign-off) screen appears if the sale includes an Rx
+7. If the sale includes an Rx, the [Pick Up Confirmation](#9-pick-up-confirmation-rph-sign-off) screen appears — deal with that first
+8. Then the receipt prompt asks how the patient wants their receipt — see [Choosing the receipt](#choosing-the-receipt)
 
 ---
 
@@ -158,8 +178,12 @@ Some prescriptions have a **$0 copay** — fully covered by the patient's drug p
 3. The Clover screen prompts the patient to **tap, insert, or swipe**
 4. The patient completes the payment on the Clover device
 5. The POS shows **Payment Approved** when done
-6. The receipt prints automatically
-7. The [Pick Up Confirmation](#9-pick-up-confirmation-rph-sign-off) screen appears if the sale includes an Rx
+6. If the sale includes an Rx, the [Pick Up Confirmation](#9-pick-up-confirmation-rph-sign-off) screen appears — deal with that first
+7. Then the receipt prompt asks how the patient wants their receipt — see [Choosing the receipt](#choosing-the-receipt)
+
+The printed receipt shows the card type and last 4 digits, how the card was read
+(Chip / Contactless / Manual entry) and the authorisation code. The full card number is
+never printed or stored.
 
 > **If the Clover screen doesn't show the payment prompt:**
 > - Check that the Clover status in the top bar is green
@@ -177,8 +201,9 @@ AR (Accounts Receivable) charges the amount to the patient's account to be colle
 1. Click **AR** on the payment screen
 2. Confirm the patient's name shown on screen
 3. Click **Confirm**
-4. The receipt prints and the amount is added to the patient's account balance
-5. The [Pick Up Confirmation](#9-pick-up-confirmation-rph-sign-off) screen appears if the sale includes an Rx
+4. The amount is added to the patient's account balance
+5. If the sale includes an Rx, the [Pick Up Confirmation](#9-pick-up-confirmation-rph-sign-off) screen appears — deal with that first
+6. Then the receipt prompt asks how the patient wants their receipt — see [Choosing the receipt](#choosing-the-receipt)
 
 ---
 
@@ -199,6 +224,24 @@ After every Rx sale (including $0 transactions), the **Pick Up Confirmation** sc
 7. WinRx attaches it to the patient's Rx record
 
 > **If the pharmacist is not available:** Click **Skip** to complete the sale without the signature. The transaction is still recorded. The PDF can be printed later from Transaction History.
+
+### Choosing the receipt
+
+Once payment is taken — and after the Pick Up Confirmation, if there was one — a large box
+appears in the middle of the screen:
+
+> **How should they get the receipt?**
+> **🖨 Print** · **✉ Email** · **📬 Both** · **✕ None**
+
+- Ask the patient, then click the button — or press **P**, **E**, **B**, or **Esc** for none
+- Just pressing **Enter** prints
+- **If you do nothing, it prints by itself after 15 seconds.** A receipt is never missed
+- **Email** only appears if email has been set up; you will be asked for the address
+- Afterwards the bar at the bottom says what happened — *Printed*, *Emailed to …*, or a
+  message if printing failed
+
+If a patient comes back wanting a receipt later, use **📋 Find Paid Receipt** on the POS
+screen. Nothing is lost by choosing None.
 
 ---
 
@@ -306,10 +349,17 @@ Before leaving at the end of the day:
 
 ### Receipt not printing
 
-1. Check the receipt printer is powered on and paper is loaded
-2. Check the paper isn't jammed
-3. In the POS, go to **Settings → Receipt Printer** and confirm the correct printer is selected
-4. Try printing a test page from Windows: **Settings → Printers & scanners → your printer → Print test page**
+1. Did someone press **None** or **Esc** at the receipt prompt? Then it printed nothing on
+   purpose — reprint from **📋 Find Paid Receipt**
+2. Read the message at the bottom of the POS screen. *Print failed — printer offline* means
+   the printer refused the job; *Print dialog opened* means no printer is selected
+3. Check the receipt printer is powered on, has paper, and isn't jammed
+4. In the POS, go to **Settings → Printing → Receipt Printer** and confirm the correct
+   printer is selected, then use **Test Print**
+5. Try a test page from Windows: **Settings → Printers & scanners → your printer → Print test page**
+
+Nothing is ever lost by a failed print — every sale is saved and can be reprinted from
+**📋 Find Paid Receipt**.
 
 ### POS screen frozen or not responding
 
@@ -336,9 +386,11 @@ Before leaving at the end of the day:
 
 | Task | Steps |
 |---|---|
-| **Rx sale** | Scan bag → check total → Cash / Card / AR → RPh sign Pick Up Confirmation |
-| **OTC sale** | Scan barcode → Cash / Card / AR |
-| **$0 Rx** | Scan bag → click Charge → RPh sign Pick Up Confirmation |
+| **Rx sale** | Scan bag → check total → Cash / Card / AR → RPh signs Pick Up Confirmation → choose receipt |
+| **OTC sale** | Scan barcode → Cash / Card / AR → choose receipt |
+| **$0 Rx** | Scan bag → click Charge → RPh signs Pick Up Confirmation → choose receipt |
+| **Receipt prompt** | **P** print · **E** email · **B** both · **Esc** none · prints by itself after 15s |
+| **BTC / controlled item** | Counselling popup before payment → tick counselled → name (required if 🟠) |
 | **Cash payment** | Click Cash → enter amount given → give change → Confirm |
 | **Card payment** | Click Card → patient taps/inserts on Clover → approved automatically |
 | **Void** | History → find transaction → Void (today only) |
@@ -349,4 +401,4 @@ Before leaving at the end of the day:
 
 *For technical issues outside this guide, contact your Manager or the system administrator.*
 
-*Pharmacy POS SOP — Version 1.0 — June 2026*
+*Pharmacy POS SOP — Version 1.1 — covers app version 1.4.16*
