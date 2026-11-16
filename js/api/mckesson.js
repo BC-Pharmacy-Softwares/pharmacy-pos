@@ -203,6 +203,51 @@ const McKessonAPI = (() => {
       onLog('  NOTE: file has no record-ID column; every line treated as a product.');
     if (!parsed.products.length)
       onLog('  ERROR: no products parsed — check the file is the "General and regular pricing" export.');
+    _logTaxBreakdown(onLog, parsed.products);
+  }
+
+  /* Tax flags come from two single characters in the file (GST at position 230,
+     PST at 231). If the layout ever shifts, those are the first fields to go
+     wrong and the LAST you would notice — the catalogue imports cleanly and the
+     till just stops charging GST. So every import states what it read, and says
+     so plainly when a whole catalogue comes back untaxed (CLAUDE.md 1.4.16). */
+  function _logTaxBreakdown(onLog, products) {
+    if (!products || !products.length) return;
+    let gst = 0, pst = 0, both = 0, none = 0;
+    for (const p of products) {
+      if (p.gst_applicable) gst++;
+      if (p.pst_applicable) pst++;
+      if (p.gst_applicable && p.pst_applicable) both++;
+      if (!p.gst_applicable && !p.pst_applicable) none++;
+    }
+    const pct = n => Math.round((n / products.length) * 100);
+    onLog(`  Tax flags read: ${gst} GST (${pct(gst)}%), ${pst} PST (${pct(pst)}%), ` +
+          `${both} both, ${none} untaxed (${pct(none)}%).`);
+
+    // What the FILE says is not what the till charges — Settings → Products &
+    // Checkout → Taxes can switch either tax off, and both default to ON. A
+    // pharmacy that only charges GST needs to know its catalogue carries PST
+    // flags that will be applied (CLAUDE.md 1.4.16).
+    const taxOn = (fn) => {
+      try { return typeof Tax !== 'undefined' && Tax[fn] ? Tax[fn]() : null; }
+      catch (_) { return null; }
+    };
+    const gstOn = taxOn('gstEnabled');
+    const pstOn = taxOn('pstEnabled');
+    if (gstOn === false)
+      onLog('  NOTE: GST is switched OFF in Settings → Taxes, so no GST will be charged whatever the file says.');
+    if (pstOn === false && pst > 0)
+      onLog(`  NOTE: PST is switched OFF in Settings → Taxes, so the ${pst} PST flag(s) above are ignored at the till.`);
+    if (pstOn === true && pst > 0)
+      onLog(`  NOTE: PST is switched ON in Settings → Taxes, so ${pst} product(s) will be charged PST as well as GST.`);
+
+    if (gst === 0) {
+      onLog('  WARNING: not one product is marked GST-taxable. A real catalogue always has some.');
+      onLog('  Nothing will be charged GST. Likely the file layout differs from the V6 spec —');
+      onLog('  send this log before trusting the prices.');
+    } else if (pct(none) >= 90) {
+      onLog(`  WARNING: ${pct(none)}% of products came back untaxed — higher than expected. Spot-check a few in Settings → Products.`);
+    }
   }
 
   /* Full catalog sync with polling.

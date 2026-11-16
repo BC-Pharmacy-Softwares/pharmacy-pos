@@ -42,7 +42,7 @@ is a Mac (this repo). **Claude cannot run the app** — the user tests on Window
 - **Must stay in sync with** `electron-app/package.json` `"version"` (that names the installer `.exe`).
 - Shown in-app on the **login screen** and **Settings top-right**.
 - Scheme: `MAJOR.MINOR.PATCH`. Most builds = PATCH bump.
-- **Current version: 1.4.15**
+- **Current version: 1.4.16**
 - When making a build, bump both files and note it in the Work Log below.
 
 ---
@@ -195,7 +195,31 @@ pharmacy-pos/
 
 ## Work Log (newest first — append new entries here)
 
-### 1.4.15 — (current)
+### 1.4.16 — (current)
+**Asked: "is the POS capturing GST from WEBCAT?"** It is — verified end to end by running a WEBCAT file
+through the real parser, the real `upsertProducts` and the real `Tax.calcCartTotals` (Y and **F** both
+taxable, N not; $5.00 → GST $0.25). But that confidence came from a test I had to write on the spot, and
+nothing in the app ever *said* what it read. Now every catalogue import reports it.
+- **`_logTaxBreakdown()` in `mckesson.js`** — each import logs
+  `Tax flags read: 890 GST (74%), 0 PST (0%), 0 both, 314 untaxed (26%).`
+  Tax flags are two single characters (GST at position 230, PST at 231): if the layout ever shifts they are
+  the first fields to go wrong and the **last** anyone would notice, because the import succeeds and the till
+  simply stops charging GST. Same silent-failure class as 1.4.10/1.4.13.
+- **Two warnings**: not one product GST-taxable → "Nothing will be charged GST… likely the file layout
+  differs from the V6 spec"; ≥90% untaxed → suggests a spot-check in Settings → Products.
+- **It reports what the TILL will charge, not just what the file says.** The pharmacy charges **GST only**,
+  but `tax_pst_enabled` **defaults to ON** (`_pstEnabled = pstEn !== 'false'`), so a catalogue carrying PST
+  flags would be charged 7% PST unless someone unticked it. The log now reads `Tax.gstEnabled()` /
+  `Tax.pstEnabled()` and says which way each is set — "PST is switched ON … N product(s) will be charged PST
+  as well as GST", or "switched OFF … ignored at the till".
+- **Tests — `node tests/catalog-tax-log.test.js` (20 assertions)**: counts, the no-GST alarm, the
+  mostly-untaxed warning, `F` still counting as taxable (guards the 1.4.10 regression), all four
+  Settings→Taxes combinations, and that a file with no products prints no tax line.
+- Two of my own first-draft assertions were wrong arithmetic (3 PST where the fixture has 2) — the code was
+  right both times. Worth remembering when a new test fails: check the expectation before the implementation.
+- `?v=`: `version.js`(21), `mckesson.js`(14).
+
+### 1.4.15
 **Reported from the floor: "staff was not able to see it" — the receipt prompt.** Two causes, one of them
 not cosmetic. No `main.js`/`preload.js` change.
 - **The prompt rendered UNDERNEATH the RPh sign-off modal.** 1.4.14 put it at `z-index:9000`;
