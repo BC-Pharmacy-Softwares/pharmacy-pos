@@ -109,7 +109,8 @@ check('duplicates are counted', dupes.duplicates, 1);
     suggested_retail REAL, regular_unit_price REAL,
     gst_applicable INTEGER DEFAULT 0, pst_applicable INTEGER DEFAULT 0,
     narcotic_indicator TEXT, product_status TEXT, last_synced DATETIME,
-    price_override REAL)`);
+    price_override REAL, family_group TEXT,
+    category TEXT, brand TEXT, tags TEXT)`);
 
   // Load the real DB module with a minimal browser shim.
   const dbSrc = fs.readFileSync(path.join(ROOT, 'js/db.js'), 'utf8');

@@ -116,6 +116,11 @@ const SETTINGS_SEARCH = [
   { t: 'Products & stock',                  tab: 'products', sel: '#prod-search',      k: 'items inventory price quantity' },
   { t: 'Add a custom product',              tab: 'products', sel: '#btn-add-product',  k: 'new item' },
   { t: 'Export products to CSV',            tab: 'products', sel: '#btn-export-products', k: 'spreadsheet excel' },
+  { t: 'Product categories',                tab: 'products', sel: '#prod-category',    k: 'category categorise group department aisle' },
+  { t: 'Product brands',                    tab: 'products', sel: '#prod-brand',       k: 'brand manufacturer make' },
+  { t: 'Product tags',                      tab: 'products', sel: '#prod-tag',         k: 'tag label fridge seasonal special order' },
+  { t: 'Rename a category',                 tab: 'products', sel: '#cat-manage',       k: 'category rename edit' },
+  { t: 'Products per page',                 tab: 'products', sel: '#prod-pagesize',    k: 'pagination page size paging browse' },
   { t: 'Quick action buttons',              tab: 'quickactions', sel: '#btn-add-qa',   k: 'shortcut discount one tap' },
   { t: 'Barcode parser profile',            tab: 'barcode', sel: '#barcode-profile',   k: 'scanner scan' },
   { t: 'Test a barcode',                    tab: 'barcode', sel: '#test-barcode',      k: 'scanner scan' },
@@ -2023,6 +2028,41 @@ class SettingsScreen {
 
   _renderProducts(content) {
 
+    /* ── 1.4.18 ──────────────────────────────────────────────────────────
+       Three faults this page had:
+         • The McKesson item number was only visible in the grey bar at the top
+           of the Edit card — never in the list, and custom products had no
+           code of their own at all.
+         • The catalogue could not be listed (it required 2 typed characters)
+           and silently capped at 80 matches, so a search with 300 hits showed
+           80 and said nothing about the rest. Same silent-truncation class as
+           1.4.10 / 1.4.13 / 1.4.16: it succeeded and showed less than the truth.
+         • The only classifier was schedule_flag — a LEGAL dispensing control
+           that drives the counselling popup and the BTC log. Category, brand
+           and tags are merchandising, so they are their own fields; BTC must
+           never double as "the category".                                   */
+
+    const PAGE_SIZES = [50, 100, 250];
+
+    /* Seeds the Category suggestions on a fresh install. These are only
+       suggestions — typing any other value creates it, and Categories in Use
+       below the tables renames one across every product that carries it. */
+    const DEFAULT_CATEGORIES = [
+      'Cough & Cold', 'Pain Relief', 'Vitamins & Supplements', 'First Aid',
+      'Baby & Child', 'Diabetes Care', 'Personal Care', 'Home Health', 'Seasonal',
+    ];
+
+    const state = {
+      term: '', filter: 'all', category: '', brand: '', tag: '',
+      pageSize: 50, customPage: 1, catalogPage: 1,
+    };
+    // Rows currently on screen, so Edit looks the product up directly instead
+    // of re-running the search to find it again.
+    let shown = { custom: [], catalog: [] };
+
+    const esc = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;')
+                                    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+
     const stockBadge = (qty, threshold) => {
       if (qty === null || qty === undefined) return '<span style="color:var(--text-muted);font-size:12px;">—</span>';
       const isLow = threshold !== null && threshold !== undefined && qty <= threshold;
@@ -2033,93 +2073,236 @@ class SettingsScreen {
               <span style="font-size:10px;padding:1px 5px;border-radius:3px;background:${bg};color:${color};margin-left:3px;">${label}</span>`;
     };
 
-    const renderList = (term = '', filter = 'all') => {
+    const tagChips = (tags) => {
+      const list = DB.splitTags(tags);
+      if (!list.length) return '';
+      return `<div style="margin-top:3px;display:flex;gap:4px;flex-wrap:wrap;">` +
+        list.map(t => `<span style="font-size:10px;padding:1px 6px;border-radius:9px;
+          background:var(--surface2);color:var(--text-muted);">${esc(t)}</span>`).join('') + `</div>`;
+    };
+
+    /* Always states the real total, never just what fits on the page. */
+    const pager = (which, res) => {
+      if (res.total === 0) return '';
+      const from = (res.page - 1) * res.pageSize + 1;
+      const to   = Math.min(res.page * res.pageSize, res.total);
+      const btn  = (dir, label, disabled) => `
+        <button class="btn btn-sm btn-outline" data-pagedir="${dir}" data-pagefor="${which}"
+          ${disabled ? 'disabled style="opacity:.4;"' : ''}>${label}</button>`;
+      return `
+        <div style="display:flex;align-items:center;gap:10px;justify-content:space-between;
+                    margin-top:8px;font-size:12px;color:var(--text-muted);flex-wrap:wrap;">
+          <span>Showing <strong>${from}–${to}</strong> of <strong>${res.total.toLocaleString()}</strong></span>
+          ${res.pages > 1 ? `
+            <span style="display:flex;align-items:center;gap:6px;">
+              ${btn('first', '&laquo;', res.page === 1)}
+              ${btn('prev',  '&lsaquo; Prev', res.page === 1)}
+              <span>Page ${res.page} of ${res.pages}</span>
+              ${btn('next',  'Next &rsaquo;', res.page === res.pages)}
+              ${btn('last',  '&raquo;', res.page === res.pages)}
+            </span>` : ''}
+        </div>`;
+    };
+
+    const priceCell = (p) => {
+      const eff = DB.effectivePrice(p);
+      if (eff.isSale) {
+        return `<strong style="color:var(--danger);">${Tax.fmt(eff.price)}</strong>
+                <div style="font-size:10px;color:var(--text-muted);text-decoration:line-through;">${Tax.fmt(eff.regular)}</div>`;
+      }
+      return Tax.fmt(eff.price);
+    };
+
+    const itemCell = (p, source) => {
+      const code = source === 'catalog' ? p.mckesson_item_no : p.sku;
+      return `<span style="font-family:monospace;font-size:12px;${code ? '' : 'color:var(--text-muted);'}">${esc(code || '—')}</span>`;
+    };
+
+    const rowHtml = (p, source) => `
+      <tr>
+        <td>${itemCell(p, source)}</td>
+        <td style="max-width:260px;">
+          ${esc(p.description)}
+          ${tagChips(p.tags)}
+        </td>
+        <td style="font-size:12px;">${esc(p.brand || '—')}</td>
+        <td style="font-size:12px;">${esc(p.category || '—')}</td>
+        <td style="font-size:12px;font-family:monospace;">${esc(source === 'catalog' ? (p.upc_unit || p.gtin_unit || '—') : (p.upc || '—'))}</td>
+        <td>${priceCell(p)}</td>
+        <td style="text-align:center;">${p.gst_applicable ? '✓' : ''}</td>
+        <td style="text-align:center;">${p.pst_applicable ? '✓' : ''}</td>
+        <td style="text-align:center;">${stockBadge(p.qty_on_hand, p.qty_threshold)}</td>
+        <td style="text-align:center;font-size:12px;color:var(--text-muted);">${p.qty_threshold ?? '—'}</td>
+        <td style="font-size:12px;color:var(--text-muted);">${esc(p.location || '—')}</td>
+        <td style="white-space:nowrap;">
+          <button class="btn btn-sm btn-outline" data-action="edit-${source}" data-id="${source === 'catalog' ? p.product_id : p.custom_product_id}" style="margin-right:3px;">&#9998;</button>
+          ${source === 'custom' ? `<button class="btn btn-sm btn-danger" data-action="del-custom" data-id="${p.custom_product_id}">&#10005;</button>` : ''}
+        </td>
+      </tr>`;
+
+    const COLSPAN = 12;
+
+    const renderList = () => {
       content.querySelector('#products-modal')?.remove();
+      const opts = {
+        term: state.term, filter: state.filter, category: state.category,
+        brand: state.brand, tag: state.tag, pageSize: state.pageSize,
+      };
 
-      // ── Custom products ──
-      let customs = DB.getAllCustomProducts();
-      if (term) customs = customs.filter(p =>
-        p.description.toLowerCase().includes(term.toLowerCase()) || (p.upc||'').includes(term));
-      if (filter === 'low') customs = customs.filter(p =>
-        p.qty_on_hand !== null && p.qty_threshold !== null && p.qty_on_hand <= p.qty_threshold);
+      const custom = DB.queryCustomProducts({ ...opts, page: state.customPage });
+      state.customPage = custom.page;
+      shown.custom = custom.rows;
+      content.querySelector('#custom-list').innerHTML = custom.rows.length === 0
+        ? `<tr><td colspan="${COLSPAN}" class="text-muted" style="padding:12px;">
+             ${state.filter === 'low' ? 'No low-stock custom products.'
+               : (state.term || state.category || state.brand || state.tag)
+                 ? 'No custom products match these filters.' : 'No custom products yet.'}</td></tr>`
+        : custom.rows.map(p => rowHtml(p, 'custom')).join('');
+      content.querySelector('#custom-pager').innerHTML = pager('custom', custom);
 
-      content.querySelector('#custom-list').innerHTML = customs.length === 0
-        ? `<tr><td colspan="9" class="text-muted" style="padding:12px;">
-             ${filter==='low' ? 'No low-stock custom products.' : 'No custom products yet.'}</td></tr>`
-        : customs.map(p => `
-          <tr>
-            <td style="max-width:220px;">${p.description}</td>
-            <td style="font-size:12px;font-family:monospace;">${p.upc||'—'}</td>
-            <td>${Tax.fmt(p.price)}</td>
-            <td style="text-align:center;">${p.gst_applicable?'✓':''}</td>
-            <td style="text-align:center;">${p.pst_applicable?'✓':''}</td>
-            <td style="text-align:center;">${stockBadge(p.qty_on_hand, p.qty_threshold)}</td>
-            <td style="text-align:center;font-size:12px;color:var(--text-muted);">${p.qty_threshold??'—'}</td>
-            <td style="font-size:12px;color:var(--text-muted);">${p.location||'—'}</td>
-            <td style="white-space:nowrap;">
-              <button class="btn btn-sm btn-outline" data-action="edit-custom" data-id="${p.custom_product_id}" style="margin-right:3px;">&#9998;</button>
-              <button class="btn btn-sm btn-danger"  data-action="del-custom"  data-id="${p.custom_product_id}">&#10005;</button>
-            </td>
-          </tr>`).join('');
+      const catalog = DB.queryCatalogProducts({ ...opts, page: state.catalogPage });
+      state.catalogPage = catalog.page;
+      shown.catalog = catalog.rows;
+      content.querySelector('#catalog-list').innerHTML = catalog.rows.length === 0
+        ? `<tr><td colspan="${COLSPAN}" class="text-muted" style="padding:12px;">
+             ${(state.term || state.category || state.brand || state.tag || state.filter === 'low')
+               ? 'No catalogue products match these filters.'
+               : 'The catalogue is empty — sync it from McKesson first.'}</td></tr>`
+        : catalog.rows.map(p => rowHtml(p, 'catalog')).join('');
+      content.querySelector('#catalog-pager').innerHTML = pager('catalog', catalog);
 
-      // ── Catalog products ──
-      const catalog = term.length >= 2 ? DB.searchProducts(term) : [];
-      const filteredCatalog = filter === 'low'
-        ? catalog.filter(p => p.qty_on_hand !== null && p.qty_threshold !== null && p.qty_on_hand <= p.qty_threshold)
-        : catalog;
+      const matchNote = content.querySelector('#catalog-count');
+      if (matchNote) matchNote.textContent = catalog.total.toLocaleString();
 
-      content.querySelector('#catalog-list').innerHTML = !term
-        ? `<tr><td colspan="9" class="text-muted" style="padding:12px;">Type at least 2 characters to search the McKesson catalog.</td></tr>`
-        : filteredCatalog.length === 0
-        ? `<tr><td colspan="9" class="text-muted" style="padding:12px;">No results for "${term}".</td></tr>`
-        : filteredCatalog.map(p => `
-          <tr>
-            <td style="max-width:220px;">${p.description}</td>
-            <td style="font-size:12px;font-family:monospace;">${p.upc_unit||p.gtin_unit||'—'}</td>
-            <td>${p.price_override!=null ? `<strong>${Tax.fmt(p.price_override)}</strong>` : Tax.fmt(p.suggested_retail||0)}</td>
-            <td style="text-align:center;">${p.gst_applicable?'✓':''}</td>
-            <td style="text-align:center;">${p.pst_applicable?'✓':''}</td>
-            <td style="text-align:center;">${stockBadge(p.qty_on_hand, p.qty_threshold)}</td>
-            <td style="text-align:center;font-size:12px;color:var(--text-muted);">${p.qty_threshold??'—'}</td>
-            <td style="font-size:12px;color:var(--text-muted);">${p.location||'—'}</td>
-            <td style="white-space:nowrap;">
-              <button class="btn btn-sm btn-outline" data-action="edit-catalog" data-id="${p.product_id}">&#9998;</button>
-            </td>
-          </tr>`).join('');
-
-      // ── Event listeners ──
+      // ── Row actions ──
       content.querySelectorAll('[data-action="edit-custom"]').forEach(btn => {
         btn.addEventListener('click', () => {
-          const p = DB.getAllCustomProducts().find(x => x.custom_product_id === parseInt(btn.dataset.id));
+          const p = shown.custom.find(x => x.custom_product_id === parseInt(btn.dataset.id));
           if (p) showProductModal({ ...p, _source: 'custom' });
+        });
+      });
+      content.querySelectorAll('[data-action="edit-catalog"]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const p = shown.catalog.find(x => x.product_id === parseInt(btn.dataset.id));
+          if (p) showProductModal({ ...p, _source: 'catalog' });
         });
       });
       content.querySelectorAll('[data-action="del-custom"]').forEach(btn => {
         btn.addEventListener('click', () => {
           if (!confirm('Delete this custom product?')) return;
           DB.deleteCustomProduct(parseInt(btn.dataset.id));
-          renderList(content.querySelector('#prod-search').value, content.querySelector('#prod-filter').value);
+          renderList();
+          refreshFacets();
         });
       });
-      content.querySelectorAll('[data-action="edit-catalog"]').forEach(btn => {
+      content.querySelectorAll('[data-pagedir]').forEach(btn => {
         btn.addEventListener('click', () => {
-          const p = DB.searchProducts(content.querySelector('#prod-search').value)
-                      .find(x => x.product_id === parseInt(btn.dataset.id));
-          if (p) showProductModal({ ...p, _source: 'catalog' });
+          const which = btn.dataset.pagefor;
+          const key   = which === 'custom' ? 'customPage' : 'catalogPage';
+          const res   = which === 'custom'
+            ? DB.queryCustomProducts({ ...opts, page: state[key] })
+            : DB.queryCatalogProducts({ ...opts, page: state[key] });
+          const dir = btn.dataset.pagedir;
+          state[key] = dir === 'first' ? 1
+                     : dir === 'last'  ? res.pages
+                     : dir === 'prev'  ? Math.max(1, res.page - 1)
+                     : Math.min(res.pages, res.page + 1);
+          renderList();
         });
       });
+    };
+
+    /* Filter dropdowns and the Categories box are rebuilt whenever the values
+       in use could have changed, so a brand typed on one product immediately
+       offers itself on the next. */
+    const refreshFacets = () => {
+      const f = DB.getProductFacets();
+      const fill = (sel, values, label, current) => {
+        const el = content.querySelector(sel);
+        if (!el) return;
+        el.innerHTML = `<option value="">${label}</option>` +
+          values.map(v => `<option value="${esc(v)}" ${v === current ? 'selected' : ''}>${esc(v)}</option>`).join('');
+      };
+      fill('#prod-category', f.categories, 'All categories', state.category);
+      fill('#prod-brand',    f.brands,     'All brands',     state.brand);
+      fill('#prod-tag',      f.tags,       'All tags',        state.tag);
+
+      const box = content.querySelector('#cat-manage');
+      if (box) {
+        const counts = DB.getCategoryCounts();
+        box.innerHTML = counts.length === 0
+          ? `<span class="text-muted" style="font-size:12px;">No categories yet — set one on a product and it appears here.</span>`
+          : counts.map(c => `
+              <span style="display:inline-flex;align-items:center;gap:6px;background:var(--surface2);
+                           border-radius:14px;padding:3px 6px 3px 11px;font-size:12px;margin:0 6px 6px 0;">
+                ${esc(c.category)}
+                <span style="color:var(--text-muted);">${c.count}</span>
+                <button class="btn btn-sm btn-outline" data-rename="${esc(c.category)}"
+                  title="Rename this category everywhere"
+                  style="padding:0 6px;font-size:11px;line-height:18px;">&#9998;</button>
+              </span>`).join('');
+        box.querySelectorAll('[data-rename]').forEach(btn =>
+          btn.addEventListener('click', () => showRenameModal(btn.dataset.rename)));
+      }
+    };
+
+    /* window.prompt() is a silent no-op in Electron (CLAUDE.md gotcha 8), so
+       renaming gets a real modal. */
+    const showRenameModal = (from) => {
+      const n = DB.getCategoryCounts().find(c => c.category === from)?.count || 0;
+      const modal = document.createElement('div');
+      modal.className = 'modal-overlay';
+      modal.id = 'products-modal';
+      modal.innerHTML = `
+        <div class="modal" style="max-width:420px;">
+          <div class="modal-header"><h3>Rename category</h3><button class="modal-close">&times;</button></div>
+          <div class="modal-body">
+            <p style="font-size:13px;color:var(--text-muted);margin-top:0;">
+              <strong>${esc(from)}</strong> is on ${n} product${n !== 1 ? 's' : ''}.
+              Renaming changes all of them.
+            </p>
+            <div class="form-group">
+              <label>New name</label>
+              <input type="text" id="cr-name" value="${esc(from)}" />
+            </div>
+            <div id="cr-err" class="alert alert-danger" style="display:none;"></div>
+          </div>
+          <div class="modal-footer" style="justify-content:space-between;">
+            <button class="btn btn-outline" id="cr-cancel">Cancel</button>
+            <button class="btn btn-primary" id="cr-save">Rename</button>
+          </div>
+        </div>`;
+      document.body.appendChild(modal);
+      const close = () => modal.remove();
+      modal.querySelector('.modal-close').addEventListener('click', close);
+      modal.querySelector('#cr-cancel').addEventListener('click', close);
+      modal.querySelector('#cr-save').addEventListener('click', () => {
+        const to = modal.querySelector('#cr-name').value.trim();
+        const err = modal.querySelector('#cr-err');
+        if (!to) { err.style.display = 'block'; err.textContent = 'Enter a name.'; return; }
+        if (to === from) { close(); return; }
+        DB.renameCategory(from, to);
+        if (state.category === from) state.category = to;
+        close();
+        refreshFacets();
+        renderList();
+      });
+      modal.querySelector('#cr-name').focus();
     };
 
     const showProductModal = (p = null) => {
       const isNew     = !p;
       const isCatalog = p?._source === 'catalog';
       const title     = isNew ? 'Add Custom Product' : isCatalog ? `Edit Catalog Product` : 'Edit Custom Product';
+      const facets    = DB.getProductFacets();
+      const catOpts   = Array.from(new Set([...DEFAULT_CATEGORIES, ...facets.categories]))
+                          .sort((a, b) => a.localeCompare(b));
 
       const modal = document.createElement('div');
       modal.className = 'modal-overlay';
       modal.id = 'products-modal';
       modal.innerHTML = `
-        <div class="modal" style="max-width:500px;">
+        <div class="modal" style="max-width:580px;">
           <div class="modal-header">
             <h3>${title}</h3>
             <button class="modal-close">&times;</button>
@@ -2131,8 +2314,9 @@ class SettingsScreen {
                  from McKesson and a custom one does not. -->
             <div style="background:var(--surface2);border-radius:var(--radius);padding:8px 14px;margin-bottom:14px;font-size:12px;color:var(--text-muted);">
               ${isCatalog
-                ? `McKesson# ${p.mckesson_item_no||'—'} &nbsp;·&nbsp; Catalogue price: ${Tax.fmt(p.suggested_retail||0)}`
+                ? `McKesson# ${esc(p.mckesson_item_no||'—')} &nbsp;·&nbsp; Catalogue price: ${Tax.fmt(p.suggested_retail||0)}`
                   + (p.regular_unit_price ? ` &nbsp;·&nbsp; McKesson cost: ${Tax.fmt(p.regular_unit_price)}` : '')
+                  + (p.family_group ? ` &nbsp;·&nbsp; Family group ${esc(p.family_group)}` : '')
                 : (isNew ? 'Custom product — added by you, not from the McKesson catalogue'
                          : 'Custom product &nbsp;·&nbsp; not synced from McKesson')}
             </div>
@@ -2140,12 +2324,45 @@ class SettingsScreen {
             <div style="display:grid;grid-template-columns:2fr 1fr;gap:12px;">
               <div class="form-group">
                 <label>Description <span style="color:var(--danger);">*</span></label>
-                <input type="text" id="mp-desc" value="${((isCatalog ? p.description : p?.description)||'').replace(/"/g,'&quot;')}" placeholder="Product name" />
+                <input type="text" id="mp-desc" value="${esc(p?.description || '')}" placeholder="Product name" />
               </div>
               <div class="form-group">
-                <label>UPC / Barcode</label>
-                <input type="text" id="mp-upc" value="${((isCatalog ? (p.upc_unit||p.gtin_unit) : p?.upc)||'').replace(/"/g,'&quot;')}" placeholder="Optional" />
+                <label>Item # ${isCatalog ? '' : '<span style="font-weight:400;color:var(--text-muted);">(your SKU)</span>'}</label>
+                <input type="text" id="mp-sku"
+                  value="${esc(isCatalog ? (p.mckesson_item_no || '') : (p?.sku || ''))}"
+                  placeholder="${isCatalog ? '' : 'Your own code'}" ${isCatalog ? 'disabled' : ''} />
+                ${isCatalog ? `<div style="font-size:11px;color:var(--text-muted);margin-top:3px;">McKesson's — not editable</div>` : ''}
               </div>
+            </div>
+
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;">
+              <div class="form-group">
+                <label>UPC / Barcode</label>
+                <input type="text" id="mp-upc" value="${esc(isCatalog ? (p.upc_unit || p.gtin_unit || '') : (p?.upc || ''))}" placeholder="Optional" />
+              </div>
+              <div class="form-group">
+                <label>Brand</label>
+                <input type="text" id="mp-brand" list="mp-brand-list" value="${esc(p?.brand || '')}" placeholder="e.g. Jamieson" />
+                <datalist id="mp-brand-list">${facets.brands.map(b => `<option value="${esc(b)}"></option>`).join('')}</datalist>
+              </div>
+              <div class="form-group">
+                <label>Category</label>
+                <input type="text" id="mp-category" list="mp-cat-list" value="${esc(p?.category || '')}" placeholder="Choose or type" />
+                <datalist id="mp-cat-list">${catOpts.map(c => `<option value="${esc(c)}"></option>`).join('')}</datalist>
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label>Tags <span style="font-weight:400;color:var(--text-muted);">(comma separated)</span></label>
+              <input type="text" id="mp-tags" value="${esc(p?.tags || '')}" placeholder="e.g. fridge, front-window, special-order" />
+              ${facets.tags.length ? `
+                <div style="margin-top:5px;display:flex;gap:4px;flex-wrap:wrap;align-items:center;">
+                  <span style="font-size:11px;color:var(--text-muted);">In use:</span>
+                  ${facets.tags.slice(0, 20).map(t => `
+                    <button type="button" class="mp-tag-add" data-tag="${esc(t)}"
+                      style="font-size:10px;padding:1px 7px;border-radius:9px;border:1px solid var(--border);
+                             background:var(--surface2);color:var(--text-muted);cursor:pointer;">${esc(t)}</button>`).join('')}
+                </div>` : ''}
             </div>
 
             <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;align-items:start;">
@@ -2218,17 +2435,19 @@ class SettingsScreen {
               <div class="form-group">
                 <label>Location</label>
                 <input type="text" id="mp-location"
-                  value="${p?.location||''}" placeholder="e.g. Aisle 3B" />
+                  value="${esc(p?.location || '')}" placeholder="e.g. Aisle 3B" />
               </div>
             </div>
 
             <div class="form-group">
               <label>Internal Notes</label>
               <textarea id="mp-notes" rows="2" style="resize:vertical;"
-                placeholder="Supplier info, storage instructions…">${p?.notes||''}</textarea>
+                placeholder="Supplier info, storage instructions…">${esc(p?.notes || '')}</textarea>
             </div>
 
-            <!-- Schedule / Controlled flag -->
+            <!-- Schedule / Controlled flag. This is a LEGAL control (it drives the
+                 counselling popup and the BTC log) — not a merchandising category.
+                 Category / Brand / Tags above are for that. -->
             <div class="form-group" style="background:var(--surface2);border-radius:var(--radius);padding:12px 14px;">
               <label style="font-weight:700;display:block;margin-bottom:8px;">
                 Schedule / Dispensing Category
@@ -2267,6 +2486,16 @@ class SettingsScreen {
       const close = () => modal.remove();
       modal.querySelector('.modal-close').addEventListener('click', close);
       modal.querySelector('#mp-cancel').addEventListener('click', close);
+
+      // Clicking a tag in "In use" appends it rather than making you retype it.
+      modal.querySelectorAll('.mp-tag-add').forEach(btn => btn.addEventListener('click', () => {
+        const input = modal.querySelector('#mp-tags');
+        const have  = DB.splitTags(input.value).map(t => t.toLowerCase());
+        const tag   = btn.dataset.tag;
+        if (have.includes(tag.toLowerCase())) return;
+        input.value = input.value.trim() ? `${input.value.replace(/,\s*$/, '')}, ${tag}` : tag;
+        input.focus();
+      }));
 
       /* Live margin. Falls back to the figures the card shows as placeholders,
          so a catalogue product with neither field filled still shows its real
@@ -2351,6 +2580,10 @@ class SettingsScreen {
         const pst      = modal.querySelector('#mp-pst').checked;
         const location     = modal.querySelector('#mp-location').value.trim();
         const notes        = modal.querySelector('#mp-notes').value.trim();
+        const category     = modal.querySelector('#mp-category').value.trim();
+        const brand        = modal.querySelector('#mp-brand').value.trim();
+        const tags         = modal.querySelector('#mp-tags').value.trim();
+        const sku          = modal.querySelector('#mp-sku').value.trim();
         const scheduleFlag = modal.querySelector('input[name="mp-schedule"]:checked')?.value || 'none';
         const scheduleSave = scheduleFlag === 'none' ? null : scheduleFlag;
 
@@ -2364,6 +2597,7 @@ class SettingsScreen {
             gst_applicable: gst, pst_applicable: pst,
             qty_on_hand: qty, qty_threshold: threshold, location, notes,
             schedule_flag: scheduleSave,
+            category, brand, tags,
           });
         } else {
           const desc = modal.querySelector('#mp-desc').value.trim();
@@ -2376,6 +2610,7 @@ class SettingsScreen {
               gst_applicable: gst, pst_applicable: pst,
               qty_on_hand: qty, qty_threshold: threshold, location, notes,
               schedule_flag: scheduleSave,
+              sku, category, brand, tags,
             });
           } else {
             // Before 1.4.17 this passed none of qty / threshold / location / notes,
@@ -2384,45 +2619,85 @@ class SettingsScreen {
               sale_price: salePrice, sale_start: saleStart, sale_end: saleEnd,
               gst_applicable: gst, pst_applicable: pst, created_by: Auth.current()?.name,
               qty_on_hand: qty, qty_threshold: threshold, location, notes,
-              schedule_flag: scheduleSave });
+              schedule_flag: scheduleSave,
+              sku, category, brand, tags });
           }
         }
         close();
-        renderList(content.querySelector('#prod-search').value, content.querySelector('#prod-filter').value);
+        refreshFacets();
+        renderList();
       });
 
       modal.querySelector('#mp-desc').focus();
     };
 
+    /* Exports EVERY row matching the current filters, not just the page on
+       screen — a price list with 50 of 312 rows in it is a trap. */
     const exportCSV = () => {
-      const customs = DB.getAllCustomProducts();
+      const opts = { term: state.term, filter: state.filter, category: state.category,
+                     brand: state.brand, tag: state.tag, pageSize: 1000000, page: 1 };
+      const customs = DB.queryCustomProducts(opts).rows;
+      const catalog = DB.queryCatalogProducts(opts).rows;
+      const line = (p, source) => {
+        const eff    = DB.effectivePrice(p);
+        const cost   = p.unit_cost ?? (source === 'catalog' ? p.regular_unit_price : null);
+        const margin = (eff.price > 0 && cost > 0) ? Tax.round2(eff.price - cost) : '';
+        return [
+          source === 'catalog' ? 'Catalogue' : 'Custom',
+          source === 'catalog' ? (p.mckesson_item_no || '') : (p.sku || ''),
+          p.description, p.brand || '', p.category || '', p.tags || '',
+          source === 'catalog' ? (p.upc_unit || p.gtin_unit || '') : (p.upc || ''),
+          cost ?? '', eff.regular, eff.isSale ? eff.price : '',
+          p.sale_start || '', p.sale_end || '', margin,
+          p.gst_applicable ? 'Y' : 'N', p.pst_applicable ? 'Y' : 'N',
+          p.qty_on_hand ?? '', p.qty_threshold ?? '', p.location || '',
+          p.schedule_flag || '', p.notes || '',
+        ];
+      };
       const rows = [
-        ['Source','Description','UPC','Cost','Price','Price Override','Margin','GST','PST','Qty on Hand','Reorder Threshold','Location','Notes'],
-        ...customs.map(p => {
-          const margin = (p.price > 0 && p.unit_cost > 0) ? Tax.round2(p.price - p.unit_cost) : '';
-          return ['Custom', p.description, p.upc||'', p.unit_cost??'', p.price, '', margin,
-                  p.gst_applicable?'Y':'N', p.pst_applicable?'Y':'N', p.qty_on_hand??'',
-                  p.qty_threshold??'', p.location||'', p.notes||''];
-        }),
+        ['Source','Item #','Description','Brand','Category','Tags','UPC','Cost','Price',
+         'Sale Price','Sale Starts','Sale Ends','Margin','GST','PST','Qty on Hand',
+         'Reorder Threshold','Location','Schedule','Notes'],
+        ...customs.map(p => line(p, 'custom')),
+        ...catalog.map(p => line(p, 'catalog')),
       ];
       const csv = rows.map(r => r.map(v => `"${String(v??'').replace(/"/g,'""')}"`).join(',')).join('\n');
       _downloadBlob(new Blob([csv], { type: 'text/csv' }), `products_export_${_dateStr()}.csv`);
     };
 
     const lowCount = DB.getLowStockProducts().length;
+    const tableHead = `
+      <thead><tr>
+        <th>Item #</th><th>Description</th><th>Brand</th><th>Category</th><th>UPC</th><th>Price</th>
+        <th style="text-align:center;">GST</th><th style="text-align:center;">PST</th>
+        <th style="text-align:center;">On Hand</th><th style="text-align:center;">Thr.</th>
+        <th>Location</th><th></th>
+      </tr></thead>`;
 
     content.innerHTML = `
       <div class="settings-section">
         <h3>Products</h3>
-        <div style="display:flex;gap:10px;align-items:center;margin-bottom:16px;flex-wrap:wrap;">
-          <input type="text" id="prod-search" placeholder="Search products or catalog…" style="flex:1;min-width:200px;" />
-          <select id="prod-filter" style="width:160px;">
-            <option value="all">All products</option>
-            <option value="low">Low / Out of stock ${lowCount>0?`(${lowCount})`:''}
-            </option>
-          </select>
+        <div style="display:flex;gap:10px;align-items:center;margin-bottom:10px;flex-wrap:wrap;">
+          <input type="text" id="prod-search" placeholder="Search name, item #, UPC, DIN or brand…" style="flex:1;min-width:220px;" />
           <button class="btn btn-primary btn-sm" id="btn-add-product">+ Add Custom</button>
           <button class="btn btn-outline btn-sm" id="btn-export-products">&#8659; Export CSV</button>
+        </div>
+        <div style="display:flex;gap:10px;align-items:center;margin-bottom:16px;flex-wrap:wrap;">
+          <select id="prod-filter" style="width:170px;">
+            <option value="all">All products</option>
+            <option value="low">Low / Out of stock ${lowCount>0?`(${lowCount})`:''}</option>
+          </select>
+          <select id="prod-category" style="width:170px;"><option value="">All categories</option></select>
+          <select id="prod-brand"    style="width:170px;"><option value="">All brands</option></select>
+          <select id="prod-tag"      style="width:150px;"><option value="">All tags</option></select>
+          <span style="flex:1;"></span>
+          <label style="font-size:12px;color:var(--text-muted);display:flex;align-items:center;gap:6px;">
+            Per page
+            <select id="prod-pagesize" style="width:80px;">
+              ${PAGE_SIZES.map(n => `<option value="${n}" ${n===state.pageSize?'selected':''}>${n}</option>`).join('')}
+            </select>
+          </label>
+          <button class="btn btn-outline btn-sm" id="btn-clear-filters">Clear filters</button>
         </div>
 
         ${lowCount > 0 ? `
@@ -2432,47 +2707,75 @@ class SettingsScreen {
           </div>` : ''}
 
         <h4 style="font-size:13px;color:var(--text-muted);margin-bottom:6px;">Custom Products</h4>
-        <div style="overflow-x:auto;margin-bottom:20px;">
+        <div style="overflow-x:auto;margin-bottom:6px;">
           <table class="table" style="font-size:13px;">
-            <thead><tr>
-              <th>Description</th><th>UPC</th><th>Price</th>
-              <th style="text-align:center;">GST</th><th style="text-align:center;">PST</th>
-              <th style="text-align:center;">On Hand</th><th style="text-align:center;">Threshold</th>
-              <th>Location</th><th></th>
-            </tr></thead>
+            ${tableHead}
             <tbody id="custom-list"></tbody>
           </table>
         </div>
+        <div id="custom-pager" style="margin-bottom:20px;"></div>
 
         <h4 style="font-size:13px;color:var(--text-muted);margin-bottom:6px;">
-          McKesson Catalog (${DB.getProductCount().toLocaleString()} items — search to browse &amp; edit)
+          McKesson Catalog — <span id="catalog-count">0</span> of
+          ${DB.getProductCount().toLocaleString()} items shown
         </h4>
-        <div style="overflow-x:auto;">
+        <div style="overflow-x:auto;margin-bottom:6px;">
           <table class="table" style="font-size:13px;">
-            <thead><tr>
-              <th>Description</th><th>UPC</th><th>Price</th>
-              <th style="text-align:center;">GST</th><th style="text-align:center;">PST</th>
-              <th style="text-align:center;">On Hand</th><th style="text-align:center;">Threshold</th>
-              <th>Location</th><th></th>
-            </tr></thead>
+            ${tableHead}
             <tbody id="catalog-list"></tbody>
           </table>
         </div>
+        <div id="catalog-pager"></div>
+
+        <hr style="margin:22px 0 14px;" />
+        <h4 style="font-size:13px;color:var(--text-muted);margin-bottom:8px;">Categories in use</h4>
+        <div id="cat-manage" style="margin-bottom:6px;"></div>
+        <div style="font-size:11px;color:var(--text-muted);">
+          Add a category by typing it on any product. Renaming here changes every product that carries it.
+        </div>
       </div>`;
 
-    content.querySelector('#prod-search').addEventListener('input', e =>
-      renderList(e.target.value, content.querySelector('#prod-filter').value));
-    content.querySelector('#prod-filter').addEventListener('change', e =>
-      renderList(content.querySelector('#prod-search').value, e.target.value));
+    // Searching or filtering must return to page 1 — otherwise a narrower
+    // filter leaves you on page 7 of 2 results and the table looks empty.
+    const reset = () => { state.customPage = 1; state.catalogPage = 1; };
+
+    content.querySelector('#prod-search').addEventListener('input', e => {
+      state.term = e.target.value; reset(); renderList();
+    });
+    content.querySelector('#prod-filter').addEventListener('change', e => {
+      state.filter = e.target.value; reset(); renderList();
+    });
+    content.querySelector('#prod-category').addEventListener('change', e => {
+      state.category = e.target.value; reset(); renderList();
+    });
+    content.querySelector('#prod-brand').addEventListener('change', e => {
+      state.brand = e.target.value; reset(); renderList();
+    });
+    content.querySelector('#prod-tag').addEventListener('change', e => {
+      state.tag = e.target.value; reset(); renderList();
+    });
+    content.querySelector('#prod-pagesize').addEventListener('change', e => {
+      state.pageSize = parseInt(e.target.value, 10) || 50; reset(); renderList();
+    });
+    content.querySelector('#btn-clear-filters').addEventListener('click', () => {
+      state.term = ''; state.filter = 'all'; state.category = ''; state.brand = ''; state.tag = '';
+      content.querySelector('#prod-search').value = '';
+      content.querySelector('#prod-filter').value = 'all';
+      reset(); refreshFacets(); renderList();
+    });
     content.querySelector('#btn-add-product').addEventListener('click', () => showProductModal(null));
     content.querySelector('#btn-export-products').addEventListener('click', exportCSV);
     content.querySelector('#btn-show-low')?.addEventListener('click', e => {
       e.preventDefault();
+      state.filter = 'low';
       content.querySelector('#prod-filter').value = 'low';
-      renderList('', 'low');
+      reset(); renderList();
     });
-    renderList('');
+
+    refreshFacets();
+    renderList();
   }
+
 
   _renderStaff(content) {
     const allStaff = DB.getAllStaff();

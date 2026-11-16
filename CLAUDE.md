@@ -42,7 +42,7 @@ is a Mac (this repo). **Claude cannot run the app** — the user tests on Window
 - **Must stay in sync with** `electron-app/package.json` `"version"` (that names the installer `.exe`).
 - Shown in-app on the **login screen** and **Settings top-right**.
 - Scheme: `MAJOR.MINOR.PATCH`. Most builds = PATCH bump.
-- **Current version: 1.4.17**
+- **Current version: 1.4.18**
 - When making a build, bump both files and note it in the Work Log below.
 
 ---
@@ -195,7 +195,49 @@ pharmacy-pos/
 
 ## Work Log (newest first — append new entries here)
 
-### 1.4.17 — (current)
+### 1.4.18 — (current)
+**Asked: "where do we see the item number, can we add pagination, and tags/category other than BTC?"**
+All three were missing. No `main.js`/`preload.js` change.
+- **Item number was invisible.** It appeared only in the grey bar at the top of the Edit card, for
+  catalogue products. Now a monospaced **Item #** column in both tables and a field on the card (read-only
+  for catalogue — it is McKesson's). Custom products gain **`sku`**, their own code; they previously had no
+  identifier at all beyond the description.
+- **The catalogue could not be browsed, and silently hid rows.** It required 2 typed characters, and
+  `searchProducts` caps at **80** with nothing on screen saying so — a search with 300 hits showed 80 and
+  claimed nothing was wrong. Same silent-truncation class as 1.4.10 / 1.4.13 / 1.4.16. New
+  **`DB.queryCatalogProducts` / `queryCustomProducts`** page properly and return
+  `{ rows, total, page, pages, pageSize }`, so the page always states *"Showing 1–50 of 312"*.
+  `total` is counted with the **same WHERE clause** as `rows`, so the count and the table cannot disagree.
+  Page size 50/100/250; an out-of-range page **clamps** rather than stranding you on an empty table.
+  `searchProducts` is untouched — the till still uses it.
+- **Classification separated from the BTC flag.** `schedule_flag` is a *legal* control (counselling popup,
+  BTC log) and was the only classifier there was. New **`category`**, **`brand`**, **`tags`** columns on
+  both tables, each a filter on the page and a column in the CSV. Tags are comma-separated, normalised
+  through `_normTags` (lower-case, de-duplicated, whitespace squashed) so "Fridge" and "fridge" are one tag.
+  Tag filtering matches `,tag,` — a bare LIKE would have made **`cold` match `cold-chain`**.
+- **Category is free text with suggestions** (datalist seeded with 9 pharmacy categories ∪ what is in use),
+  so typing creates one. **Categories in use** below the tables shows each with its product count and
+  renames it across **both tables** at once — `DB.renameCategory` returns how many rows changed rather than
+  claiming success. Brand has autocomplete from brands already entered; tags in use are clickable chips.
+- **`family_group` (WEBCAT positions 91–94) is now stored.** The parser has always read it and thrown it
+  away, so the catalogue can be bulk-categorised later without re-downloading it. It is McKesson's own
+  4-char code, not a readable name — a lookup table would still be needed to turn it into "Cough & Cold".
+- **CSV now exports every row matching the current filters**, both sources, all pages — not the 50 on
+  screen. A price list containing 50 of 312 rows is a trap.
+- Rename uses an in-app modal, not `window.prompt()` (gotcha 8). Five `SETTINGS_SEARCH` entries added
+  (gotcha 11): category, brand, tags, rename, per-page.
+- **Tests — `node tests/product-browse.test.js` (66 assertions)**: real `db.js` functions against a real
+  SQLite schema and 120 catalogue rows, so the old 80 cap is demonstrably gone. Covers totals vs pages,
+  non-overlapping pages, clamping (page 99, page 0, `'abc'`, junk page size), empty-term listing, search by
+  item #/SKU/brand/UPC, every filter and two combinations, the `cold` vs `cold-chain` trap, tag
+  normalisation, that both save paths persist the new fields, facets spanning both tables, rename across
+  both tables and its refusals, and `family_group` surviving a re-sync.
+- **Not yet exercised on Windows** — the 12-column tables, the pager and the category chips want a real look.
+- **Deliberately not done:** the POS Custom Products popup still has no search, so a SKU is not yet a till
+  lookup; and `family_group` is stored but nothing reads it.
+- `?v=`: `version.js`(23), `db.js`(37), `webcat.js`(5), `settings.js`(64).
+
+### 1.4.17
 **Reported: "every product card should be the same"** — plus cost, and in-house promotions.
 No `main.js`/`preload.js` change.
 - **One card for both product types.** `showProductModal` branched on `isCatalog` and produced two

@@ -289,6 +289,23 @@ const DB = (() => {
       "ALTER TABLE custom_products ADD COLUMN sale_price REAL",
       "ALTER TABLE custom_products ADD COLUMN sale_start TEXT",
       "ALTER TABLE custom_products ADD COLUMN sale_end   TEXT",
+      // 1.4.18: classification that is NOT the BTC schedule flag. schedule_flag is a
+      // legal dispensing control (counselling popup, BTC log) and must not double as
+      // a merchandising category — so category/brand/tags are their own columns.
+      // tags is a comma-separated list, stored lower-case via _normTags.
+      "ALTER TABLE products ADD COLUMN category TEXT",
+      "ALTER TABLE products ADD COLUMN brand    TEXT",
+      "ALTER TABLE products ADD COLUMN tags     TEXT",
+      "ALTER TABLE custom_products ADD COLUMN category TEXT",
+      "ALTER TABLE custom_products ADD COLUMN brand    TEXT",
+      "ALTER TABLE custom_products ADD COLUMN tags     TEXT",
+      // 1.4.18: a custom product's own code. Catalogue products have
+      // mckesson_item_no; items the pharmacy stocks itself had no code at all.
+      "ALTER TABLE custom_products ADD COLUMN sku TEXT",
+      // 1.4.18: WEBCAT positions 91-94. The parser has always read this and thrown
+      // it away; stored now so the catalogue can be bulk-categorised later without
+      // re-downloading it. It is McKesson's own 4-char code, not a readable name.
+      "ALTER TABLE products ADD COLUMN family_group TEXT",
       // 1.4.9: PHNs imported from WinRx could carry its CHAR padding ("9876543210   "),
       // which broke AR's PHN matching. Trim them — unless that would clash with a record.
       "UPDATE patients SET phn = TRIM(phn) WHERE phn != TRIM(phn) AND TRIM(phn) NOT IN (SELECT phn FROM patients)",
@@ -661,21 +678,25 @@ const DB = (() => {
       if (existing) {
         run(`UPDATE custom_products SET description=?,price=?,unit_cost=?,gst_applicable=?,
              pst_applicable=?,qty_on_hand=?,qty_threshold=?,location=?,notes=?,
-             schedule_flag=?,sale_price=?,sale_start=?,sale_end=? WHERE upc=?`,
+             schedule_flag=?,sale_price=?,sale_start=?,sale_end=?,
+             sku=?,category=?,brand=?,tags=? WHERE upc=?`,
           [p.description, p.price, n(p.unit_cost), p.gst_applicable?1:0, p.pst_applicable?1:0,
            n(p.qty_on_hand), n(p.qty_threshold), p.location||null, p.notes||null,
-           p.schedule_flag||null, n(p.sale_price), p.sale_start||null, p.sale_end||null, p.upc]);
+           p.schedule_flag||null, n(p.sale_price), p.sale_start||null, p.sale_end||null,
+           p.sku||null, p.category||null, p.brand||null, _normTags(p.tags), p.upc]);
         return existing.custom_product_id;
       }
     }
     run(`INSERT INTO custom_products
          (description,upc,price,unit_cost,gst_applicable,pst_applicable,created_by,
-          qty_on_hand,qty_threshold,location,notes,schedule_flag,sale_price,sale_start,sale_end)
-         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          qty_on_hand,qty_threshold,location,notes,schedule_flag,sale_price,sale_start,sale_end,
+          sku,category,brand,tags)
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [p.description, p.upc||null, p.price, n(p.unit_cost), p.gst_applicable?1:0,
        p.pst_applicable?1:0, p.created_by||null, n(p.qty_on_hand), n(p.qty_threshold),
        p.location||null, p.notes||null, p.schedule_flag||null,
-       n(p.sale_price), p.sale_start||null, p.sale_end||null]);
+       n(p.sale_price), p.sale_start||null, p.sale_end||null,
+       p.sku||null, p.category||null, p.brand||null, _normTags(p.tags)]);
     return lastInsertId();
   }
   function getAllCustomProducts() {
@@ -705,12 +726,13 @@ const DB = (() => {
 
   const PRODUCT_COLS = ['mckesson_item_no','description','upc_unit','gtin_unit','din',
     'suggested_retail','regular_unit_price','gst_applicable','pst_applicable',
-    'narcotic_indicator','product_status','last_synced'];
+    'narcotic_indicator','product_status','family_group','last_synced'];
 
   function _productValues(p, now) {
     return [p.mckesson_item_no, p.description, p.upc_unit, p.gtin_unit, p.din,
             p.suggested_retail, p.regular_unit_price, p.gst_applicable?1:0,
-            p.pst_applicable?1:0, p.narcotic_indicator, p.product_status, now];
+            p.pst_applicable?1:0, p.narcotic_indicator, p.product_status,
+            p.family_group ?? null, now];
   }
 
   function upsertProducts(products) {
@@ -729,6 +751,7 @@ const DB = (() => {
         pst_applicable=excluded.pst_applicable,
         narcotic_indicator=excluded.narcotic_indicator,
         product_status=excluded.product_status,
+        family_group=excluded.family_group,
         last_synced=excluded.last_synced
     `);
     try {
@@ -768,6 +791,7 @@ const DB = (() => {
     // Always kept in step with the catalogue.
     updatable.push(['narcotic_indicator', p => p.narcotic_indicator]);
     updatable.push(['product_status',     p => p.product_status]);
+    updatable.push(['family_group',       p => p.family_group ?? null]);
     updatable.push(['last_synced',        () => now]);
 
     if (newItems) {
@@ -810,6 +834,129 @@ const DB = (() => {
     return all(`SELECT * FROM products WHERE (description LIKE ? OR upc_unit LIKE ? OR din LIKE ? OR mckesson_item_no LIKE ?)
                 AND product_status != 'D' ORDER BY description LIMIT ?`, [t, t, t, t, limit]);
   }
+
+  /* ─────────────────────────────────────────────────────────────────────
+     Paged product browsing (1.4.18).
+
+     searchProducts above caps at 80 rows and says nothing about the ones it
+     dropped, and the Products page could not list the catalogue at all — it
+     required a search term. Both are the same silent-truncation fault we keep
+     finding: the query succeeds and quietly shows less than the truth.
+
+     queryProducts returns { rows, total, page, pages, pageSize } so the caller
+     can always state "Showing 1-50 of 312". total is counted with the SAME
+     WHERE clause as rows, so the two can never disagree.                    */
+
+  /* Tags are a comma-separated list. Stored lower-case, de-duplicated and
+     without blanks so that a tag typed as "Fridge , fridge" is one tag. */
+  function _normTags(s) {
+    if (!s) return null;
+    const seen = [];
+    String(s).split(',').forEach(raw => {
+      const t = raw.trim().toLowerCase().replace(/\s+/g, ' ');
+      if (t && !seen.includes(t)) seen.push(t);
+    });
+    return seen.length ? seen.join(',') : null;
+  }
+  function splitTags(s) {
+    return s ? String(s).split(',').map(t => t.trim()).filter(Boolean) : [];
+  }
+
+  /* One WHERE builder per table, so a filter cannot be applied to the rows and
+     forgotten on the count. `cols` names the searchable text columns. */
+  function _productWhere(opts, cols, extra) {
+    const where = [], params = [];
+    if (extra) where.push(extra);
+    const term = (opts.term || '').trim();
+    if (term) {
+      where.push('(' + cols.map(c => `${c} LIKE ?`).join(' OR ') + ')');
+      cols.forEach(() => params.push(`%${term}%`));
+    }
+    if (opts.filter === 'low') {
+      where.push('qty_threshold IS NOT NULL AND qty_on_hand IS NOT NULL AND qty_on_hand <= qty_threshold');
+    }
+    if (opts.category) { where.push('category = ?'); params.push(opts.category); }
+    if (opts.brand)    { where.push('brand = ?');    params.push(opts.brand); }
+    if (opts.tag) {
+      // ','||tags||',' so "cold" cannot match "cold-chain"
+      where.push("(','||LOWER(COALESCE(tags,''))||',') LIKE ?");
+      params.push(`%,${String(opts.tag).trim().toLowerCase()},%`);
+    }
+    return { sql: where.length ? 'WHERE ' + where.join(' AND ') : '', params };
+  }
+
+  function _page(table, opts, cols, extra) {
+    const pageSize = Math.max(1, parseInt(opts.pageSize, 10) || 50);
+    const w = _productWhere(opts, cols, extra);
+    const total = get(`SELECT COUNT(*) as c FROM ${table} ${w.sql}`, w.params)?.c || 0;
+    const pages = Math.max(1, Math.ceil(total / pageSize));
+    // Clamp, so deleting the last row of page 7 does not strand the user on an
+    // empty page with no way back.
+    const page   = Math.min(Math.max(1, parseInt(opts.page, 10) || 1), pages);
+    const rows   = all(`SELECT * FROM ${table} ${w.sql} ORDER BY description LIMIT ? OFFSET ?`,
+                       [...w.params, pageSize, (page - 1) * pageSize]);
+    return { rows, total, page, pages, pageSize };
+  }
+
+  function queryCatalogProducts(opts = {}) {
+    return _page('products', opts,
+      ['description', 'upc_unit', 'gtin_unit', 'din', 'mckesson_item_no', 'brand'],
+      "COALESCE(product_status,'A') != 'D'");
+  }
+  function queryCustomProducts(opts = {}) {
+    return _page('custom_products', opts,
+      ['description', 'upc', 'sku', 'brand'], null);
+  }
+
+  /* Values already in use, for the filter dropdowns and the brand autocomplete.
+     Read from BOTH tables so a brand entered on a custom product still offers
+     itself when editing a catalogue one. */
+  function getProductFacets() {
+    const col = (name) => {
+      const out = [];
+      ['products', 'custom_products'].forEach(t => {
+        all(`SELECT DISTINCT ${name} as v FROM ${t} WHERE ${name} IS NOT NULL AND TRIM(${name}) != ''`)
+          .forEach(r => { if (!out.includes(r.v)) out.push(r.v); });
+      });
+      return out.sort((a, b) => String(a).localeCompare(String(b)));
+    };
+    const tags = [];
+    ['products', 'custom_products'].forEach(t => {
+      all(`SELECT DISTINCT tags as v FROM ${t} WHERE tags IS NOT NULL AND TRIM(tags) != ''`)
+        .forEach(r => splitTags(r.v).forEach(tag => { if (!tags.includes(tag)) tags.push(tag); }));
+    });
+    return { categories: col('category'), brands: col('brand'), tags: tags.sort() };
+  }
+
+  /* Categories in use, with how many products carry each — so the owner can see
+     what a rename would affect before doing it. */
+  function getCategoryCounts() {
+    const counts = {};
+    ['products', 'custom_products'].forEach(t => {
+      all(`SELECT category as c, COUNT(*) as n FROM ${t}
+           WHERE category IS NOT NULL AND TRIM(category) != '' GROUP BY category`)
+        .forEach(r => { counts[r.c] = (counts[r.c] || 0) + r.n; });
+    });
+    return Object.keys(counts).sort((a, b) => a.localeCompare(b))
+      .map(c => ({ category: c, count: counts[c] }));
+  }
+
+  /* Rename a category everywhere at once. Returns how many rows changed, so the
+     caller can report it rather than claiming success blindly. */
+  function renameCategory(from, to) {
+    const f = (from || '').trim();
+    const t = (to || '').trim();
+    if (!f || !t || f === t) return 0;
+    let n = 0;
+    _inTransaction(() => {
+      ['products', 'custom_products'].forEach(tbl => {
+        n += (get(`SELECT COUNT(*) as c FROM ${tbl} WHERE category = ?`, [f])?.c || 0);
+        _db.run(`UPDATE ${tbl} SET category = ? WHERE category = ?`, [t, f]);
+      });
+    });
+    _persist();
+    return n;
+  }
   /* ─────────────────────────────────────────────────────────────────────
      THE one place a product's selling price is decided. POS, shelf tags and
      reports must all call this — two price calculations is how the old app
@@ -842,21 +989,25 @@ const DB = (() => {
   function updateCustomProduct(id, p) {
     run(`UPDATE custom_products SET description=?,upc=?,price=?,unit_cost=?,gst_applicable=?,
          pst_applicable=?,qty_on_hand=?,qty_threshold=?,location=?,notes=?,schedule_flag=?,
-         sale_price=?,sale_start=?,sale_end=? WHERE custom_product_id=?`,
+         sale_price=?,sale_start=?,sale_end=?,sku=?,category=?,brand=?,tags=?
+         WHERE custom_product_id=?`,
       [p.description, p.upc||null, p.price, p.unit_cost??null, p.gst_applicable?1:0,
        p.pst_applicable?1:0, p.qty_on_hand??null, p.qty_threshold??null, p.location||null,
        p.notes||null, p.schedule_flag??null,
-       p.sale_price??null, p.sale_start||null, p.sale_end||null, id]);
+       p.sale_price??null, p.sale_start||null, p.sale_end||null,
+       p.sku||null, p.category||null, p.brand||null, _normTags(p.tags), id]);
   }
 
   function updateCatalogProduct(id, p) {
     const sets = ['price_override=?','unit_cost=?','gst_applicable=?','pst_applicable=?',
                   'qty_on_hand=?','qty_threshold=?','location=?','notes=?','schedule_flag=?',
-                  'sale_price=?','sale_start=?','sale_end=?'];
+                  'sale_price=?','sale_start=?','sale_end=?',
+                  'category=?','brand=?','tags=?'];
     const vals = [p.price_override??null, p.unit_cost??null, p.gst_applicable?1:0, p.pst_applicable?1:0,
                   p.qty_on_hand??null, p.qty_threshold??null, p.location||null, p.notes||null,
                   p.schedule_flag??null,
-                  p.sale_price??null, p.sale_start||null, p.sale_end||null];
+                  p.sale_price??null, p.sale_start||null, p.sale_end||null,
+                  p.category||null, p.brand||null, _normTags(p.tags)];
     if (p.description !== undefined) { sets.push('description=?'); vals.push(p.description||null); }
     if (p.upc_unit    !== undefined) { sets.push('upc_unit=?');    vals.push(p.upc_unit||null); }
     vals.push(id);
@@ -1156,6 +1307,8 @@ const DB = (() => {
     findProductByBarcode, findCustomProductByBarcode, saveCustomProduct,
     getAllCustomProducts, deleteCustomProduct, updateCustomProduct,
     effectivePrice, saleIsActive,
+    queryCatalogProducts, queryCustomProducts, getProductFacets, splitTags, normTags: _normTags,
+    getCategoryCounts, renameCategory,
     exportDb, updateCatalogProduct, adjustStock, getLowStockProducts, searchProducts,
     upsertProducts, upsertProductsSelective, getProductCount, getLastSyncTime,
     getSalesSummary, getInventoryValuation, getTotalCollectedInRange, getSalesByMethod, getSoldProducts, getTransactionsInRange,

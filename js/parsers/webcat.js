@@ -141,6 +141,10 @@ const WebcatParser = (() => {
       gtin_pack:          _digitsOrNull(_extract(text, ...FIELDS.gtin_pack, shift)),
       gtin_case:          _digitsOrNull(_extract(text, ...FIELDS.gtin_case, shift)),
       din:                _extract(text, ...FIELDS.din, shift) || null,
+      // McKesson's own 4-char grouping code. Stored since 1.4.18 so the
+      // catalogue can be bulk-categorised without re-downloading it; it is a
+      // code, not a readable category name.
+      family_group:       _extract(text, ...FIELDS.family_group, shift) || null,
       suggested_retail:   _parsePrice(_extract(text, ...FIELDS.suggested_retail, shift)),
       // Cost price, kept under its historical column name. Never use it as a
       // selling price — see CLAUDE.md 1.4.10.
