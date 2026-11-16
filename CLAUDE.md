@@ -42,7 +42,7 @@ is a Mac (this repo). **Claude cannot run the app** — the user tests on Window
 - **Must stay in sync with** `electron-app/package.json` `"version"` (that names the installer `.exe`).
 - Shown in-app on the **login screen** and **Settings top-right**.
 - Scheme: `MAJOR.MINOR.PATCH`. Most builds = PATCH bump.
-- **Current version: 1.4.14**
+- **Current version: 1.4.15**
 - When making a build, bump both files and note it in the Work Log below.
 
 ---
@@ -195,7 +195,31 @@ pharmacy-pos/
 
 ## Work Log (newest first — append new entries here)
 
-### 1.4.14 — (current)
+### 1.4.15 — (current)
+**Reported from the floor: "staff was not able to see it" — the receipt prompt.** Two causes, one of them
+not cosmetic. No `main.js`/`preload.js` change.
+- **The prompt rendered UNDERNEATH the RPh sign-off modal.** 1.4.14 put it at `z-index:9000`;
+  `_showRphSignatureModal` is `z-index:9500` with a full-screen `rgba(0,0,0,.6)` backdrop, and the sale path
+  opened the sign-off FIRST and the prompt immediately after. So on any **Rx sale with a patient** the prompt
+  was not merely subtle — it was behind a dimming layer, invisible and unclickable. OTC sales showed it, but
+  as a small corner toast that is easy to miss across a counter.
+- **Now a large centred modal** (`inset:0`, `z-index:9600`): transaction total at 34px, the question at 22px,
+  four 150px-wide buttons with icons, Print highlighted and focused so Enter works, and a bold countdown.
+- **Sequenced, not stacked.** `_showRphSignatureModal` takes a new **`onClose`** callback fired once from
+  either exit (Skip, or 1.8 s after signing), guarded by `_closed` so it cannot double-fire. Both live sale
+  paths now chain: sign-off → then the receipt prompt. With no patient PHN the prompt shows immediately.
+  Two centred modals must never be open together, and the old comment claiming the corner box "won't block
+  the RPh modal" had it backwards — the RPh modal blocked *it*.
+- **The 15 s timeout still prints**, so nothing was lost while this was invisible: receipts kept printing
+  exactly as before 1.4.14, staff just had no practical way to choose. That safety net is why this was a
+  usability fault rather than lost paperwork.
+- Verified by static assertions over the patched source (13 checks: callback wiring, both exits, no
+  double-fire, both paths chained, no stacking, full-screen overlay, z-order above 9500, no corner
+  positioning left, focus, timeout, shortcuts, listener cleanup) plus the 18 delivery tests still passing.
+- **Still not exercised on the Windows POS** — the modal's size and the Enter-to-print focus want one real sale.
+- `?v=`: `version.js`(20), `pos.js`(87).
+
+### 1.4.14
 **"Ask before printing" — the receipt prompt now offers Print / Email / Both / None.**
 No `main.js`/`preload.js` change, but rebuild so `resources/app/` stays in step.
 - **Why.** Every sale printed, unconditionally, including $0 pick-ups — paper nobody took. The old corner

@@ -1682,10 +1682,12 @@ class POSScreen {
         const savedPatient = this._patient;
         this.newTransaction();
         if (savedPatient?.phn) {
-          this._showRphSignatureModal(saved.txn, saved.items, saved.payments, savedPatient);
+          this._showRphSignatureModal(saved.txn, saved.items, saved.payments, savedPatient,
+            () => this._offerPostSaleReceipt(saved, savedPatient));
+        } else {
+          // $0 pick-ups used to print via _saveTransactionMulti; now they ask too.
+          this._offerPostSaleReceipt(saved, savedPatient);
         }
-        // $0 pick-ups used to print via _saveTransactionMulti; now they ask too.
-        this._offerPostSaleReceipt(saved, savedPatient);
       }).catch(e => alert('Error saving transaction: ' + e.message));
       return;
     }
@@ -2036,11 +2038,14 @@ class POSScreen {
         const savedPatient = this._patient;
         close();
         this.newTransaction();
+        // Sign-off first, then the receipt prompt — they are both centred
+        // modals and must not overlap.
         if (savedPatient?.phn) {
-          this._showRphSignatureModal(saved.txn, saved.items, saved.payments, savedPatient);
+          this._showRphSignatureModal(saved.txn, saved.items, saved.payments, savedPatient,
+            () => this._offerPostSaleReceipt(saved, savedPatient));
+        } else {
+          this._offerPostSaleReceipt(saved, savedPatient);
         }
-        // Print / email the receipt (corner prompt — won't block the RPh modal)
-        this._offerPostSaleReceipt(saved, savedPatient);
       } catch(e) {
         errEl.style.display = 'block'; errEl.textContent = 'Error: ' + e.message;
       }
@@ -3828,27 +3833,43 @@ class POSScreen {
     let   left = SECS;
     let   done = false;
 
+    // A CENTRED MODAL, not a corner toast. 1.4.14 used a small box at
+    // bottom-right with z-index 9000 — staff reported never seeing it, and on
+    // an Rx sale it rendered UNDERNEATH the RPh sign-off overlay (z-index 9500,
+    // full-screen backdrop), so it was invisible rather than merely subtle.
     const box = document.createElement('div');
     box.id = 'post-sale-receipt';
-    box.style.cssText = `position:fixed;bottom:16px;right:16px;z-index:9000;
-      background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
-      box-shadow:0 4px 20px rgba(0,0,0,.25);padding:14px 16px;max-width:330px;`;
+    box.style.cssText = `position:fixed;inset:0;z-index:9600;background:rgba(0,0,0,.55);
+      display:flex;align-items:center;justify-content:center;`;
+    const btn = `padding:22px 10px;font-size:19px;font-weight:700;border-radius:var(--radius);
+                 cursor:pointer;border:2px solid var(--border);background:var(--surface2);
+                 color:var(--text);min-width:150px;`;
     box.innerHTML = `
-      <div style="font-weight:700;font-size:14px;margin-bottom:2px;">
-        &#10003; Sale complete — #${saved.txn.transaction_id}
-        <span style="float:right;">${Tax.fmt(saved.txn.total_amount || 0)}</span>
-      </div>
-      <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px;">How should they get the receipt?</div>
-      <div style="display:flex;gap:6px;flex-wrap:wrap;">
-        <button id="psr-print" class="btn btn-primary btn-sm" style="flex:1;">&#128424; Print <u>P</u></button>
-        ${canEmail ? '<button id="psr-email" class="btn btn-outline btn-sm" style="flex:1;">&#9993; Email <u>E</u></button>' : ''}
-        ${canEmail ? '<button id="psr-both" class="btn btn-outline btn-sm" style="flex:1;">Both <u>B</u></button>' : ''}
-        <button id="psr-none" class="btn btn-outline btn-sm">None</button>
-      </div>
-      <div id="psr-count" style="font-size:11px;color:var(--text-muted);margin-top:8px;">
-        Printing in ${SECS}s…
+      <div style="background:var(--surface);border-radius:var(--radius);
+                  box-shadow:0 12px 50px rgba(0,0,0,.4);padding:30px 34px;
+                  max-width:640px;width:92%;text-align:center;">
+        <div style="font-size:17px;color:var(--text-muted);margin-bottom:4px;">
+          &#10003; Sale complete — #${saved.txn.transaction_id}
+        </div>
+        <div style="font-size:34px;font-weight:800;margin-bottom:6px;">
+          ${Tax.fmt(saved.txn.total_amount || 0)}
+        </div>
+        <div style="font-size:22px;font-weight:700;margin-bottom:22px;">
+          How should they get the receipt?
+        </div>
+        <div style="display:flex;gap:12px;justify-content:center;flex-wrap:wrap;">
+          <button id="psr-print" style="${btn}border-color:var(--primary);
+                  background:var(--primary);color:#fff;">&#128424;<br/>Print <u>P</u></button>
+          ${canEmail ? `<button id="psr-email" style="${btn}">&#9993;<br/>Email <u>E</u></button>` : ''}
+          ${canEmail ? `<button id="psr-both"  style="${btn}">&#128236;<br/>Both <u>B</u></button>` : ''}
+          <button id="psr-none" style="${btn}">&#10005;<br/>None</button>
+        </div>
+        <div id="psr-count" style="font-size:15px;color:var(--text-muted);margin-top:20px;">
+          Printing automatically in <strong>${SECS}</strong>s…
+        </div>
       </div>`;
     document.body.appendChild(box);
+    setTimeout(() => { try { box.querySelector('#psr-print').focus(); } catch(_) {} }, 50);
 
     const cleanup = () => {
       done = true;
@@ -3880,7 +3901,7 @@ class POSScreen {
     const tick = setInterval(() => {
       left--;
       const el = box.querySelector('#psr-count');
-      if (el) el.textContent = `Printing in ${left}s…`;
+      if (el) el.innerHTML = `Printing automatically in <strong>${left}</strong>s…`;
       if (left <= 0) choose('print');          // timeout prints — never nothing
     }, 1000);
   }
@@ -4182,7 +4203,12 @@ class POSScreen {
     });
   }
 
-  _showRphSignatureModal(txn, items, payments, patient) {
+  /* onClose fires once, however the modal is dismissed — used to chain the
+     receipt prompt after sign-off instead of stacking it underneath this
+     overlay's backdrop (CLAUDE.md 1.4.15). */
+  _showRphSignatureModal(txn, items, payments, patient, onClose) {
+    let _closed = false;
+    const fireClose = () => { if (_closed) return; _closed = true; try { onClose && onClose(); } catch(_) {} };
     const overlay = document.createElement('div');
     overlay.style.cssText = `
       position:fixed;inset:0;background:rgba(0,0,0,.6);
@@ -4409,7 +4435,7 @@ class POSScreen {
       hasSignature = false;
     });
 
-    overlay.querySelector('#rph-skip').addEventListener('click', () => overlay.remove());
+    overlay.querySelector('#rph-skip').addEventListener('click', () => { overlay.remove(); fireClose(); });
 
     overlay.querySelector('#rph-confirm').addEventListener('click', async () => {
       const name             = overlay.querySelector('#rph-name').value.trim();
@@ -4500,7 +4526,7 @@ class POSScreen {
         const via = folderOk && sqlOk ? 'folder + SQL' : folderOk ? 'folder' : 'SQL';
         btn.textContent      = `✓ Pick Up Confirmation saved (${via})`;
         btn.style.background = '#28a745';
-        setTimeout(() => overlay.remove(), 1800);
+        setTimeout(() => { overlay.remove(); fireClose(); }, 1800);
       } else {
         btn.disabled    = false;
         btn.textContent = 'Retry Upload';
