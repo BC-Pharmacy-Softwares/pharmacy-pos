@@ -42,7 +42,7 @@ is a Mac (this repo). **Claude cannot run the app** — the user tests on Window
 - **Must stay in sync with** `electron-app/package.json` `"version"` (that names the installer `.exe`).
 - Shown in-app on the **login screen** and **Settings top-right**.
 - Scheme: `MAJOR.MINOR.PATCH`. Most builds = PATCH bump.
-- **Current version: 1.4.19**
+- **Current version: 1.4.20**
 - When making a build, bump both files and note it in the Work Log below.
 
 ---
@@ -173,6 +173,14 @@ pharmacy-pos/
     refund → `{ ok, refundId, amount, result }` — `payments.clover_payment_id` holds the reference for
     whichever terminal took the payment (the column name is historical). Never read more than the last 4.
 
+16. **Never use mssql's global `sql.connect()` — always `new sql.ConnectionPool(cfg)`.** The global
+    `connect(config)` IGNORES its config when a global pool already exists and returns the live one, so
+    "open a second connection to test, then close it" closes the app's only connection. A closed pool
+    answers every query with **"Connection is closed."** (`ECONNCLOSED`) and never recovers by itself.
+    Also: `!!sqlPool` is not "connected" — use `sqlPoolIsLive()` (`pool.connected`). All WinRx routes sit
+    behind `ensureSqlPool()` (reconnect on demand, single-flight, 5 s cool-down); a new route that calls
+    `sqlPool.request()` MUST be added to `SQL_ROUTES` — `tests/sql-pool.test.js` fails if it is not.
+
 ---
 
 ## What's Been Built (feature state)
@@ -212,7 +220,45 @@ pharmacy-pos/
 
 ## Work Log (newest first — append new entries here)
 
-### 1.4.19 — (current)
+### 1.4.20 — (current)
+**Reported (screenshot): Accounts Receivable — `WinRx unavailable: API error 500: {"error":"Connection is
+closed."}`.** **⚠ `main.js` changed → REBUILD REQUIRED.**
+- **ROOT CAUSE — "Test Connection" closed the live WinRx connection.** The app connected with mssql's
+  *global* pool. `sql.connect(config)` ignores its config when a global pool exists and returns the live
+  one (read in mssql 10.0.5 `lib/global-connection.js`), and the `test-sql-connection` handler did
+  `const pool = await sql.connect(config); await pool.close();`. Its own comment said *"without saving or
+  replacing the live pool"*; it did the opposite. Every lookup after that — patients, Rx, AR — failed with
+  "Connection is closed." until the app was restarted or the settings were re-saved. Confirmed against
+  the real library that a non-connected pool gives exactly that message (`ECONNCLOSED`), and it is the
+  only path in the app that produces it (a failed re-save nulls the pool → a different error).
+- **And it reported itself healthy.** `get-sql-config` returned `connected: !!sqlPool` — a closed pool is
+  still an object — so Settings and `SettingsHealth` said WinRx was connected while nothing worked.
+  Same family as 1.4.10/1.4.13/1.4.16: failing while reporting success.
+- **Fix (`main.js`, SQL-POOL block):** every pool is its own `new ConnectionPool` — `testSqlConnection()`
+  cannot touch the live one. The pool gets an `error` listener (an unhandled `error` event on an idle
+  pool would crash the app). `connected` now means `pool.connected`.
+- **Self-healing.** `ensureSqlPool()` runs before every WinRx route: a closed or lost pool is reconnected
+  with the remembered config, concurrent lookups share ONE reconnect, and after a failed attempt the app
+  answers "not connected" immediately for 5 s rather than queueing the till behind connection timeouts.
+  If it cannot reconnect the route answers **503** with a sentence naming the fix.
+- **WinRx off when the POS starts no longer needs a restart.** Routes used to be registered only
+  `if (sqlPool)` at start-up, and the renderer was only pointed at the local API if connected at that
+  moment. Both now key off "configured", so the first lookup after WinRx comes up connects.
+- `addSqlRoutes` is idempotent (Save used to re-register every route each time).
+- `pharmacy-dashboard.js` unwraps `{"error":"…"}` so the screen shows the sentence, not raw JSON.
+- **Tests — `node tests/sql-pool.test.js` (47 assertions)**: lifts the real block out of `main.js` and
+  runs it against a fake mssql that copies the global-pool behaviour — first reproducing the fault with
+  the OLD code shape, then: tests never touch the live pool (good, failed, ten in a row), a closed pool
+  heals, six concurrent lookups make one pool, down → fail fast → cool-down → recover, WinRx off at
+  start-up, no config, credential change, plus wiring checks including **every route that queries WinRx
+  is behind the reconnect middleware**.
+- **Not run against a real SQL Server** — none is reachable from the Mac. The fake models the two
+  library behaviours that matter; both were checked against the real mssql 10.0.5 package.
+- **Workaround on ≤1.4.19:** restart the POS (or Settings → WinRx Connection → Save). Don't press
+  *Test Connection* on those versions.
+- `?v=`: `version.js`(25), `pharmacy-dashboard.js`(22).
+
+### 1.4.19
 **Asked: "our Card Terminal is just for Clover — what if someone uses Moneris?"** then *"add an option
 for Core Semi-Integrated (V400c / V400m) … I have Clover but my friend has Moneris."*
 **⚠ `main.js` + `preload.js` changed (three new IPC handlers) → REBUILD REQUIRED.**

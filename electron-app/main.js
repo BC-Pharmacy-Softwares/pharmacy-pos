@@ -277,6 +277,43 @@ function getSqlConfigPath() {
 /* ------------------------------------------------------------------
    Connect to WinRx SQL Server
 ------------------------------------------------------------------ */
+/* SQL-POOL-BEGIN  (tests/sql-pool.test.js extracts this block)
+
+   1.4.20 — why this was rewritten.
+   The app connected with mssql's GLOBAL pool: `sql.connect(config)`. That call
+   IGNORES its config when a global pool already exists and simply hands back
+   the live one. Settings -> WinRx Connection -> "Test Connection" did
+   `const pool = await sql.connect(config); await pool.close();` — so testing
+   the connection CLOSED THE LIVE POOL. `sqlPool` still pointed at the dead
+   object, every lookup then failed with "Connection is closed.", Settings
+   kept reporting "connected" (it only checked that the variable was set), and
+   nothing reconnected until the app was restarted.
+
+   Now: every pool is its own `new ConnectionPool` (a test can never touch the
+   live one), the last good config is remembered, and ensureSqlPool() brings a
+   closed pool back before a request is answered.                           */
+let lastSqlConfig   = null;   // what the live pool was opened with
+let sqlReconnecting = null;   // single-flight: one reconnect at a time
+let sqlLastFailAt   = 0;      // when the last reconnect attempt failed
+const SQL_RETRY_COOLDOWN_MS = 5000;
+
+function sqlDriverConfig(config) {
+  return {
+    server:   config.server,
+    database: config.database,
+    user:     config.user,
+    password: config.password,
+    options: {
+      trustServerCertificate: true,
+      enableArithAbort:       true,
+    },
+  };
+}
+
+function sqlPoolIsLive() {
+  return !!(sqlPool && sqlPool.connected);
+}
+
 async function connectSQL(configOverride) {
   // Close existing pool if reconnecting
   if (sqlPool) {
@@ -300,23 +337,62 @@ async function connectSQL(configOverride) {
   }
 
   try {
-    const sql = require('mssql');
-    sqlPool = await sql.connect({
-      server:   config.server,
-      database: config.database,
-      user:     config.user,
-      password: config.password,
-      options: {
-        trustServerCertificate: true,
-        enableArithAbort:       true,
-      },
-    });
+    const sql  = require('mssql');
+    const pool = new sql.ConnectionPool(sqlDriverConfig(config));
+    // Without a listener, a connection error on an idle pool is an unhandled
+    // 'error' event — which would take the whole app down.
+    pool.on('error', (err) => console.error('WinRx SQL pool error:', err && err.message));
+    await pool.connect();
+    sqlPool       = pool;
+    lastSqlConfig = config;
     console.log('✓ Connected to WinRx SQL Server:', config.server, '/', config.database);
   } catch (e) {
     console.error('✗ WinRx SQL connection failed:', e.message);
     sqlPool = null;
+    // Keep the config even though this attempt failed: the server may simply
+    // be down right now, and ensureSqlPool() should be able to try it again.
+    lastSqlConfig = config;
   }
 }
+
+/* Make sure there is a live pool, reconnecting if it was closed or lost.
+   Concurrent callers share ONE reconnect instead of each opening a pool.
+   Returns true when a live pool is available. */
+async function ensureSqlPool() {
+  if (sqlPoolIsLive()) return true;
+  if (!sqlReconnecting) {
+    // While the server is down every lookup would otherwise wait out a full
+    // connection timeout. After a failed attempt, answer "not connected" at
+    // once for a few seconds instead of queueing the till behind retries.
+    if (Date.now() - sqlLastFailAt < SQL_RETRY_COOLDOWN_MS) return false;
+    console.log('WinRx SQL connection is not live — reconnecting…');
+    sqlReconnecting = connectSQL(lastSqlConfig || undefined)
+      .catch(() => {})
+      .then(() => {
+        sqlReconnecting = null;
+        if (!sqlPoolIsLive()) sqlLastFailAt = Date.now();
+      });
+  }
+  await sqlReconnecting;
+  return sqlPoolIsLive();
+}
+
+/* Try a set of credentials WITHOUT touching the live pool. */
+async function testSqlConnection(config) {
+  let pool = null;
+  try {
+    const sql = require('mssql');
+    pool = new sql.ConnectionPool(sqlDriverConfig(config));
+    pool.on('error', () => {});
+    await pool.connect();
+    return { ok: true, message: `Connected to ${config.server} / ${config.database}` };
+  } catch (e) {
+    return { ok: false, message: e.message };
+  } finally {
+    if (pool) { try { await pool.close(); } catch (_) {} }
+  }
+}
+/* SQL-POOL-END */
 
 /* ------------------------------------------------------------------
    IPC handlers — called from Settings → SQL Connection tab
@@ -741,7 +817,8 @@ function registerIpcHandlers() {
         database:  cfg.database || 'winrxdata',
         user:      cfg.user     || '',
         password:  cfg.password || '',   // sent back so field isn't blank; stays local
-        connected: !!sqlPool,
+        // A pool object that has been closed is NOT a connection (1.4.20).
+        connected: sqlPoolIsLive(),
       };
     } catch (_) {
       return { server: '', database: 'winrxdata', user: '', password: '', connected: false };
@@ -750,20 +827,8 @@ function registerIpcHandlers() {
 
   // Test a connection without saving or replacing the live pool
   ipcMain.handle('test-sql-connection', async (_, config) => {
-    try {
-      const sql  = require('mssql');
-      const pool = await sql.connect({
-        server:   config.server,
-        database: config.database,
-        user:     config.user,
-        password: config.password,
-        options:  { trustServerCertificate: true, enableArithAbort: true },
-      });
-      await pool.close();
-      return { ok: true, message: `Connected to ${config.server} / ${config.database}` };
-    } catch (e) {
-      return { ok: false, message: e.message };
-    }
+    // Its own pool — see the SQL-POOL block. The old code closed the LIVE pool.
+    return testSqlConnection(config || {});
   });
 
   // Save config to sql-config.json and reconnect live pool
@@ -854,8 +919,27 @@ function mapDrug(d) {
    Add WinRx SQL API routes to Express
    These mirror the Cloudflare Worker endpoints exactly.
 ------------------------------------------------------------------ */
+let sqlRoutesAdded = false;
+
 function addSqlRoutes(expressApp) {
+  // save-sql-config calls this on every Save; register the routes only once.
+  if (sqlRoutesAdded) return;
+  sqlRoutesAdded = true;
   const sql = require('mssql');
+
+  /* Every WinRx route needs a live pool. If it was closed or lost, reconnect
+     BEFORE the route runs — and if that fails, say so plainly instead of
+     letting each route throw "Connection is closed." (1.4.20). */
+  const SQL_ROUTES = ['/getPatient', '/getPatients', '/getRxTx', '/debug-rx', '/getPatientProfile',
+    '/getAllBilled', '/getPatientBilled', '/getAllBilledByRx', '/getRxOwners', '/getStore',
+    '/getDrug', '/saveDocument', '/list-document-tables', '/schema-search', '/all-tables'];
+  expressApp.use(SQL_ROUTES, async (req, res, next) => {
+    if (await ensureSqlPool()) return next();
+    res.status(503).json({
+      error: 'WinRx is not connected and could not be reconnected. Check that the WinRx computer is on, ' +
+             'then Settings → WinRx & McKesson → WinRx Connection.',
+    });
+  });
 
   /* /ping — health check */
   expressApp.all('/ping', (req, res) => {
@@ -1594,8 +1678,10 @@ function startServer(appDir) {
     _expressApp.use(express.json({ limit: '10mb' })); // parse JSON request bodies (large for base64 PDFs)
     _expressApp.use(express.static(appDir));   // serve the POS HTML/JS files
 
-    // Add SQL API routes if connected
-    if (sqlPool) addSqlRoutes(_expressApp);
+    // Add SQL API routes if a WinRx connection is configured — even when the
+    // first attempt failed (server off at start-up): the routes reconnect on
+    // demand, so the app recovers without a restart.
+    if (sqlPool || lastSqlConfig) addSqlRoutes(_expressApp);
 
     server = http.createServer(_expressApp);
     server.listen(0, '127.0.0.1', () => resolve(server.address().port));
@@ -1646,7 +1732,9 @@ async function createWindow() {
     // Always inject so the app knows the correct port even if SQL connects later
     mainWindow.webContents.executeJavaScript(
       `window.__WINRX_LOCAL_PORT__ = ${port};` +
-      (sqlPool
+      // Configured counts, not just "connected right now": if WinRx was off at
+      // start-up the routes reconnect on demand, so the app must still use them.
+      ((sqlPool || lastSqlConfig)
         ? `window.__WINRX_LOCAL_API__ = 'http://127.0.0.1:${port}';
            console.log('✓ WinRx local SQL API active:', window.__WINRX_LOCAL_API__);`
         : `console.log('ℹ SQL not connected — configure in Settings → SQL Connection');`)

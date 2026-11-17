@@ -60,7 +60,12 @@ const PharmacyDashboardAPI = (() => {
 
     if (!resp.ok) {
       const text = await resp.text().catch(() => resp.statusText);
-      throw new Error(`API error ${resp.status}: ${text}`);
+      // The local API answers errors as {"error":"…"}. Show the sentence, not
+      // the raw JSON — staff were reading `API error 500: {"error":"Connection
+      // is closed."}` (1.4.20).
+      let msg = null;
+      try { msg = JSON.parse(text)?.error || null; } catch (_) {}
+      throw new Error(msg ? String(msg) : `API error ${resp.status}: ${text}`);
     }
     return resp.json();
   }
