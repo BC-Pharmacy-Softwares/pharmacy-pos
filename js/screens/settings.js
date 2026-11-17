@@ -22,7 +22,7 @@ const SETTINGS_NAV = [
   ]},
   { icon: '💳', group: 'Card Terminal', pages: [
     { id: 'clover', label: 'Card Terminal', admin: true,
-      about: 'Connect and pair the Clover terminal that takes card payments.' },
+      about: 'Choose which terminal takes card payments — Clover, Moneris, or any standalone terminal — and set it up.' },
   ]},
   { icon: '🔗', group: 'WinRx & McKesson', pages: [
     { id: 'sql', label: 'WinRx Connection', desktop: true,
@@ -99,6 +99,10 @@ const SETTINGS_SEARCH = [
   { t: 'Sign-off mode (PIN or tick)',       tab: 'staff', sel: '',                     k: 'signoff attestation pharmacist' },
   { t: 'Checklist items pre-ticked',        tab: 'staff', sel: '',                     k: 'opening closing default sod eod' },
 
+  { t: 'Choose the card terminal',          tab: 'clover', sel: '#term-type',          k: 'clover moneris standalone square global payments terminal brand debit credit pinpad' },
+  { t: 'Moneris terminal IP address',       tab: 'clover', sel: '#mn-host',            k: 'moneris core semi-integrated v400c v400m listening port' },
+  { t: 'Moneris message format',            tab: 'clover', sel: '#mn-tmpl-sale',       k: 'moneris request reply template integration' },
+  { t: 'Moneris terminal log',              tab: 'clover', sel: '#mn-log-path',        k: 'moneris log diagnostics troubleshoot reply' },
   { t: 'Clover device IP address',          tab: 'clover', sel: '#cl-device-ip',       k: 'card terminal payment debit credit' },
   { t: 'Pair with Clover',                  tab: 'clover', sel: '#btn-clover-pair',    k: 'pairing code terminal' },
   { t: 'Test the card terminal',            tab: 'clover', sel: '#btn-ping-clover',    k: 'clover connection' },
@@ -495,7 +499,7 @@ class SettingsScreen {
       case 'pharmacy':     this._renderPharmacy(content);     break;
       case 'receipt':      this._renderReceipt(content);      break;
       case 'datetime':     this._renderDateTime(content);     break;
-      case 'clover':       this._renderClover(content);       break;
+      case 'clover':       this._renderCardTerminal(content); break;
       case 'mckesson':     this._renderMcKesson(content);     break;
       case 'staff':        this._renderStaff(content);        break;
       case 'products':     this._renderProducts(content);     break;
@@ -1294,6 +1298,325 @@ class SettingsScreen {
   }
 
   /* ── Card Terminal (Clover) — was the middle of "API Credentials" ── */
+  /* ── Card Terminal (1.4.19) ───────────────────────────────────────────
+     The page used to BE the Clover page. It now starts with "which terminal
+     do you use?" and shows that terminal's settings underneath. The Clover
+     settings themselves (_renderClover) are unchanged — they are simply
+     rendered into the lower half when Clover is the terminal in use.      */
+  async _renderCardTerminal(content) {
+    const current = await Terminal.type();
+    const esc = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;')
+                                    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+
+    content.innerHTML = `
+      <div class="settings-section">
+        <h3>Card Terminal</h3>
+        <div class="text-muted" style="font-size:13px;margin-bottom:10px;">
+          Which terminal takes card payments at this till?
+        </div>
+        <div id="term-type" style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+          ${Terminal.all().map(t => `
+            <label style="display:flex;gap:10px;align-items:flex-start;cursor:pointer;padding:10px 12px;
+                          border:2px solid ${t.id === current ? 'var(--primary)' : 'var(--border)'};
+                          border-radius:var(--radius);background:${t.id === current ? 'var(--surface2)' : 'transparent'};">
+              <input type="radio" name="term-type" value="${t.id}" ${t.id === current ? 'checked' : ''} style="margin-top:3px;" />
+              <span>
+                <span style="font-weight:700;font-size:14px;">${esc(t.label)}</span>
+                <span style="display:block;font-size:12px;color:var(--text-muted);margin-top:2px;">${esc(t.blurb)}</span>
+              </span>
+            </label>`).join('')}
+        </div>
+        <div id="term-type-status" style="font-size:12px;margin-top:8px;color:var(--text-muted);"></div>
+      </div>
+      <div id="term-body"></div>`;
+
+    const body = content.querySelector('#term-body');
+    const renderBody = async (t) => {
+      if (t === 'clover')       return this._renderClover(body);
+      if (t === 'moneris')      return this._renderMoneris(body);
+      if (t === 'standalone') {
+        body.innerHTML = `
+          <div class="settings-section">
+            <h3>Standalone terminal</h3>
+            <div class="alert alert-info" style="font-size:13px;">
+              Nothing to connect. This works with <strong>any</strong> terminal — Moneris, Global Payments,
+              Square, a bank terminal — because the POS does not talk to it.
+            </div>
+            <div style="font-size:13px;line-height:1.7;">
+              <strong>At the till:</strong> choose Debit or Credit, tap <em>Add Payment</em>, key the amount into
+              the terminal, let the customer pay, then confirm <em>Approved</em> in the POS. Card type, last 4
+              digits and auth code are optional and print on the receipt when entered.<br>
+              <strong>Refunds:</strong> the POS asks you to refund the card on the terminal and saves the refund
+              record once you confirm it was done.<br>
+              <strong>End of day:</strong> card totals in the POS reports are what staff confirmed — compare them
+              with the terminal's own batch report.
+            </div>
+          </div>`;
+        return;
+      }
+      body.innerHTML = `
+        <div class="settings-section">
+          <h3>No card terminal</h3>
+          <div class="alert alert-info" style="font-size:13px;">
+            Debit, Credit and Manual Card Entry are hidden at the till. Cash, Insurance and AR still work.
+          </div>
+        </div>`;
+    };
+
+    content.querySelectorAll('input[name="term-type"]').forEach(r => {
+      r.addEventListener('change', async () => {
+        if (!r.checked) return;
+        await Config.set('terminal_type', r.value);
+        // Re-render so the highlighted card and the lower half both follow.
+        await this._renderCardTerminal(content);
+        const st = content.querySelector('#term-type-status');
+        if (st) {
+          st.textContent = `✓ Saved — card payments now use: ${Terminal.info(r.value).label}.`;
+          st.style.color = 'var(--success)';
+        }
+      });
+    });
+
+    await renderBody(current);
+  }
+
+  /* ── Moneris Core Semi-Integrated ─────────────────────────────────────
+     Connection settings are documented by Moneris (terminal IP + Listening
+     Port). The MESSAGE FORMAT is not published — it arrives with the
+     pharmacy's Moneris integration package — so it is a set of boxes here
+     rather than a guess in code, and the log shows every exchange.        */
+  async _renderMoneris(content) {
+    const cfg = await Config.getAll();
+    const D   = MonerisAPI.DEFAULTS;
+    const v   = (k) => {
+      const x = cfg['moneris_' + k];
+      const unset = x === undefined || x === null || (x === '' && k !== 'terminator');
+      return String(unset ? D[k] : x)
+        .replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
+    };
+    const host = String(cfg.moneris_host || '').replace(/"/g,'&quot;');
+
+    content.innerHTML = `
+      <div class="settings-section">
+        <h3>Moneris Core — Semi-Integrated</h3>
+        <div class="alert alert-warning" style="font-size:13px;">
+          <strong>Beta — needs your Moneris integration details.</strong>
+          The connection below is standard, but Moneris does not publish the message format the terminal
+          expects; it comes with your integration package from Moneris. Fill in <em>Message format</em> from
+          that document, run a small test sale, and check the terminal log — it shows exactly what the
+          terminal replied. Until that is confirmed, <strong>Standalone terminal</strong> (above) takes card
+          payments on the same device with no setup.
+        </div>
+
+        <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px;line-height:1.6;">
+          On the terminal: switch on integration (Semi-Integrated), choose Ethernet / Wi-Fi / USB, note the
+          <strong>Listening Port</strong>, and give the terminal a <strong>static IP address</strong>.
+          The POS computer must be on the same network.
+        </div>
+
+        <div style="display:grid;grid-template-columns:2fr 1fr 1fr;gap:12px;">
+          <div class="form-group">
+            <label>Terminal IP address</label>
+            <input type="text" id="mn-host" value="${host}" placeholder="e.g. 192.168.0.60" style="font-family:monospace;" />
+          </div>
+          <div class="form-group">
+            <label>Listening Port</label>
+            <input type="text" id="mn-port" value="${v('port')}" placeholder="from the terminal" style="font-family:monospace;" />
+          </div>
+          <div class="form-group">
+            <label>ECR / till ID</label>
+            <input type="text" id="mn-ecr" value="${v('ecr')}" style="font-family:monospace;" />
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px;flex-wrap:wrap;">
+          <button class="btn btn-primary btn-sm" id="btn-mn-save">💾 Save Moneris settings</button>
+          <button class="btn btn-outline btn-sm" id="btn-mn-test">Test connection</button>
+          <span id="mn-status" style="font-size:13px;"></span>
+        </div>
+        <div class="text-muted" style="font-size:11px;margin-bottom:16px;">
+          Test connection only checks that the terminal answers at that address — it takes no payment.
+        </div>
+
+        <details id="mn-format" style="margin-bottom:16px;">
+          <summary style="cursor:pointer;font-weight:700;font-size:14px;">Message format (from your Moneris integration document)</summary>
+          <div style="margin-top:12px;">
+            <div class="text-muted" style="font-size:12px;margin-bottom:10px;">
+              Placeholders: <code>{ecr}</code> till ID · <code>{amount}</code> · <code>{ref}</code> the POS's reference
+              (for a refund, the original payment's reference when known).
+              Use <code>\\n</code> <code>\\r</code> <code>\\x02</code> <code>\\x03</code> for control characters.
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+              <div class="form-group">
+                <label>Purchase request</label>
+                <input type="text" id="mn-tmpl-sale" value="${v('tmpl_sale')}" style="font-family:monospace;" />
+              </div>
+              <div class="form-group">
+                <label>Refund request</label>
+                <input type="text" id="mn-tmpl-refund" value="${v('tmpl_refund')}" style="font-family:monospace;" />
+              </div>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px;">
+              <div class="form-group">
+                <label>Request ends with</label>
+                <input type="text" id="mn-terminator" value="${v('terminator')}" style="font-family:monospace;" />
+              </div>
+              <div class="form-group">
+                <label>Amount as</label>
+                <select id="mn-amount-format">
+                  <option value="dollars" ${v('amount_format') === 'dollars' ? 'selected' : ''}>13.50 (dollars)</option>
+                  <option value="cents"   ${v('amount_format') === 'cents'   ? 'selected' : ''}>1350 (cents)</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>Wait for reply (s)</label>
+                <input type="number" id="mn-timeout" min="10" max="300" value="${v('timeout_s')}" />
+              </div>
+              <div class="form-group">
+                <label>Ignore replies up to (bytes)</label>
+                <input type="number" id="mn-ack" min="0" max="16" value="${v('ack_max_len')}" />
+              </div>
+            </div>
+            <div class="text-muted" style="font-size:11px;margin:-4px 0 12px;">
+              Terminals usually acknowledge at once with a single byte and send the real result after the card
+              is run. Replies no longer than "Ignore replies up to" are treated as that acknowledgement.
+            </div>
+
+            <div style="font-weight:600;font-size:13px;margin-bottom:6px;">Reading the reply</div>
+            <div class="text-muted" style="font-size:12px;margin-bottom:8px;">
+              A JSON reply is read automatically. Otherwise the reply is split on the separator and the
+              positions below (counting from 0) say where each value is.
+            </div>
+            <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;">
+              <div class="form-group"><label>Separator</label>
+                <input type="text" id="mn-resp-sep" value="${v('resp_sep')}" style="font-family:monospace;" /></div>
+              <div class="form-group"><label>Result position</label>
+                <input type="number" id="mn-resp-approved-idx" min="0" value="${v('resp_approved_idx')}" /></div>
+              <div class="form-group"><label>…equals when approved</label>
+                <input type="text" id="mn-resp-approved-value" value="${v('resp_approved_value')}" style="font-family:monospace;" /></div>
+              <div class="form-group"><label>Auth code position</label>
+                <input type="number" id="mn-resp-auth-idx" min="0" value="${v('resp_auth_idx')}" /></div>
+              <div class="form-group"><label>Reference position</label>
+                <input type="number" id="mn-resp-ref-idx" min="0" value="${v('resp_ref_idx')}" /></div>
+              <div class="form-group"><label>Card number position</label>
+                <input type="number" id="mn-resp-last4-idx" min="0" value="${v('resp_last4_idx')}" /></div>
+              <div class="form-group"><label>Card type position</label>
+                <input type="number" id="mn-resp-card-idx" min="0" value="${v('resp_card_idx')}" /></div>
+            </div>
+            <div class="text-muted" style="font-size:11px;">
+              Only the last 4 digits of a card number are ever kept, whatever the terminal sends.
+            </div>
+
+            <div style="margin-top:12px;padding:10px 12px;background:var(--surface2);border-radius:var(--radius);">
+              <div style="font-size:12px;font-weight:600;margin-bottom:4px;">What the POS will send for a $13.50 purchase</div>
+              <code id="mn-preview" style="font-size:12px;word-break:break-all;"></code>
+            </div>
+          </div>
+        </details>
+
+        <div class="settings-section" style="margin-top:6px;">
+          <h4 style="font-size:14px;margin-bottom:6px;">Terminal log</h4>
+          <div class="text-muted" style="font-size:12px;margin-bottom:8px;">
+            Every message sent to the terminal and every reply, with card numbers removed. This is where
+            you see the real reply format after a test sale.
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+            <code id="mn-log-path" style="font-size:12px;word-break:break-all;">Checking…</code>
+            <button class="btn btn-outline btn-sm" id="btn-mn-open-log" style="display:none;">&#128193; Open folder</button>
+          </div>
+        </div>
+      </div>`;
+
+    const $ = sel => content.querySelector(sel);
+    const status = (msg, color) => { const el = $('#mn-status'); el.textContent = msg; el.style.color = color; };
+
+    const collect = () => ({
+      moneris_host:          $('#mn-host').value.trim(),
+      moneris_port:          $('#mn-port').value.trim(),
+      moneris_ecr:           $('#mn-ecr').value.trim(),
+      moneris_tmpl_sale:     $('#mn-tmpl-sale').value,
+      moneris_tmpl_refund:   $('#mn-tmpl-refund').value,
+      moneris_terminator:    $('#mn-terminator').value,
+      moneris_amount_format: $('#mn-amount-format').value,
+      moneris_timeout_s:     $('#mn-timeout').value.trim(),
+      moneris_ack_max_len:   $('#mn-ack').value.trim(),
+      moneris_resp_sep:            $('#mn-resp-sep').value,
+      moneris_resp_approved_idx:   $('#mn-resp-approved-idx').value.trim(),
+      moneris_resp_approved_value: $('#mn-resp-approved-value').value.trim(),
+      moneris_resp_auth_idx:       $('#mn-resp-auth-idx').value.trim(),
+      moneris_resp_ref_idx:        $('#mn-resp-ref-idx').value.trim(),
+      moneris_resp_last4_idx:      $('#mn-resp-last4-idx').value.trim(),
+      moneris_resp_card_idx:       $('#mn-resp-card-idx').value.trim(),
+    });
+
+    /* Shows the exact bytes for a sample sale, control characters visible, so a
+       typo in the template is seen here rather than on a declined card. */
+    const updatePreview = () => {
+      const c = collect();
+      const sample = MonerisAPI.buildRequest(c.moneris_tmpl_sale, {
+        ecr: c.moneris_ecr || D.ecr,
+        amount: MonerisAPI._amount(1350, c.moneris_amount_format),
+        ref: 'abc123',
+      }) + MonerisAPI._unescape(c.moneris_terminator);
+      $('#mn-preview').textContent = sample.replace(/[\x00-\x1f\x7f]/g,
+        ch => '\\x' + ch.charCodeAt(0).toString(16).padStart(2, '0'));
+    };
+    content.querySelectorAll('#mn-format input, #mn-format select, #mn-ecr')
+      .forEach(el => el.addEventListener('input', updatePreview));
+    updatePreview();
+
+    const validate = (c) => {
+      if (!c.moneris_host) return 'Enter the terminal IP address.';
+      if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(c.moneris_host)) return 'The terminal address must be an IP address such as 192.168.0.60.';
+      const port = parseInt(c.moneris_port, 10);
+      if (!(port > 0 && port < 65536)) return 'Enter the Listening Port shown on the terminal (1–65535).';
+      if (!/\{amount\}/.test(c.moneris_tmpl_sale))   return 'The purchase request must contain {amount}.';
+      if (!/\{amount\}/.test(c.moneris_tmpl_refund)) return 'The refund request must contain {amount}.';
+      return null;
+    };
+
+    // One setMany — many concurrent Config.set calls race (CLAUDE.md gotcha 4).
+    const save = async () => {
+      const c = collect();
+      const problem = validate(c);
+      if (problem) { status('⚠ ' + problem, 'var(--danger)'); return false; }
+      await Config.setMany(c);
+      status('✓ Saved.', 'var(--success)');
+      return true;
+    };
+
+    $('#btn-mn-save').addEventListener('click', save);
+    $('#btn-mn-test').addEventListener('click', async () => {
+      if (!(await save())) return;
+      status('Connecting…', 'var(--text-muted)');
+      try {
+        const res = await MonerisAPI.ping();
+        status((res.ok ? '✓ ' : '✗ ') + res.message, res.ok ? 'var(--success)' : 'var(--danger)');
+      } catch (e) {
+        status('✗ ' + e.message, 'var(--danger)');
+      }
+    });
+
+    (async () => {
+      const el  = $('#mn-log-path');
+      const btn = $('#btn-mn-open-log');
+      if (!window.electronAPI?.getTerminalLogPath) {
+        el.textContent = 'Only available in the desktop app.';
+        return;
+      }
+      try {
+        const info = await window.electronAPI.getTerminalLogPath();
+        el.textContent = info?.path || 'Not available.';
+        if (info?.dir && btn) {
+          btn.style.display = '';
+          btn.addEventListener('click', () => window.electronAPI.openFolder(info.dir));
+        }
+        if (info && info.exists === false) el.textContent += '  (no entries yet — written on the first connection)';
+      } catch (e) {
+        el.textContent = 'Could not read the log path: ' + e.message;
+      }
+    })();
+  }
+
   async _renderClover(content) {
     const cfg = await Config.getAll();
     content.innerHTML = `

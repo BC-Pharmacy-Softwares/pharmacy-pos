@@ -61,7 +61,14 @@ const SettingsHealth = (() => {
     if (!staff.some(s => s.license_number))
       add('staff', 'warn', 'No pharmacist has a License # — sign-offs can only be typed by hand, with no PIN or saved signature.');
 
-    if (!c.clover_device_ip) add('clover', 'setup', 'Card terminal is not set up.', '#cl-device-ip');
+    // 1.4.19: the check follows whichever terminal is selected. A standalone
+    // terminal needs no setup, and "No card terminal" is a choice, not a fault.
+    const termType = c.terminal_type || 'clover';
+    if (termType === 'clover' && !c.clover_device_ip) {
+      add('clover', 'setup', 'Card terminal is not set up.', '#cl-device-ip');
+    } else if (termType === 'moneris' && !(c.moneris_host && c.moneris_port)) {
+      add('clover', 'setup', 'The Moneris terminal address is not set.', '#mn-host');
+    }
 
     if (window.electronAPI?.getSqlConfig) {
       try {
@@ -123,7 +130,7 @@ const SettingsLink = (() => {
     ['Settings → WinRx & McKesson → WinRx Connection',           'sql',          '#sql-server'],
     ['Settings → Folders & Backup',                              'folders',      ''],
     ['Settings → Email & Reports',                               'emailreports', '#er-service'],
-    ['Settings → Card Terminal',                                 'clover',       '#cl-device-ip'],
+    ['Settings → Card Terminal',                                 'clover',       '#term-type'],
   ];
   const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const canOpen = () => typeof Auth !== 'undefined' && Auth.isManager();   // cashiers can't open Settings

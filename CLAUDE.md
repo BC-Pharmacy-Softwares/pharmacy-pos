@@ -42,7 +42,7 @@ is a Mac (this repo). **Claude cannot run the app** — the user tests on Window
 - **Must stay in sync with** `electron-app/package.json` `"version"` (that names the installer `.exe`).
 - Shown in-app on the **login screen** and **Settings top-right**.
 - Scheme: `MAJOR.MINOR.PATCH`. Most builds = PATCH bump.
-- **Current version: 1.4.18**
+- **Current version: 1.4.19**
 - When making a build, bump both files and note it in the Work Log below.
 
 ---
@@ -68,6 +68,8 @@ pharmacy-pos/
 │   ├── api/
 │   │   ├── mckesson.js     # SOAP: catalog/upload/invoices (via electronAPI.mckessonSoap)
 │   │   ├── clover.js       # talks to local clover bridge
+│   │   ├── terminal.js     # WHICH card terminal is in use (clover/moneris/standalone/none) — the POS asks this, not CloverAPI
+│   │   ├── moneris.js      # Moneris Core Semi-Integrated driver (message format is configurable, NOT hard-coded)
 │   │   ├── pharmacy-dashboard.js  # WinRx lookups (via local SQL API or Cloudflare worker)
 │   │   └── email.js
 │   ├── utils/
@@ -158,6 +160,19 @@ pharmacy-pos/
     download them). Any build from a fresh checkout — e.g. the release workflow — must download them first
     (sql.js 1.10.2, bcryptjs 2.4.3) or the app ships without its database engine and won't start.
 
+15. **Card terminals go through `Terminal` (`js/api/terminal.js`), and the Moneris message format is a
+    SETTING, not code.** Config `terminal_type` = `clover` (default — existing installs are unchanged) |
+    `moneris` | `standalone` | `none`. `Terminal.mode()` is `auto` / `manual` / `off`; a selected but
+    unconfigured terminal is `off`. Moneris does **not publish** the Core Semi-Integrated wire format
+    (it ships with the merchant's integration package), so `moneris.js` builds requests from templates
+    and reads replies by configured positions, and `terminal.log` (userData, card numbers redacted)
+    records every exchange. **Do not hard-code a guessed format** — 1.4.11/1.4.12 were two releases of
+    guessing at Clover's payload before 1.4.13 read a real one. The TCP socket lives in `main.js`
+    (`terminal-socket` IPC, private IPv4 only, one exchange at a time). Any new driver must return the
+    same shapes: sale → `{ ok, paymentId, amount(cents), cardType, last4, card, result }`,
+    refund → `{ ok, refundId, amount, result }` — `payments.clover_payment_id` holds the reference for
+    whichever terminal took the payment (the column name is historical). Never read more than the last 4.
+
 ---
 
 ## What's Been Built (feature state)
@@ -181,8 +196,10 @@ pharmacy-pos/
 **Known limits (by design):**
 - Tied to WinRx for Rx lookup (other dispensing systems need new SQL mapping)
 - Tied to McKesson for ordering (other wholesalers need new integration)
-- Clover is the only INTEGRATED card terminal; others would use standalone/manual (a non-Clover
-  fallback was discussed but NOT implemented — user said leave Clover code untouched)
+- Card terminals (1.4.19): **Clover** is the only *verified* integrated terminal. **Standalone** mode
+  works with any device (staff confirm the payment). **Moneris Core Semi-Integrated** has transport,
+  settings, logging and tests but its message format is unconfirmed — no real terminal has been tried.
+  The Clover code path was left untouched, as the owner asked.
 - No DUR/drug-interaction checking; no auto-update
 
 **Open / not done:**
@@ -195,7 +212,77 @@ pharmacy-pos/
 
 ## Work Log (newest first — append new entries here)
 
-### 1.4.18 — (current)
+### 1.4.19 — (current)
+**Asked: "our Card Terminal is just for Clover — what if someone uses Moneris?"** then *"add an option
+for Core Semi-Integrated (V400c / V400m) … I have Clover but my friend has Moneris."*
+**⚠ `main.js` + `preload.js` changed (three new IPC handlers) → REBUILD REQUIRED.**
+- **The real gap was bigger than Moneris: a non-Clover pharmacy could not take a card payment at all.**
+  Debit, Credit and Manual Card Entry all went through `_runCloverPayment`, which stopped at *"The card
+  terminal is not set up"* when Clover was not configured. There was no "I ran it on my own terminal"
+  path. That is the parked non-Clover fallback from "Known limits".
+- **Settings → Card Terminal now starts with "which terminal?"** — Clover · Moneris Core
+  (Semi-Integrated) · Standalone terminal (any brand) · No card terminal. Config **`terminal_type`**,
+  default `clover`, so existing installs behave exactly as before. The Clover settings render
+  underneath unchanged (`_renderClover` is untouched; `_renderCardTerminal` wraps it).
+- **New `js/api/terminal.js`** — the one place the POS asks which terminal is in use. `mode()` =
+  `auto` / `manual` / `off`; a chosen-but-unconfigured terminal is `off`. Same result shape from every
+  driver, so the payment line, the saved record and the receipt card block need no vendor branches.
+- **Standalone terminal — works with ANY device, today.** Debit/Credit opens *"Run $X on your card
+  terminal"* with **✓ Approved — record payment** / **Declined / Cancel**; card type, last 4 and auth
+  code are optional and print through the existing `_cardBlock`. The last-4 box strips to 4 digits as
+  you type, so a pasted full card number never reaches the DB. Refund: a `confirm()` *before* any
+  record is created — Cancel leaves nothing behind.
+- **Moneris Core Semi-Integrated — transport real, message format CONFIGURABLE (Beta).** Moneris
+  documents the connection (terminal Listening Port, static IP, same LAN) but **does not publish the
+  message format**; two searches found only setup guides. So `js/api/moneris.js` does not hard-code a
+  guess: request templates (`{ecr}` `{amount}` `{ref}`), terminator, amount as dollars/cents, and the
+  reply's separator + field positions are boxes under **Message format**, with a live preview of the
+  exact bytes for a $13.50 sale. JSON replies are read automatically. Only an explicit
+  `APPROVED`/configured value counts as approved — a numeric code is never assumed to mean it.
+- **`main.js` `terminal-socket` IPC** (renderer cannot open TCP): connect → write → collect reply.
+  **Private IPv4 only** (cannot be pointed at the internet), one exchange at a time, overall timeout,
+  reply complete on close or after a silence gap. **A reply of ≤ N bytes is treated as an
+  acknowledgement** and waiting continues — terminals commonly ACK at once and answer after the card is
+  run; without this the ACK would be read as the result. `terminal-socket-cancel` stops waiting.
+- **`terminal.log` in userData** — every send/receive with **any 12–19 digit run reduced to its last 4**
+  and control bytes shown as `\xNN`. Path + Open folder on the Moneris page. Logging went in FIRST this
+  time: 1.4.11 and 1.4.12 were both spent guessing at Clover's payload before a log existed.
+- **A reply the POS cannot read must not cause a double charge.** If the Moneris exchange fails after
+  the card may have been run (bad format, timeout, dropped connection) the till says *check the
+  terminal* and offers **Terminal shows APPROVED — record it**, which opens the standalone confirmation
+  instead of leaving "try again" as the only way forward. Cancel only stops the POS waiting — it tells
+  staff to press Cancel on the terminal too, because no cancel message is documented.
+- **Clover path: 5 pre-existing lines of `pos.js` changed**, all verified by `git diff`: the refund
+  guard gained `terminalType === 'clover' &&`, and four wording lines became terminal-aware (they read
+  identically when Clover is selected). Non-Clover terminals leave `_runCloverPayment` on its first
+  lines, before any Clover call. `clover.js` and `clover-local-pay/server.js` are untouched.
+- Till: "No card terminal" hides Debit/Credit; Manual Card Entry shows only where the POS can ask the
+  terminal for keyed entry. `SettingsHealth` follows the selected terminal (standalone needs no setup;
+  "none" is a choice, not a fault). Four `SETTINGS_SEARCH` entries; `Settings → Card Terminal` links now
+  land on `#term-type`.
+- **Tests — `node tests/terminal.test.js` (111 assertions)**: facade defaults and routing (Clover gets
+  exactly the calls it always did), unconfigured = off, Moneris request building and reply parsing
+  (separated + JSON, full PAN cut to last 4, garbage/short/empty never approved), sale/refund/decline/
+  timeout/cancel through a stubbed socket, and the **real socket code lifted from `main.js`** against a
+  throwaway TCP server on 127.0.0.1: echo, ACK-then-result (and what happens with ACK handling off),
+  redaction, timeout, refused, close-without-reply, connect-only, cancel, and the address allow-list.
+- Caught by writing the test, not by the test passing: the page told users to type `\\x02` / `\\x03` in a
+  template, but only the *terminator* was unescaped — and my first assertion expected the literal
+  backslash text, so it passed on the bug. The template is now unescaped before values are substituted.
+  (Third time this project: when a new test passes or fails, check the expectation as well as the code.)
+- **NOT VERIFIED AGAINST A REAL MONERIS TERMINAL.** The default templates are placeholders, not
+  Moneris's format. The friend's pharmacy should run on **Standalone** until their integration document
+  is in hand; then it is a settings job, and the log shows what to enter. If the real protocol needs
+  framing this cannot express (e.g. an LRC checksum byte), `moneris.js` needs a small code change —
+  that is the first thing to check in the log.
+- **Known limit:** the POS does not record WHICH terminal took a payment, so after switching terminal
+  type a refund of an older card sale sends the old terminal's reference to the new one. Refund those on
+  the device by hand (Standalone does this anyway).
+- Not exercised on Windows — the Card Terminal page, the standalone confirmation and both refund prompts.
+- `?v=`: `version.js`(24), `settings-health.js`(4), `pos.js`(89), `settings.js`(65); new `moneris.js`(1),
+  `terminal.js`(1).
+
+### 1.4.18
 **Asked: "where do we see the item number, can we add pagination, and tags/category other than BTC?"**
 All three were missing. No `main.js`/`preload.js` change.
 - **Item number was invisible.** It appeared only in the grey bar at the top of the Edit card, for

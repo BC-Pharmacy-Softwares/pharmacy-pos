@@ -126,7 +126,7 @@ off…). A grey **○ / •** only means an optional feature isn't set up yet.
 |---------|-------|
 | 🏪 **My Pharmacy** | Business Details & Branding · Date & Time |
 | 👥 **Staff & Pharmacists** *(Admin)* | Staff, PINs, License #, signatures |
-| 💳 **Card Terminal** *(Admin)* | Clover device and pairing |
+| 💳 **Card Terminal** *(Admin)* | Which terminal you use (Clover, Moneris, or any standalone terminal) and its setup |
 | 🔗 **WinRx & McKesson** | WinRx Connection · McKesson Login *(Admin)* · Catalog Sync |
 | 🛒 **Products & Checkout** | Products · Quick Action Buttons · Barcode Scanning |
 | 🖨️ **Printing** | Receipt Printer · Receipt Design · Shelf Tags · Name Tags |
@@ -204,7 +204,33 @@ Click **Test Connection** → should say Connected → **Save**.
 
 ### 4e. Card Terminal *(Admin only)*
 
-**Clover — Network Pay Display** (skip if you don't use Clover):
+Start by choosing **which terminal takes card payments at this till** (since v1.4.19):
+
+| Choice | What it means |
+|--------|---------------|
+| **Clover** | The POS sends the amount to the Clover device and waits for approval. Set up below. |
+| **Moneris Core (Semi-Integrated)** | V400c / V400m countertop terminal over Ethernet, USB or Wi-Fi. **Beta** — see below. |
+| **Standalone terminal (any brand)** | Works with *any* terminal. The POS does not talk to it: staff key the amount into the terminal, the customer pays, staff confirm **Approved** in the POS. Nothing to set up. |
+| **No card terminal** | Debit / Credit / Manual Card Entry are hidden at the till. |
+
+**Standalone terminal.** At the till choose Debit or Credit → **Add Payment** → run the amount on the
+terminal → click **✓ Approved — record payment** only once the terminal shows APPROVED. Card type,
+last 4 digits and auth code are optional and print on the receipt. For a refund the POS asks you to
+refund the card on the terminal and saves the record once you confirm. Card totals in the POS
+reports are what staff confirmed — compare them with the terminal's own batch report at close.
+
+**Moneris Core — Semi-Integrated (Beta).** On the terminal: switch on Semi-Integrated integration,
+note the **Listening Port**, and give the terminal a **static IP address** on the same network as
+the POS computer. In the POS enter the terminal IP, the port and a till ID, then **Test connection**
+(this takes no payment). Moneris does not publish the message format the terminal expects — it comes
+with your integration package from Moneris — so the request and reply layout are boxes under
+**Message format**, not something built in. Fill them in from that document, run a small test sale,
+and open the **Terminal log** (`terminal.log`, card numbers removed) to see exactly what the terminal
+replied. If the terminal approves a card but the POS cannot read the reply, the till offers
+**Terminal shows APPROVED — record it** so the customer is never charged twice. Until the format is
+confirmed, use **Standalone terminal** with the same device.
+
+**Clover — Network Pay Display** (when Clover is the chosen terminal):
 
 | Field | Where to find it | Example |
 |-------|-----------------|---------|
@@ -340,7 +366,7 @@ Click **Charge Patient**. Choose a method:
 | Method | Behaviour |
 |--------|-----------|
 | **Cash** | Enter tendered amount → shows change (with 5¢ rounding) |
-| **Debit / Credit** | Sends amount to the Clover terminal, waits for approval |
+| **Debit / Credit** | Sends amount to the card terminal (Clover / Moneris) and waits for approval — or, with a standalone terminal, asks you to run the card and confirm |
 | **Manual Card Entry** | Card-not-present — staff key the card number on the Clover device |
 | **Insurance** | Records an insurance payment |
 | **AR (Account)** | Charges to the patient's account (requires a linked patient) |
@@ -767,4 +793,4 @@ Copy it from the old account to the new one.
 
 ---
 
-*Pharmacy POS — User & Setup Guide · v1.4.16*
+*Pharmacy POS — User & Setup Guide · v1.4.19*

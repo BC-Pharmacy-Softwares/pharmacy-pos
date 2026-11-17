@@ -41,6 +41,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveCloverEnv: (vals) => ipcRenderer.invoke('save-clover-env', vals),
   /** Where the Clover bridge writes its log — { path, dir, exists } */
   getCloverLogPath: () => ipcRenderer.invoke('get-clover-log-path'),
+  /** Card-terminal socket (Moneris): { host, port, data|null, timeoutMs, idleMs, ackMaxLen, label }
+      → { ok, data?, message?, cancelled? }. Local-network addresses only. */
+  terminalSocket: (opts) => ipcRenderer.invoke('terminal-socket', opts),
+  /** Stop waiting on the terminal exchange in progress — returns { ok } */
+  terminalSocketCancel: () => ipcRenderer.invoke('terminal-socket-cancel'),
+  /** Where the terminal socket writes its log — { path, dir, exists } */
+  getTerminalLogPath: () => ipcRenderer.invoke('get-terminal-log-path'),
 
   /** Open the native folder picker — returns { ok, path?, canceled? } */
   pickFolder: (current) => ipcRenderer.invoke('pick-folder', { current }),

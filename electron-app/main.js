@@ -18,6 +18,7 @@ const http       = require('http');
 const fs         = require('fs');
 const nodemailer = require('nodemailer');
 const { spawn }  = require('child_process');
+const net        = require('net');
 
 let mainWindow    = null;
 let server        = null;
@@ -32,6 +33,138 @@ let cloverProcess = null;
    reinstalls and is writable in a packaged app. Shown in Settings -> Card Terminal. */
 function getCloverLogPath() {
   return path.join(app.getPath('userData'), 'clover-bridge.log');
+}
+
+/* ------------------------------------------------------------------
+   Generic card-terminal socket (1.4.19) — used by the Moneris Core
+   Semi-Integrated driver (js/api/moneris.js). The renderer cannot open a
+   TCP socket, so it asks here: connect, write one request, collect the reply.
+
+   Everything sent and received is appended to terminal.log in userData
+   with card numbers redacted, because Moneris does not publish the message
+   format and the log is how the first real transaction reveals it.
+------------------------------------------------------------------ */
+function getTerminalLogPath() {
+  return path.join(app.getPath('userData'), 'terminal.log');
+}
+
+/* TERMINAL-SOCKET-BEGIN  (tests/terminal-socket.test.js extracts this block) */
+
+/* Terminals live on the pharmacy's own network. Refusing anything that is not
+   a private IPv4 address means this channel can never be pointed at the
+   internet, whatever ends up in the settings box. */
+function isPrivateIPv4(host) {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(String(host || '').trim());
+  if (!m) return false;
+  const o = m.slice(1).map(Number);
+  if (o.some(n => n > 255)) return false;
+  return o[0] === 10 || o[0] === 127 ||
+         (o[0] === 172 && o[1] >= 16 && o[1] <= 31) ||
+         (o[0] === 192 && o[1] === 168) ||
+         (o[0] === 169 && o[1] === 254);
+}
+
+/* Never let a card number reach the log: any run of 12-19 digits keeps only
+   its last 4. Control bytes are shown as \xNN so framing is visible. */
+function redactForTerminalLog(text) {
+  return String(text ?? '')
+    .replace(/\d{12,19}/g, d => '[card ****' + d.slice(-4) + ']')
+    .replace(/[\x00-\x1f\x7f]/g, c => '\\x' + c.charCodeAt(0).toString(16).padStart(2, '0'));
+}
+
+/* Connect, optionally write `data`, and collect the reply.
+   The reply is considered complete when the terminal closes the socket, or
+   after `idleMs` of silence once something has arrived. A reply of at most
+   `ackMaxLen` bytes is treated as a bare acknowledgement (terminals commonly
+   ACK at once and answer after the card is run) and waiting continues.
+   Resolves — never rejects — with { ok, data?, message?, cancelled? }.
+   `hooks.onSocket` receives the live socket so a caller can cancel it.     */
+function terminalSocketExchange(netLib, opts, log, hooks) {
+  const host      = String(opts.host || '').trim();
+  const port      = parseInt(opts.port, 10);
+  const timeoutMs = Math.min(Math.max(parseInt(opts.timeoutMs, 10) || 120000, 1000), 300000);
+  const idleMs    = Math.min(Math.max(parseInt(opts.idleMs, 10) || 800, 100), 10000);
+  const ackMaxLen = Math.max(parseInt(opts.ackMaxLen, 10) || 0, 0);
+  const label     = String(opts.label || 'terminal');
+  const say       = (line) => { try { log(`[${label}] ${line}`); } catch (_) {} };
+
+  return new Promise((resolve) => {
+    if (!isPrivateIPv4(host)) {
+      say(`refused: "${host}" is not a local network address`);
+      return resolve({ ok: false, message: 'The terminal address must be a local network IP address, e.g. 192.168.0.50.' });
+    }
+    if (!(port > 0 && port < 65536)) {
+      say(`refused: bad port "${opts.port}"`);
+      return resolve({ ok: false, message: 'The terminal port must be a number between 1 and 65535.' });
+    }
+
+    let done = false, buf = '', idleTimer = null;
+    const sock = new netLib.Socket();
+    const finish = (result) => {
+      if (done) return;
+      done = true;
+      clearTimeout(overall); clearTimeout(idleTimer);
+      try { sock.destroy(); } catch (_) {}
+      resolve(result);
+    };
+    const overall = setTimeout(() => {
+      say(`timeout after ${timeoutMs}ms` + (buf ? ` — partial reply: ${redactForTerminalLog(buf)}` : ' — no reply'));
+      finish({ ok: false, message: 'The terminal did not answer in time. Check the transaction on the terminal before retrying.' });
+    }, timeoutMs);
+
+    if (hooks && typeof hooks.onSocket === 'function') {
+      hooks.onSocket({ cancel: () => { say('cancelled by the POS'); finish({ ok: false, cancelled: true, message: 'Cancelled' }); } });
+    }
+
+    sock.once('error', (err) => {
+      say(`error: ${err.code || ''} ${err.message}`);
+      const msg = err.code === 'ECONNREFUSED' ? 'The terminal refused the connection — check the port, and that integration is switched on at the terminal.'
+                : err.code === 'EHOSTUNREACH' || err.code === 'ENETUNREACH' || err.code === 'ETIMEDOUT'
+                  ? 'The terminal could not be reached — check its IP address and that it is on the same network.'
+                : `Terminal connection failed: ${err.message}`;
+      finish({ ok: false, message: msg });
+    });
+
+    sock.connect(port, host, () => {
+      say(`connected ${host}:${port}`);
+      if (opts.data === null || opts.data === undefined) {
+        return finish({ ok: true, data: '' });               // connection test only
+      }
+      say(`SEND ${redactForTerminalLog(opts.data)}`);
+      sock.write(String(opts.data), 'latin1');
+    });
+
+    sock.on('data', (chunk) => {
+      buf += chunk.toString('latin1');
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        if (buf.length <= ackMaxLen) {
+          say(`ACK  ${redactForTerminalLog(buf)} — still waiting for the result`);
+          buf = '';
+          return;
+        }
+        say(`RECV ${redactForTerminalLog(buf)}`);
+        finish({ ok: true, data: buf });
+      }, idleMs);
+    });
+
+    sock.once('close', () => {
+      if (done) return;
+      if (buf) { say(`RECV ${redactForTerminalLog(buf)} (terminal closed the connection)`); finish({ ok: true, data: buf }); }
+      else     { say('terminal closed the connection without replying'); finish({ ok: false, message: 'The terminal closed the connection without replying.' }); }
+    });
+  });
+}
+/* TERMINAL-SOCKET-END */
+
+let activeTerminalExchange = null;
+
+function appendTerminalLog(line) {
+  try {
+    const p = getTerminalLogPath();
+    try { if (fs.statSync(p).size > 2 * 1024 * 1024) fs.writeFileSync(p, ''); } catch (_) {}
+    fs.appendFileSync(p, `${new Date().toISOString()} ${line}\n`, 'utf8');
+  } catch (_) {}
 }
 
 function startCloverBridge() {
@@ -506,6 +639,34 @@ function registerIpcHandlers() {
   ipcMain.handle('get-clover-log-path', () => {
     try {
       const p = getCloverLogPath();
+      return { path: p, dir: path.dirname(p), exists: fs.existsSync(p) };
+    } catch (e) { return { path: null, dir: null, exists: false, error: e.message }; }
+  });
+
+  /* Card-terminal socket for non-Clover drivers (Moneris). One exchange at a
+     time: a terminal can only run one card, and a second request while one is
+     pending is always a mistake. */
+  ipcMain.handle('terminal-socket', async (_, opts) => {
+    if (activeTerminalExchange) {
+      return { ok: false, message: 'The terminal is already busy with another transaction.' };
+    }
+    try {
+      return await terminalSocketExchange(net, opts || {}, appendTerminalLog, {
+        onSocket: (h) => { activeTerminalExchange = h; },
+      });
+    } finally {
+      activeTerminalExchange = null;
+    }
+  });
+
+  ipcMain.handle('terminal-socket-cancel', () => {
+    if (activeTerminalExchange) { activeTerminalExchange.cancel(); return { ok: true }; }
+    return { ok: false };
+  });
+
+  ipcMain.handle('get-terminal-log-path', () => {
+    try {
+      const p = getTerminalLogPath();
       return { path: p, dir: path.dirname(p), exists: fs.existsSync(p) };
     } catch (e) { return { path: null, dir: null, exists: false, error: e.message }; }
   });

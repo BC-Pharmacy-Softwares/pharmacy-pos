@@ -1174,9 +1174,53 @@ class POSScreen {
       );
       const hasClover = !!cardPayment?.clover_payment_id;
 
+      // 1.4.19 — the refund goes to whichever terminal is in use NOW. The
+      // Clover block below is unchanged and only runs when that is Clover.
+      const terminalType = await Terminal.type();
+      const terminalMode = await Terminal.mode();
+
       try {
+        // ── Step 1a: non-Clover terminals ───────────────────────────────
+        if (terminalType !== 'clover' && cardPayment && refundAmtCents > 0) {
+          const refundAmt = Tax.fmt(refundAmtCents / 100);
+          if (terminalMode === 'auto') {
+            confirmBtn.textContent = 'Sending refund to terminal…';
+            try {
+              await Terminal.refund(refundAmtCents, cardPayment.clover_payment_id || null);
+              confirmBtn.textContent = '✓ Card refunded — saving record…';
+            } catch (termErr) {
+              // The terminal may or may not have refunded. Do not guess: ask.
+              const done = confirm(
+                `The terminal did not confirm the ${refundAmt} card refund:\n\n${termErr.message}\n\n` +
+                `Check the terminal. Click OK only if the refund WAS completed there (or you have now done it by hand) — ` +
+                `the refund record will be saved.\nClick Cancel to stop without saving anything.`);
+              if (!done) {
+                errEl.style.display    = 'block';
+                errEl.textContent      = 'Refund stopped. No record created.';
+                confirmBtn.disabled    = false;
+                confirmBtn.textContent = 'Process Refund';
+                return;
+              }
+            }
+          } else {
+            // Standalone / no terminal: the POS cannot send the refund, so the
+            // record is only saved once staff confirm they did it on the device.
+            const done = confirm(
+              `Refund ${refundAmt} to the customer's card on your card terminal now.\n\n` +
+              `Click OK once the terminal shows the refund APPROVED.\n` +
+              `Click Cancel to stop without saving anything.`);
+            if (!done) {
+              errEl.style.display    = 'block';
+              errEl.textContent      = 'Refund stopped. No record created.';
+              confirmBtn.disabled    = false;
+              confirmBtn.textContent = 'Process Refund';
+              return;
+            }
+          }
+        }
+
         // ── Step 1: Clover terminal refund (if card was used) ──────────
-        if (cardPayment && refundAmtCents > 0) {
+        if (terminalType === 'clover' && cardPayment && refundAmtCents > 0) {
           confirmBtn.textContent = hasClover
             ? 'Sending to Clover terminal…'
             : 'Manual card refund — processing…';
@@ -1800,6 +1844,29 @@ class POSScreen {
 
     document.body.appendChild(modal);
 
+    /* 1.4.19 — show only the card buttons this pharmacy's terminal can serve.
+       "No card terminal" hides Debit / Credit; Manual Card Entry is offered
+       only where the POS can ask the terminal for keyed entry (on a standalone
+       terminal staff simply key the card on the device and use Credit). */
+    (async () => {
+      try {
+        const tType = await Terminal.type();
+        const tCaps = await Terminal.caps();
+        const tLabel = await Terminal.shortLabel();
+        modal._termShort = tLabel;
+        modal._termMode  = Terminal.info(tType).mode;
+        const btnOf = m => modal.querySelector(`.payment-method-btn[data-method="${m}"]`);
+        if (tType === 'none') {
+          ['DEBIT', 'CREDIT'].forEach(m => { const b = btnOf(m); if (b) b.style.display = 'none'; });
+        }
+        const manualBtn = btnOf('MANUAL_ENTRY');
+        if (manualBtn) {
+          if (!tCaps.manualEntry) manualBtn.style.display = 'none';
+          else manualBtn.title = `Card not present — staff enters the card number on the ${tLabel} terminal`;
+        }
+      } catch (_) { /* leave every button visible rather than hide one wrongly */ }
+    })();
+
     /* ── Helpers ──────────────────────────────────────────────── */
     const close = () => { if (modal.parentNode) document.body.removeChild(modal); };
 
@@ -1946,11 +2013,17 @@ class POSScreen {
         modal.querySelector('#pm-entry').style.display       = 'block';
         modal.querySelector('#pm-cash-extras').style.display = isCash      ? 'block' : 'none';
         modal.querySelector('#pm-clover-hint').style.display = isCloverAny ? 'block' : 'none';
-        modal.querySelector('#pm-clover-hint').textContent   = isManualEntry
-          ? 'Card not present — staff will enter card number on the Clover device.'
-          : 'Tap Add & Send to Clover to charge this amount on the terminal.';
+        // Wording follows the terminal in use (1.4.19). With Clover selected
+        // these read exactly as they always have.
+        const termName   = modal._termShort || 'Clover';
+        const termManual = modal._termMode === 'manual';
+        modal.querySelector('#pm-clover-hint').textContent   = termManual
+          ? 'Tap Add Payment, then run this amount on your card terminal and confirm.'
+          : isManualEntry
+          ? `Card not present — staff will enter card number on the ${termName} device.`
+          : `Tap Add & Send to ${termName} to charge this amount on the terminal.`;
         modal.querySelector('#pm-add-btn').textContent       =
-          isCloverAny ? 'Add & Send to Clover' : 'Add Payment';
+          !isCloverAny || termManual ? 'Add Payment' : `Add & Send to ${termName}`;
 
         if (isCash) {
           modal.querySelector('#pm-tendered').value = '';
@@ -2064,6 +2137,15 @@ class POSScreen {
      In single-payment mode (no callback): takes over the whole modal and closes on success. */
   async _runCloverPayment(modal, totals, method, close, onSuccess = null,
                           cardEntryMethods = CloverAPI.CARD_ENTRY.ALL) {
+    /* 1.4.19 — which terminal is this? Anything that is not Clover is handled
+       by its own method and returns here, so the Clover code below is exactly
+       what it was before other terminals existed. */
+    const terminalType = await Terminal.type();
+    if (terminalType !== 'clover') {
+      const isManualEntry = cardEntryMethods === CloverAPI.CARD_ENTRY.MANUAL;
+      return this._runOtherTerminalPayment(modal, totals, onSuccess, isManualEntry);
+    }
+
     const configured = await CloverAPI.isConfigured();
     const errTarget  = modal.querySelector('#pm-error') || modal.querySelector('#payment-error');
 
@@ -2216,6 +2298,181 @@ class POSScreen {
           '<button class="btn btn-outline" id="clover-back">Close</button>';
         modal.querySelector('#clover-back').addEventListener('click', close);
       }
+    }
+  }
+
+  /* ── Non-Clover terminals (1.4.19) ─────────────────────────────────────
+     Reached from _runCloverPayment when Settings → Card Terminal is not Clover.
+       manual — "Standalone terminal": the POS does not talk to the device.
+                Staff run the card there and confirm here.
+       auto   — Moneris: the POS sends the amount and waits for the reply.
+       off    — nothing set up (or "No card terminal").
+     Both paths finish by calling onSuccess(result) with the SAME result shape
+     the Clover path produces, so the payment line, the saved record and the
+     receipt card block need no vendor-specific code.                        */
+  async _runOtherTerminalPayment(modal, totals, onSuccess, isManualEntry) {
+    const errTarget = modal.querySelector('#pm-error') || modal.querySelector('#payment-error');
+    const mode = await Terminal.mode();
+
+    if (mode === 'off') {
+      if (errTarget) {
+        errTarget.style.display = 'block';
+        errTarget.innerHTML     = SettingsLink.linkify('The card terminal is not set up. Go to Settings → Card Terminal.');
+      }
+      return;
+    }
+    if (typeof onSuccess !== 'function') return;
+    if (mode === 'manual') return this._runStandaloneCardPayment(totals, onSuccess);
+    return this._runAutoTerminalPayment(totals, onSuccess, isManualEntry);
+  }
+
+  /* Standalone terminal: staff key the amount into their own device, run the
+     card, and tell the POS it was approved. Card type / last 4 / auth code are
+     optional — they print on the receipt when given.
+     `afterFailure` is set when this opens as the fallback for an integrated
+     terminal whose reply could not be read (see _runAutoTerminalPayment).   */
+  _runStandaloneCardPayment(totals, onSuccess, afterFailure = false) {
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.style.cssText = 'background:rgba(0,0,0,.6);z-index:10001;';
+    overlay.innerHTML = `
+      <div class="modal" style="max-width:420px;">
+        <div class="modal-body" style="padding:24px 22px;">
+          <div style="text-align:center;">
+            <div style="font-size:40px;margin-bottom:6px;">&#128179;</div>
+            <div style="font-size:13px;color:var(--text-muted);">
+              ${afterFailure ? 'Record a payment the terminal already approved' : 'Run this amount on your card terminal'}
+            </div>
+            <div style="font-size:34px;font-weight:800;margin:4px 0 14px;">${Tax.fmt(totals.total_amount)}</div>
+          </div>
+          <div class="alert alert-info" style="font-size:12px;margin-bottom:14px;">
+            ${afterFailure
+              ? 'Only continue if the terminal itself shows <strong>APPROVED</strong> for this amount. This records the payment — it does not charge the card again.'
+              : 'The POS is not connected to this terminal. Enter the amount on the terminal, let the customer pay, then confirm below <strong>only once the terminal shows APPROVED</strong>.'}
+          </div>
+          <div style="display:grid;grid-template-columns:1.4fr 1fr 1.2fr;gap:10px;">
+            <div class="form-group" style="margin:0;">
+              <label>Card <span style="font-weight:400;color:var(--text-muted);">(optional)</span></label>
+              <select id="sa-card">
+                <option value="">—</option>
+                <option>Interac</option><option>Visa</option><option>Mastercard</option>
+                <option>Amex</option><option>Other</option>
+              </select>
+            </div>
+            <div class="form-group" style="margin:0;">
+              <label>Last 4</label>
+              <input type="text" id="sa-last4" inputmode="numeric" maxlength="4" placeholder="1234" style="font-family:monospace;" />
+            </div>
+            <div class="form-group" style="margin:0;">
+              <label>Auth code</label>
+              <input type="text" id="sa-auth" maxlength="12" placeholder="optional" style="font-family:monospace;" />
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer" style="justify-content:space-between;">
+          <button class="btn btn-outline btn-danger" id="sa-cancel">Declined / Cancel</button>
+          <button class="btn btn-primary" id="sa-ok" style="font-weight:700;">&#10003; Approved — record payment</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const closeOver = () => { if (overlay.parentNode) document.body.removeChild(overlay); };
+
+    // Only the last four digits are ever kept — a pasted full card number is
+    // cut down before it can reach the database or the receipt.
+    const last4El = overlay.querySelector('#sa-last4');
+    last4El.addEventListener('input', () => {
+      last4El.value = last4El.value.replace(/\D/g, '').slice(-4);
+    });
+
+    overlay.querySelector('#sa-cancel').addEventListener('click', closeOver);
+    overlay.querySelector('#sa-ok').addEventListener('click', () => {
+      const cardType = overlay.querySelector('#sa-card').value || null;
+      const last4    = last4El.value.replace(/\D/g, '').slice(-4) || null;
+      const authCode = overlay.querySelector('#sa-auth').value.trim().slice(0, 12) || null;
+      closeOver();
+      onSuccess({
+        ok: true,
+        paymentId: null,                       // nothing links this to the device
+        amount: Math.round(totals.total_amount * 100),
+        cardType, last4,
+        card: (cardType || last4 || authCode) ? { cardType, last4, authCode } : null,
+        result: 'APPROVED',
+        standalone: true,
+      });
+    });
+    overlay.querySelector('#sa-ok').focus();
+  }
+
+  /* Integrated non-Clover terminal (Moneris): send the amount, wait. */
+  async _runAutoTerminalPayment(totals, onSuccess, isManualEntry) {
+    const label      = await Terminal.shortLabel();
+    const externalId = Date.now().toString(36);
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.style.cssText = 'background:rgba(0,0,0,.6);z-index:10001;';
+    overlay.innerHTML = `
+      <div class="modal" style="max-width:380px;text-align:center;">
+        <div class="modal-body" style="padding:28px 20px;">
+          <div style="font-size:44px;margin-bottom:10px;">&#128179;</div>
+          <div style="font-size:22px;font-weight:700;margin-bottom:4px;">${Tax.fmt(totals.total_amount)}</div>
+          <div id="tv-msg" style="font-size:14px;color:var(--text-muted);margin-bottom:18px;">Sending to terminal…</div>
+          <div id="tv-spinner"><span class="spinner"></span></div>
+        </div>
+        <div class="modal-footer" id="tv-footer" style="justify-content:center;gap:8px;flex-wrap:wrap;">
+          <button class="btn btn-outline btn-danger" id="tv-cancel">Cancel</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const setMsg    = msg => { const el = overlay.querySelector('#tv-msg'); if (el) el.textContent = msg; };
+    const closeOver = ()  => { if (overlay.parentNode) document.body.removeChild(overlay); };
+    const controller = new AbortController();
+    let cancelled = false;
+
+    overlay.querySelector('#tv-cancel').addEventListener('click', async () => {
+      cancelled = true;
+      controller.abort();
+      await Terminal.cancel();
+      // The POS can only stop waiting — it cannot clear the terminal's prompt.
+      alert(`Stopped waiting for the ${label} terminal.\n\nIf it is still asking for a card, press Cancel on the terminal itself.`);
+      closeOver();
+    });
+
+    try {
+      setMsg(isManualEntry
+        ? `Key the card number on the ${label} terminal…`
+        : 'Waiting for customer — tap, insert, or swipe…');
+      const opts   = await Terminal.cardEntryOpts(isManualEntry);
+      const result = await Terminal.sale(Math.round(totals.total_amount * 100), externalId, controller.signal, opts);
+      if (cancelled) return;
+      overlay.querySelector('#tv-spinner').innerHTML =
+        '<span style="font-size:36px;color:var(--success);">&#10003;</span>';
+      setMsg('Payment approved!');
+      setTimeout(() => { closeOver(); onSuccess(result); }, 900);
+    } catch (e) {
+      if (cancelled || e.name === 'AbortError') return;
+      /* The terminal may have APPROVED the card even though the POS could not
+         read its reply (wrong message format, dropped connection, timeout).
+         Charging again would double-charge the customer, so staff are offered
+         a way to record what the terminal shows instead of only "Close". */
+      overlay.querySelector('#tv-spinner').innerHTML =
+        '<span style="font-size:28px;color:var(--warning);">&#9888;</span>';
+      const msgEl = overlay.querySelector('#tv-msg');
+      if (msgEl) {
+        msgEl.innerHTML = '';
+        msgEl.appendChild(document.createTextNode(`${label}: ${e.message}`));
+        const hint = document.createElement('div');
+        hint.style.cssText = 'margin-top:10px;font-size:12px;';
+        hint.textContent = 'Check the terminal before trying again — if it shows APPROVED, record the payment instead of charging twice.';
+        msgEl.appendChild(hint);
+      }
+      overlay.querySelector('#tv-footer').innerHTML = `
+        <button class="btn btn-outline" id="tv-close">Close</button>
+        <button class="btn btn-primary" id="tv-record">Terminal shows APPROVED — record it</button>`;
+      overlay.querySelector('#tv-close').addEventListener('click', closeOver);
+      overlay.querySelector('#tv-record').addEventListener('click', () => {
+        closeOver();
+        this._runStandaloneCardPayment(totals, onSuccess, true);
+      });
     }
   }
 
