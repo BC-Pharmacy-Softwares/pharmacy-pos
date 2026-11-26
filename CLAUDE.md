@@ -29,8 +29,14 @@ is a Mac (this repo). **Claude cannot run the app** — the user tests on Window
   `.github/workflows/release.yml` on a Windows runner: it checks the tag matches `js/version.js` +
   `electron-app/package.json`, downloads `lib/` (git-ignored), `npm ci`s both packages, builds the
   **Setup exe only**, and publishes the GitHub Release that **Settings → About & Updates → Check for
-  Updates** reads. So a release from the Mac is: bump both version files → commit → push `main` →
-  `git tag v<ver> && git push origin v<ver>`. `BUILD-WINDOWS.bat` still works as a manual fallback.
+  Updates** reads. So a release from the Mac is: bump both version files → **update the README banner
+  + footer version** → commit → push `main` → `git tag v<ver> && git push origin v<ver>`.
+  `BUILD-WINDOWS.bat` still works as a manual fallback.
+  **Don't skip the tag.** 1.4.20 was committed, versioned and documented but never tagged, so the
+  workflow never ran and `/releases/latest` served 1.4.19 — including to the in-app updater — until it
+  was noticed weeks later. A release that is not tagged did not happen.
+  **The link to give anyone who needs the app:**
+  `https://github.com/BC-Pharmacy-Softwares/pharmacy-pos/releases/latest` (always the newest).
 - **Claude is on Mac, cannot run/preview the app.** Ignore "preview server" hook nudges — verify by `node --check` on edited JS files instead.
 - After editing any `js/*.js`, **bump its `?v=N` query string in `index.html`** so the app doesn't serve a cached old copy.
 
@@ -42,7 +48,7 @@ is a Mac (this repo). **Claude cannot run the app** — the user tests on Window
 - **Must stay in sync with** `electron-app/package.json` `"version"` (that names the installer `.exe`).
 - Shown in-app on the **login screen** and **Settings top-right**.
 - Scheme: `MAJOR.MINOR.PATCH`. Most builds = PATCH bump.
-- **Current version: 1.4.20**
+- **Current version: 1.4.21**
 - When making a build, bump both files and note it in the Work Log below.
 
 ---
@@ -220,7 +226,37 @@ pharmacy-pos/
 
 ## Work Log (newest first — append new entries here)
 
-### 1.4.20 — (current)
+### 1.4.21 — (current)
+**New brand icon.** Owner supplied the new logo (plum rounded square, gold **R**, white figure).
+**⚠ Icon is baked into the exe → REBUILD/RELEASE REQUIRED** — no JS logic changed, so nothing else moves.
+- **The artwork arrived on a WHITE background, not transparent.** Pasting it straight in would have put
+  white corners around the rounded square on every dark taskbar and in the Start menu. New
+  **`electron-app/make-icon.py`** crops to the artwork, then **floods from the border** to find only the
+  white that is OUTSIDE the rounded square — the white figure inside the logo is not connected to the
+  edge, so it survives — feathers that boundary by how white each edge pixel is (no jagged corner), pads
+  to a perfect square (324×324 after the crop) and writes the ICO.
+- **Still a real multi-size ICO with a 256 frame** (16/32/48/64/128/256) — gotcha 7: electron-builder
+  fails without 256, and PIL writes the large frames PNG-compressed.
+- **Source art and the script are now IN the repo** (`electron-app/icon-source.png`, `make-icon.py`), so
+  the icon can be rebuilt without going back to a chat screenshot. Regenerate with
+  `python3 make-icon.py icon-source.png icon.ico` from `electron-app/`.
+- Verified by rendering the built ICO over white AND over near-black: corner alpha 0 on all four corners,
+  edge pixels opaque plum, no white halo, all six frames present. Not yet seen on a real Windows taskbar.
+- **Brand colours, for anything else that needs them:** plum **#3C1E43** (the icon's background is
+  actually a gradient #311C38 → #402046), gold **#F2B23E**, white. **Gold is ~1.9:1 on white — never use
+  it for text on a light background**, only as an accent. The in-app **Brand Kit** (Settings → Business
+  Details) is still the old green and was NOT changed — that is a settings job, no rebuild, and it only
+  shows on colour output (name badges, A5 docs) since thermal receipts print monochrome.
+- **README was three releases stale** (owner spotted it): the banner still said **1.4.16** while the app
+  was 1.4.20, and §2 told people to look for `Pharmacy POS Setup 1.4.16.exe` — a filename that has not
+  existed since. Banner and footer now say 1.4.21, the installer is referred to as
+  `Pharmacy POS Setup <version>.exe`, and **both spots now link to `/releases/latest`**, which never goes
+  stale. The historical version references (1.4.10 / 1.4.13 / 1.4.19 "since version X" notes) are
+  deliberately left alone — those are facts about when a behaviour changed. **Release steps below now
+  include the README**, which is how it drifted in the first place.
+- `?v=`: `version.js`(26). No other `js/` file changed.
+
+### 1.4.20
 **Reported (screenshot): Accounts Receivable — `WinRx unavailable: API error 500: {"error":"Connection is
 closed."}`.** **⚠ `main.js` changed → REBUILD REQUIRED.**
 - **ROOT CAUSE — "Test Connection" closed the live WinRx connection.** The app connected with mssql's
